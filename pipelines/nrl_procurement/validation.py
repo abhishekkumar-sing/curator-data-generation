@@ -8,8 +8,50 @@ from typing import Any
 
 from rapidfuzz.fuzz import token_set_ratio
 
-NUMBER = re.compile(r"(?<!\w)(?:₹|Rs\.?\s*)?\d[\d,.]*(?:\s*%|\s+\w+)?", re.IGNORECASE)
+# Keep the numeric core separate from prose. The previous ``\s+\w+`` suffix
+# swallowed arbitrary words (for example, ``2019 Manual``), turning ordinary
+# document-version metadata into a fabricated "unit".
+NUMBER = re.compile(
+    r"""(?<!\w)
+    (?P<prefix>₹|Rs\.?\s*)?
+    (?P<value>\d[\d,.]*(?:/\d[\d,.]*)?)
+    (?:\s*\([^)]{1,24}\))?
+    (?P<unit>
+        \s*(?:%|per\s+cent|percent|percentage|
+        days?|weeks?|months?|years?|hours?|minutes?|
+        crores?|lakhs?|millions?|billions?)
+    )?
+    (?!\w)
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
 QUALIFIERS = {"must", "shall", "may", "not", "except", "unless", "only", "subject to"}
+
+
+def _canonical_unit(unit: str) -> str:
+    normalized = " ".join(unit.lower().split())
+    if normalized in {"%", "per cent", "percent", "percentage"}:
+        return "%"
+    return normalized.removesuffix("s")
+
+
+def _quantities(text: str) -> list[tuple[str, str, str]]:
+    """Return display text, normalized numeric value, and typed unit."""
+    quantities = []
+    for match in NUMBER.finditer(text):
+        value = match.group("value").replace(",", "").lower()
+        unit = _canonical_unit(match.group("unit") or "")
+        quantities.append((match.group(0).strip(), value, unit))
+    return quantities
+
+
+def _unsupported_quantities(answer: str, support_text: str) -> list[str]:
+    supported = {(value, unit) for _, value, unit in _quantities(support_text)}
+    return [
+        display
+        for display, value, unit in _quantities(answer)
+        if (value, unit) not in supported
+    ]
 
 
 def validate_record(record: dict[str, Any], passage: str) -> list[str]:
@@ -27,13 +69,13 @@ def validate_record(record: dict[str, Any], passage: str) -> list[str]:
     for quote in quotes:
         if quote not in passage:
             reasons.append("non_verbatim_evidence")
-    support = " ".join(quotes).lower()
-    for number in NUMBER.findall(record["answer"]):
-        if number.strip().lower() not in support:
-            reasons.append(f"unsupported_number:{number.strip()}")
+    support = " ".join(quotes)
+    for number in _unsupported_quantities(record["answer"], support):
+        reasons.append(f"unsupported_number:{number}")
+    support_lower = support.lower()
     answer = record["answer"].lower()
     for qualifier in QUALIFIERS:
-        if qualifier in support and qualifier not in answer and len(quotes) == 1:
+        if qualifier in support_lower and qualifier not in answer and len(quotes) == 1:
             reasons.append(f"dropped_qualifier:{qualifier}")
     steps = record.get("reasoning_steps", [])
     if record["task_type"] == "qa_cot" and len(steps) < 2:
@@ -87,10 +129,25 @@ def validate_cross_record(record: dict[str, Any], documents: list[dict[str, Any]
         evidence["quote"]
         for claim in record.get("claims", [])
         for evidence in claim.get("evidence", [])
-    ).lower()
-    for number in NUMBER.findall(record["answer"]):
-        if number.strip().lower() not in claim_support:
-            reasons.append(f"unsupported_number:{number.strip()}")
+    )
+    # Manual identity and version dates are valid support for attribution in the
+    # answer even when they are not repeated inside the quoted policy sentence.
+    metadata_support = " ".join(
+        str(document.get(field, ""))
+        for document in documents
+        for field in (
+            "manual_id",
+            "title",
+            "revision_date",
+            "as_of_date",
+            "page",
+            "section",
+        )
+    )
+    for number in _unsupported_quantities(
+        record["answer"], f"{claim_support}\n{metadata_support}"
+    ):
+        reasons.append(f"unsupported_number:{number}")
     for step in record.get("reasoning_steps", []):
         for evidence in step.get("evidence", []):
             source_id, quote = evidence["source_id"], evidence["quote"]

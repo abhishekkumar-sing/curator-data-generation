@@ -1574,15 +1574,47 @@ Root causes requiring a general fix:
 
 Required follow-up before the next pilot:
 
-- Replace numeric/quantity detection with typed normalization that checks
+- [x] Replace numeric/quantity detection with typed normalization that checks
   actual numeric values and units without swallowing arbitrary following words,
   and allow source metadata to support authority/version dates.
-- Make judge quotation evidence structurally multi-span or require and validate
+- [x] Make judge quotation evidence structurally multi-span or require and validate
   one exact contiguous quote consistently.
-- Emit deterministic rejection audit rows with explicit reason codes before
+- [x] Emit deterministic rejection audit rows with explicit reason codes before
   discarding candidates.
-- Add a source-integrity gate for truncated evidence fragments and regression
+- [ ] Add a source-integrity gate for truncated evidence fragments and regression
   tests using all five Pilot-006 cross-document response shapes.
+
+Implementation status (2026-07-28):
+
+- Typed quantity validation now separates numeric values from arbitrary prose,
+  canonicalizes `%`, `percent`, and `per cent`, retains explicit duration units,
+  and admits document identity/version values only when present in supplied
+  metadata. Pilot-006 forms such as `2019 Manual`, `2025 Manuals`, and
+  `10 (ten) per cent` have regression coverage.
+- The judge schema now uses `answer_quotes`, a bounded list of zero to three
+  independent verbatim spans. Each span is checked separately against the
+  supplied source, preventing ellipsis-joined excerpts from being mistaken for
+  a single quotation. This is a provider-neutral JSON Schema array contract.
+- Generator parse stages now materialize every schema-valid candidate with
+  `deterministic_checks.passed` and explicit `issues`. Generation audit files
+  retain all candidates; only passing records proceed to judging, and
+  deterministic failures are also written to the corresponding rejected file.
+- Focused verification after these three changes: 20 tests passed and Ruff
+  passed. No model-backed pipeline was run.
+
+Research basis:
+
+- [Python `re` documentation](https://docs.python.org/3/library/re.html):
+  explicit groups and boundary assertions permit typed extraction without the
+  former broad `\s+\w+` suffix.
+- [JSON Schema array reference](https://json-schema.org/understanding-json-schema/reference/array):
+  homogeneous lists use `items`, with bounded cardinality represented by array
+  length constraints.
+- [Curator API reference](https://docs.bespokelabs.ai/bespoke-curator/api-reference):
+  `parse()` converts a provider response into one or more output rows.
+- [Hugging Face Datasets processing](https://huggingface.co/docs/datasets/process):
+  rows can be materialized first and filtered afterward, allowing audit rows to
+  remain observable while quality gates stay strict.
 
 Pilot artifacts:
 

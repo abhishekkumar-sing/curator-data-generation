@@ -35,7 +35,13 @@ from generate import (  # noqa: E402
     plan_single_document_requests,
     request_coverage,
 )
-from schemas import DraftingBlock, DraftingResult, JudgeBatch  # noqa: E402
+from schemas import (  # noqa: E402
+    CandidateBatch,
+    CrossCandidateBatch,
+    DraftingBlock,
+    DraftingResult,
+    JudgeBatch,
+)
 from validation import deduplicate, validate_cross_record, validate_record  # noqa: E402
 
 
@@ -76,6 +82,76 @@ def test_validation_rejects_unsupported_number() -> None:
         "reasoning_steps": [],
     }
     assert "unsupported_number:10 years" in validate_record(record, "The buyer shall retain it for 5 years.")
+
+
+def test_cross_validation_accepts_typed_quantities_and_metadata_dates() -> None:
+    documents = [
+        {
+            "source_id": "source_a",
+            "manual_id": "works_2019",
+            "title": "Manual for Procurement of Works, 2019",
+            "revision_date": "2019",
+            "as_of_date": "2019",
+            "page": 1,
+            "section": "Liquidated damages",
+            "passage": (
+                "Damages shall not exceed 10 (ten) per cent of the Contract Price."
+            ),
+        },
+        {
+            "source_id": "source_b",
+            "manual_id": "works_2025",
+            "title": "Manual for Procurement of Works, Second Edition, 2025",
+            "revision_date": "2025",
+            "as_of_date": "2025",
+            "page": 2,
+            "section": "Liquidated damages",
+            "passage": (
+                "Damages shall not exceed 10 (ten) per cent of the Contract Price. "
+                "Milestone LD shall be refunded without interest."
+            ),
+        },
+    ]
+    record = {
+        "task_type": "cross_document_qa",
+        "question": "What changed between the 2019 and 2025 manuals?",
+        "answer": (
+            "The 2019 and 2025 manuals cap damages at 10 percent, while the "
+            "2025 manual additionally refunds milestone LD without interest."
+        ),
+        "answerable": True,
+        "claims": [
+            {
+                "statement": "Both editions cap damages.",
+                "evidence": [
+                    {
+                        "source_id": "source_a",
+                        "quote": documents[0]["passage"],
+                    },
+                    {
+                        "source_id": "source_b",
+                        "quote": documents[1]["passage"],
+                    },
+                ],
+            }
+        ],
+        "reasoning_steps": [],
+    }
+
+    assert validate_cross_record(record, documents) == []
+
+
+def test_quantity_validation_does_not_swallow_following_prose() -> None:
+    record = {
+        "task_type": "qa",
+        "question": "Which edition applies?",
+        "answer": "The 2025 Manual applies.",
+        "answerable": True,
+        "evidence": [{"quote": "The 2025 edition applies."}],
+        "reasoning_steps": [],
+    }
+
+    assert validate_record(record, "The 2025 edition applies.") == []
 
 
 def test_dedup_and_amendment_connected_split() -> None:
@@ -162,6 +238,103 @@ def test_cross_document_bundle_and_source_attribution() -> None:
     assert validate_cross_record(record, bundle["source_documents"]) == []
     record["claims"][0]["evidence"][0]["source_id"] = "source_b"
     assert "misattributed_or_non_verbatim_evidence" in validate_cross_record(record, bundle["source_documents"])
+
+
+def test_deterministic_rejections_are_materialized_for_audit() -> None:
+    passage = "The buyer shall retain the record for 5 years."
+    single_row = {
+        **_cross_row("manual", "chunk-1", passage),
+        "planned_request_id": "single-request",
+        "planned_task_type": "qa",
+        "planned_answerable": True,
+    }
+    single_response = CandidateBatch.model_validate(
+        {
+            "examples": [
+                {
+                    "task_type": "qa",
+                    "task": "compliance_and_audit",
+                    "persona": "auditor",
+                    "question_type": "threshold",
+                    "question": "How long must the record be retained?",
+                    "answer": "The record must be retained for 10 years.",
+                    "answerable": True,
+                    "evidence": [{"quote": passage}],
+                    "reasoning_steps": [],
+                }
+            ]
+        }
+    )
+    single = ProcurementGenerator.parse(
+        SimpleNamespace(model_name="generator"),
+        single_row,
+        single_response,
+    )
+    assert len(single) == 1
+    assert single[0]["deterministic_checks"]["passed"] is False
+    assert (
+        "unsupported_number:10 years"
+        in single[0]["deterministic_checks"]["issues"]
+    )
+
+    cross_row = {
+        "source_bundle_id": "bundle",
+        "pair_id": "pair",
+        "relationship_type": "government_company_comparison",
+        "source_documents": [
+            {"source_id": "source_a", **_cross_row("a", "a-1", passage)},
+            {"source_id": "source_b", **_cross_row("b", "b-1", passage)},
+        ],
+        "planned_request_id": "cross-request",
+        "planned_task_type": "cross_document_qa",
+        "planned_answerable": True,
+    }
+    cross_response = CrossCandidateBatch.model_validate(
+        {
+            "examples": [
+                {
+                    "task_type": "cross_document_qa_cot",
+                    "task": "compliance_and_audit",
+                    "persona": "auditor",
+                    "question_type": "comparison",
+                    "question": "How do the two manuals state the retention rule?",
+                    "answer": "Both require retention for 5 years.",
+                    "answerable": True,
+                    "claims": [
+                        {
+                            "statement": "Both require retention.",
+                            "evidence": [
+                                {"source_id": "source_a", "quote": passage},
+                                {"source_id": "source_b", "quote": passage},
+                            ],
+                        }
+                    ],
+                    "reasoning_steps": [
+                        {
+                            "operation": "lookup",
+                            "statement": "Read source A.",
+                            "evidence": [{"source_id": "source_a", "quote": passage}],
+                        },
+                        {
+                            "operation": "combine",
+                            "statement": "Combine with source B.",
+                            "evidence": [{"source_id": "source_b", "quote": passage}],
+                        },
+                    ],
+                }
+            ]
+        }
+    )
+    cross = CrossDocumentGenerator.parse(
+        SimpleNamespace(model_name="generator"),
+        cross_row,
+        cross_response,
+    )
+    assert len(cross) == 1
+    assert cross[0]["deterministic_checks"] == {
+        "passed": False,
+        "issues": ["planned_task_type_mismatch:cross_document_qa"],
+    }
 
 
 def test_drafting_seed_resolution_validation_and_compact_output(tmp_path: Path) -> None:
@@ -522,7 +695,7 @@ def test_judge_rejects_false_abstention_and_taxonomy_acquiescence() -> None:
                         "recommended_task": "nit_filling",
                         "recommended_persona": "bidder",
                         "answer_found_in_source": True,
-                        "answer_quote": source,
+                        "answer_quotes": [source],
                         "score": 5,
                         "issues": [],
                     },
@@ -538,6 +711,51 @@ def test_judge_rejects_false_abstention_and_taxonomy_acquiescence() -> None:
     assert judged["task_correct"] is False
     assert judged["answerability_correct"] is False
     assert judged["accepted"] is False
+
+
+def test_judge_accepts_multiple_independent_verbatim_answer_spans() -> None:
+    first = "Cash or gift cheques may not be accepted."
+    second = "Particular care is required for firms in current tenders."
+    source = f"{first} Other guidance appears here. {second}"
+    record = {
+        "record_id": "record-1",
+        "task": "ethics_and_risk_management",
+        "persona": "procurement_officer",
+        "answerable": True,
+        "_source_passage": source,
+    }
+    row = {"judge_items": [{"record_id": "record-1", "record": record}]}
+    response = JudgeBatch.model_validate(
+        {
+            "judgments": [
+                {
+                    "record_id": "record-1",
+                    "decision": {
+                        "supported": True,
+                        "relevant": True,
+                        "preserves_qualifications": True,
+                        "authority_correct": True,
+                        "reasoning_valid": True,
+                        "recommended_task": "ethics_and_risk_management",
+                        "recommended_persona": "procurement_officer",
+                        "answer_found_in_source": True,
+                        "answer_quotes": [first, second],
+                        "score": 5,
+                        "issues": [],
+                    },
+                }
+            ]
+        }
+    )
+
+    judged = ProcurementJudge.parse(
+        SimpleNamespace(model_name="judge-model"),
+        row,
+        response,
+    )[0]["judge"]
+
+    assert judged["answerability_correct"] is True
+    assert judged["accepted"] is True
 
 
 def test_drafting_surface_normalization_and_semantic_validation() -> None:

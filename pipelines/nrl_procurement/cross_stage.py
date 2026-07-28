@@ -124,15 +124,21 @@ preserved authority and qualifications, and task_type-consistent rationale struc
         results = []
         for candidate in response.examples:
             draft = candidate.model_dump()
-            if draft["task_type"] != row["planned_task_type"] or draft["answerable"] != row["planned_answerable"]:
-                continue
+            reasons = []
+            if draft["task_type"] != row["planned_task_type"]:
+                reasons.append(
+                    f"planned_task_type_mismatch:{row['planned_task_type']}"
+                )
+            if draft["answerable"] != row["planned_answerable"]:
+                reasons.append(
+                    f"planned_answerability_mismatch:{row['planned_answerable']}"
+                )
             if draft["task"] not in TAXONOMY.get("tasks", []) or draft[
                 "persona"
             ] not in TAXONOMY.get("personas", []):
-                continue
-            reasons = validate_cross_record(draft, row["source_documents"])
-            if reasons:
-                continue
+                reasons.append("unsupported_taxonomy_value")
+            reasons.extend(validate_cross_record(draft, row["source_documents"]))
+            reasons = sorted(set(reasons))
             claims, flat_evidence = [], {}
             for index, claim in enumerate(draft.pop("claims"), 1):
                 claim_id = f"claim-{index}"
@@ -200,7 +206,10 @@ preserved authority and qualifications, and task_type-consistent rationale struc
                     "citations": citations,
                     "parent_request_id": row["planned_request_id"],
                     "generation_model": self.model_name,
-                    "deterministic_checks": {"passed": True, "issues": []},
+                    "deterministic_checks": {
+                        "passed": not reasons,
+                        "issues": reasons,
+                    },
                 }
             )
         return results
@@ -257,10 +266,12 @@ EVALUATION CONTRACT
 - Independently select recommended_persona from
   {json.dumps(TAXONOMY.get("personas", []))}; use general_user unless a specialized
   actor's information need is supported by the supplied sources.
-- For answerable records, set answer_found_in_source=true and copy one exact
-  answer-supporting quote into answer_quote. For unanswerable records, actively
-  search both complete sources: report an exact answering quote when one exists;
-  otherwise set answer_found_in_source=false and answer_quote="".
+- For answerable records, set answer_found_in_source=true and copy one to three
+  independent exact answer-supporting source spans into answer_quotes. Every list item
+  must be one contiguous verbatim substring; never join excerpts or insert ellipses.
+  For unanswerable records, actively search both complete sources: report exact
+  answering spans when an answer exists; otherwise set answer_found_in_source=false
+  and answer_quotes=[].
 - score is 1 to 5: 1 unusable or fabricated; 2 major grounding or cross-document failure;
   3 partially useful but requiring material correction; 4 fully usable with at most a
   minor non-substantive issue; 5 fully supported, necessary, precise, and exemplary.
@@ -298,11 +309,13 @@ and consistency among booleans, ablation list, score, and issues.
             source_text = "\n\n".join(
                 document["passage"] for document in record["source_documents"]
             )
-            quote = decision["answer_quote"]
+            quotes = decision["answer_quotes"]
             answerability_correct = (
-                decision["answer_found_in_source"] and bool(quote) and quote in source_text
+                decision["answer_found_in_source"]
+                and bool(quotes)
+                and all(quote in source_text for quote in quotes)
                 if record["answerable"]
-                else not decision["answer_found_in_source"] and not quote
+                else not decision["answer_found_in_source"] and not quotes
             )
             required = (
                 "supported",

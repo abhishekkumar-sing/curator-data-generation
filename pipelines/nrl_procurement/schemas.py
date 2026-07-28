@@ -137,11 +137,12 @@ class JudgeDecision(BaseModel):
     recommended_task: ProcurementTask
     recommended_persona: ProcurementPersona
     answer_found_in_source: bool
-    answer_quote: str = Field(
-        default="",
+    answer_quotes: list[str] = Field(
+        default_factory=list,
+        max_length=3,
         description=(
-            "For an unanswerable record, copy one exact source quote that answers "
-            "the question when an answer is found; otherwise return an empty string."
+            "Zero to three independent verbatim source spans supporting an answer. "
+            "Never concatenate separate spans or insert ellipses inside a span."
         ),
     )
     score: int = Field(ge=1, le=5)

@@ -319,15 +319,21 @@ rationale shape, and every unanswerable record uses the required exact answer.
         records = []
         for candidate in response.examples:
             draft = candidate.model_dump()
-            if draft["task_type"] != row["planned_task_type"] or draft["answerable"] != row["planned_answerable"]:
-                continue
+            reasons = []
+            if draft["task_type"] != row["planned_task_type"]:
+                reasons.append(
+                    f"planned_task_type_mismatch:{row['planned_task_type']}"
+                )
+            if draft["answerable"] != row["planned_answerable"]:
+                reasons.append(
+                    f"planned_answerability_mismatch:{row['planned_answerable']}"
+                )
             if draft["task"] not in TAXONOMY.get("tasks", []) or draft[
                 "persona"
             ] not in TAXONOMY.get("personas", []):
-                continue
-            reasons = validate_record(draft, row["passage"])
-            if reasons:
-                continue
+                reasons.append("unsupported_taxonomy_value")
+            reasons.extend(validate_record(draft, row["passage"]))
+            reasons = sorted(set(reasons))
             evidence = []
             for item in draft["evidence"]:
                 quote = item["quote"]
@@ -379,7 +385,10 @@ rationale shape, and every unanswerable record uses the required exact answer.
                     "parent_request_id": row["planned_request_id"],
                     "_source_passage": row["passage"],
                     "generation_model": self.model_name,
-                    "deterministic_checks": {"passed": True, "issues": []},
+                    "deterministic_checks": {
+                        "passed": not reasons,
+                        "issues": reasons,
+                    },
                 }
             )
         return records
@@ -424,11 +433,12 @@ EVALUATION CONTRACT
   {json.dumps(TAXONOMY.get("personas", []))}. Select the actor whose authentic work
   or information need best matches the question and source. Use general_user when a
   specialized role is not supported.
-- For answerable records, set answer_found_in_source=true and copy one exact
-  answer-supporting source quote into answer_quote. For unanswerable records, actively
-  search the entire supplied passage: set answer_found_in_source=true with an exact
-  answering quote if any direct answer exists; otherwise set it false and return an
-  empty answer_quote.
+- For answerable records, set answer_found_in_source=true and copy one to three
+  independent exact answer-supporting source spans into answer_quotes. Every list item
+  must be one contiguous verbatim substring; never join excerpts or insert ellipses.
+  For unanswerable records, actively search the entire supplied passage: set
+  answer_found_in_source=true with exact answering spans if a direct answer exists;
+  otherwise set it false and return an empty answer_quotes list.
 - score is 1 to 5: 1 unusable or fabricated; 2 major unsupported or task failures;
   3 partially useful but requiring material correction; 4 fully usable with at most
   a minor non-substantive issue; 5 fully supported, complete, precise, and exemplary.
@@ -461,15 +471,15 @@ and issues, and rejection of every unsupported claim or lost qualification.
             decision = judgment.decision.model_dump()
             task_correct = decision["recommended_task"] == record["task"]
             persona_correct = decision["recommended_persona"] == record["persona"]
-            quote = decision["answer_quote"]
+            quotes = decision["answer_quotes"]
             quote_consistent = (
                 decision["answer_found_in_source"]
-                and bool(quote)
-                and quote in record["_source_passage"]
+                and bool(quotes)
+                and all(quote in record["_source_passage"] for quote in quotes)
                 if record["answerable"]
                 else (
                     not decision["answer_found_in_source"]
-                    and not quote
+                    and not quotes
                 )
             )
             record["judge"] = {
@@ -634,12 +644,22 @@ def main() -> None:
     if not args.skip_judge:
         _assert_independent_judge()
     os.environ["HOSTED_VLLM_API_KEY"] = _model_settings(GENERATION)[2]
-    generated = ProcurementGenerator(**_llm_kwargs(GENERATION))(
+    generated_audit = ProcurementGenerator(**_llm_kwargs(GENERATION))(
         Dataset.from_list(planned_single),
         working_dir=_working_dir(run_id, "generation"),
     ).dataset.to_list()
-    _write_audit(files_dir / "qa_generated_audit.jsonl", generated)
-    single_generation_coverage = request_coverage(planned_single, generated)
+    _write_audit(files_dir / "qa_generated_audit.jsonl", generated_audit)
+    single_generation_coverage = request_coverage(planned_single, generated_audit)
+    deterministic_rejected = [
+        row
+        for row in generated_audit
+        if not row.get("deterministic_checks", {}).get("passed", False)
+    ]
+    generated = [
+        row
+        for row in generated_audit
+        if row.get("deterministic_checks", {}).get("passed", False)
+    ]
     generated, duplicates = deduplicate(generated, float(QUALITY.get("dedupe_threshold", 94)))
     if not generated:
         write_manifest(
@@ -682,11 +702,14 @@ def main() -> None:
     }
     _write_audit(
         files_dir / "qa_rejected.jsonl",
-        [] if args.skip_judge else _rejected_records(generated, judged),
+        deterministic_rejected
+        + ([] if args.skip_judge else _rejected_records(generated, judged)),
     )
 
     cross_accepted: list[dict[str, Any]] = []
     cross_generated: list[dict[str, Any]] = []
+    cross_generated_audit: list[dict[str, Any]] = []
+    cross_deterministic_rejected: list[dict[str, Any]] = []
     cross_judged: list[dict[str, Any]] = []
     planned_cross: list[dict[str, Any]] = []
     cross_duplicates = 0
@@ -702,11 +725,26 @@ def main() -> None:
         planned_cross = plan_cross_document_requests(bundles, seed)
         if bundles:
             os.environ["HOSTED_VLLM_API_KEY"] = _model_settings(GENERATION)[2]
-            cross_generated = CrossDocumentGenerator(**_llm_kwargs(GENERATION))(
+            cross_generated_audit = CrossDocumentGenerator(
+                **_llm_kwargs(GENERATION)
+            )(
                 Dataset.from_list(planned_cross),
                 working_dir=_working_dir(run_id, "cross_generation"),
             ).dataset.to_list()
-            _write_audit(files_dir / "cross_generated_audit.jsonl", cross_generated)
+            _write_audit(
+                files_dir / "cross_generated_audit.jsonl",
+                cross_generated_audit,
+            )
+            cross_deterministic_rejected = [
+                row
+                for row in cross_generated_audit
+                if not row.get("deterministic_checks", {}).get("passed", False)
+            ]
+            cross_generated = [
+                row
+                for row in cross_generated_audit
+                if row.get("deterministic_checks", {}).get("passed", False)
+            ]
             cross_generated, cross_duplicates = deduplicate(cross_generated, float(QUALITY.get("dedupe_threshold", 94)))
             if args.skip_judge:
                 cross_accepted = cross_generated
@@ -719,7 +757,7 @@ def main() -> None:
                 ).dataset.to_list()
                 cross_accepted = [row for row in cross_judged if row["judge"]["accepted"]]
     cross_coverage = {
-        "generated": request_coverage(planned_cross, cross_generated),
+        "generated": request_coverage(planned_cross, cross_generated_audit),
         "judged": request_coverage(
             planned_cross, cross_generated if args.skip_judge else cross_judged
         ),
@@ -727,7 +765,12 @@ def main() -> None:
     }
     _write_audit(
         files_dir / "cross_rejected.jsonl",
-        [] if args.skip_judge else _rejected_records(cross_generated, cross_judged),
+        cross_deterministic_rejected
+        + (
+            []
+            if args.skip_judge
+            else _rejected_records(cross_generated, cross_judged)
+        ),
     )
 
     accepted.extend(cross_accepted)
