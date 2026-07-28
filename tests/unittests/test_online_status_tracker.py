@@ -3,7 +3,8 @@ from unittest.mock import patch
 
 from rich.console import Console
 
-from bespokelabs.curator.status_tracker.online_status_tracker import OnlineStatusTracker
+from bespokelabs.curator.status_tracker.online_status_tracker import OnlineStatusTracker, TokenLimitStrategy
+from bespokelabs.curator.types.generic_response import _TokenUsage
 
 
 def test_online_status_tracker_display():
@@ -120,3 +121,34 @@ def test_online_status_tracker_external_model_cost_missing_keys():
             assert tracker.output_cost_per_million is None
             assert "N/A" in tracker.input_cost_str
             assert "N/A" in tracker.output_cost_str
+
+
+def test_online_status_tracker_prefills_combined_capacity_from_limits():
+    """A configured online token bucket starts full instead of ramping for a minute."""
+    tracker = OnlineStatusTracker(
+        max_requests_per_minute=10_000,
+        max_tokens_per_minute=100_000_000,
+    )
+
+    assert tracker.available_request_capacity == 10_000
+    assert tracker.available_token_capacity == 100_000_000
+
+
+def test_online_status_tracker_prefills_separate_token_capacity_from_limits():
+    """Provider-specific input/output token buckets also start at their limits."""
+    tracker = OnlineStatusTracker(
+        token_limit_strategy=TokenLimitStrategy.seperate,
+        max_requests_per_minute=60,
+        max_tokens_per_minute=_TokenUsage(input=5_000, output=1_000),
+    )
+
+    assert tracker.available_request_capacity == 60
+    assert tracker.available_token_capacity == _TokenUsage(input=5_000, output=1_000)
+
+
+def test_online_status_tracker_keeps_conservative_defaults_without_limits():
+    """Automatic rate discovery retains the existing conservative startup state."""
+    tracker = OnlineStatusTracker()
+
+    assert tracker.available_request_capacity == 1
+    assert tracker.available_token_capacity == 0

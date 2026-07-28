@@ -747,6 +747,53 @@ Pilot review dimensions:
 - [ ] Multiple group-based evaluation folds
 - [ ] Regression dashboards for retrieval and generation
 
+## Curator online startup-capacity research
+
+Status: researched and implemented on 2026-07-28.
+
+Question:
+
+- Does the reference repository contain a justified workaround for Curator
+  dispatching local-model requests too slowly?
+
+Evidence:
+
+- Curator's official API reference defines `max_requests_per_minute` and
+  `max_tokens_per_minute` as online processor limits, and its LiteLLM guide
+  shows callers explicitly configuring both.
+- Official Curator 0.1.29 initializes an online tracker with one available
+  request and zero available tokens. Its replenishment loop then adds capacity
+  linearly and caps it at the configured per-minute limits. Consequently a
+  known-safe local endpoint unnecessarily starts with an almost-empty bucket.
+- Reference commit `39fca352` identifies the same issue and initializes both
+  buckets from their configured limits. This is a focused token-bucket fix,
+  not a pipeline monkey patch.
+- The `pilot-001` logs confirm manual limits of 10,000 RPM and 100,000,000 TPM
+  were active. They also show that all five cross-document tasks started with
+  no rate-limit errors. The stage still took about 7 minutes 53 seconds because
+  the GLM endpoint returned its three usable responses after roughly 4–8
+  minutes; two generated requests had no materialized response. Therefore
+  startup capacity is a real general throughput bug but was not the dominant
+  cause of that pilot's runtime.
+
+Decision:
+
+- [x] Initialize explicitly configured request and token buckets at full
+  capacity for combined and separate token-limit strategies.
+- [x] Preserve the conservative one-request/zero-token state when limits are
+  absent and Curator must discover them.
+- [x] Cover configured combined, configured separate, and unconfigured startup
+  behavior with unit tests.
+- [ ] Separately investigate the GLM server's long generation latency and the
+  two cross-document responses that were not materialized; do not mislabel
+  these as Curator throttling.
+
+Primary references:
+
+- [Curator API reference](https://docs.bespokelabs.ai/bespoke-curator/api-reference)
+- [Curator LiteLLM guide](https://docs.bespokelabs.ai/bespoke-curator/how-to-guides/using-litellm-with-curator)
+- [Official Curator GitHub repository](https://github.com/bespokelabsai/curator)
+
 ## Quality metrics
 
 Every generation run must report the following.
