@@ -17,17 +17,29 @@ with stricter multi-source necessity checks:
 
 ## Mandatory research-first gate
 
-No task in this roadmap may move into implementation merely because the
-reference project contains similar code. Before reaching a design conclusion
-or changing code:
+This gate applies to **every capability, feature, fix, refactor, integration,
+model, dependency, configuration behavior, and data-processing stage**. It is
+not limited to large changes or tasks already listed in this roadmap.
+
+Do not touch or edit production code for a capability until its research gate
+has been completed and recorded. Documentation and task files may be edited
+only to capture that research, its sources, conclusions, and the proposed
+implementation. Similar code in the reference project is never sufficient
+authorization to begin implementation.
+
+For each individual capability, before reaching a design conclusion or
+changing code:
 
 - [ ] Inspect the relevant implementation in both
   `/home/abhishek/curator` and
   `/home/abhishek/nrl_curator_native_glm52`.
 - [ ] Treat the reference project as an untrusted design input that may be
   incomplete, outdated, corrupt, or buggy.
-- [ ] Check official documentation and upstream source code for Curator and
-  every material dependency or external model involved.
+- [ ] Research the capability in depth on the internet, even when a local
+  implementation or reference implementation already exists.
+- [ ] Check current official documentation and upstream source code for
+  Curator and every dependency, external model, protocol, file format, API,
+  and tool involved in that capability.
 - [ ] Review relevant primary research papers and official benchmark
   specifications.
 - [ ] Prefer primary sources such as papers, official repositories, and
@@ -45,11 +57,15 @@ or changing code:
   changes.
 - [ ] When evidence is inconclusive, run a small controlled experiment or
   pilot instead of choosing an approach by intuition.
-- [ ] Record the sources consulted and the decision rationale in the task,
-  design document, or commit documentation.
+- [ ] Record the capability name, research questions, dated source links,
+  findings, alternatives, risks, decision rationale, and proposed validation
+  in the task or design document before editing production code.
 
 Research-gate acceptance criteria:
 
+- A separate research record exists for every capability being changed.
+- Internet research is complete before the first production-code edit for
+  that capability.
 - The recommendation cites primary or official sources.
 - Statements about either codebase are verified against concrete files,
   behavior, or tests.
