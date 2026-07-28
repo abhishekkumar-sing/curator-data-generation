@@ -277,9 +277,9 @@ CONSTRAINTS
   specific role only when supported by the passage; otherwise use general_user.
 - Each question must stand alone and identify the organization, manual, domain, or
   date needed to make its authority and temporal scope unambiguous.
-- Allowed question_type values are direct_fact, definition, authority, threshold,
-  conditional_rule, exception, procedure, scenario, multi_section, temporal, and
-  unanswerable.
+- Allowed question_type values are direct_fact, definition, procedure, sequence,
+  threshold, exception, negative_rule, role_responsibility, comparison,
+  compliance_check, drafting_knowledge, and currentness.
 - For an answerable record, set answerable=true and support every material answer
   claim with one or more evidence quotes copied verbatim from the passage.
 - For planned task_type=qa, use a direct answer and return reasoning_steps=[].
@@ -289,8 +289,9 @@ CONSTRAINTS
 - For qa_cot, return two to four concise teaching-rationale steps. Each step must
   state an observable evidence-based inference and list the exact passage quotes
   used in evidence_quotes. Do not expose private hidden chain-of-thought.
-- When planned answerable=false, use question_type=unanswerable for a plausible
-  question whose required fact is absent. Set answerable=false, answer exactly
+- When planned answerable=false, generate a plausible question whose required
+  fact is absent and choose its natural question_type from the allowed taxonomy.
+  Set answerable=false, answer exactly
   "Not answerable from the provided sources.", and return empty evidence and
   reasoning_steps. Do not claim that an absent statement proves a rule does not
   exist.

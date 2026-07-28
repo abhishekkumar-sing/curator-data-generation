@@ -6,18 +6,100 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+ProcurementPersona = Literal[
+    "indenting_officer",
+    "end_user_department_head",
+    "procurement_officer",
+    "tendering_officer",
+    "technical_evaluator",
+    "commercial_evaluator",
+    "tender_committee_member",
+    "tender_committee_chair",
+    "finance_officer",
+    "stores_rep_in_tender",
+    "legal_officer_pre_award",
+    "vigilance_officer_pre_award",
+    "hope_head_of_procuring_entity",
+    "approving_authority",
+    "engineer_in_charge",
+    "project_manager",
+    "inspection_officer",
+    "quality_control_officer",
+    "stores_officer",
+    "asset_manager",
+    "contract_manager",
+    "billing_officer",
+    "payment_processing_officer",
+    "performance_monitoring_officer",
+    "vendor_performance_evaluator",
+    "auditor",
+    "internal_auditor",
+    "cag_auditor",
+    "vigilance_officer",
+    "ethics_compliance_officer",
+    "legal_officer",
+    "independent_external_monitor",
+    "ombudsman_grievance_officer",
+    "gem_primary_user",
+    "gem_buyer",
+    "gem_bid_opening_officer",
+    "gem_forwarding_officer",
+    "eproc_admin",
+    "system_audit_officer",
+    "bidder",
+    "supplier",
+    "contractor",
+    "consultant",
+    "service_provider",
+    "msme_startup_bidder",
+    "foreign_bidder",
+    "joint_venture_bidder",
+    "integrity_pact_signatory_bidder",
+    "holiday_listed_vendor",
+    "external_reviewer",
+    "general_user",
+]
+
+ProcurementTask = Literal[
+    "general_reference",
+    "need_and_planning",
+    "market_analysis",
+    "sourcing_and_mode",
+    "tendering",
+    "nit_filling",
+    "clarifications_and_corrigenda",
+    "bid_handling",
+    "evaluation_and_award",
+    "preference_policy_application",
+    "security_and_guarantees",
+    "contract_management",
+    "execution_and_quality",
+    "framework_and_rate_contracts",
+    "disposal",
+    "vendor_registration_and_empanelment",
+    "supplier_governance",
+    "compliance_and_audit",
+    "ethics_and_risk_management",
+    "grievance_handling",
+    "drafting",
+    "process_diagnosis",
+    "cross_rule_application",
+    "currentness",
+]
+
 QuestionType = Literal[
     "direct_fact",
     "definition",
-    "authority",
-    "threshold",
-    "conditional_rule",
-    "exception",
     "procedure",
-    "scenario",
-    "multi_section",
-    "temporal",
-    "unanswerable",
+    "sequence",
+    "threshold",
+    "exception",
+    "negative_rule",
+    "role_responsibility",
+    "comparison",
+    "compliance_check",
+    "drafting_knowledge",
+    "currentness",
 ]
 
 
@@ -32,8 +114,8 @@ class ReasoningStepDraft(BaseModel):
 
 class Candidate(BaseModel):
     task_type: Literal["qa", "qa_cot"]
-    task: str = Field(min_length=2)
-    persona: str = Field(min_length=2)
+    task: ProcurementTask
+    persona: ProcurementPersona
     question_type: QuestionType
     question: str = Field(min_length=12)
     answer: str = Field(min_length=1)
@@ -72,7 +154,7 @@ class DraftingSeed(BaseModel):
 
     id: str = Field(min_length=1)
     tender_id: str = Field(min_length=1)
-    task: str = Field(min_length=2)
+    task: ProcurementTask
     instruction: str = Field(min_length=12)
     tender_context: list[str] = Field(min_length=1)
     manual_chunk_ids: list[str] = Field(min_length=1)
@@ -145,8 +227,8 @@ class CrossReasoningStepDraft(BaseModel):
 
 class CrossCandidate(BaseModel):
     task_type: Literal["cross_document_qa", "cross_document_qa_cot"]
-    task: str = Field(min_length=2)
-    persona: str = Field(min_length=2)
+    task: ProcurementTask
+    persona: ProcurementPersona
     question_type: Literal[
         "comparison",
         "temporal",
