@@ -76,6 +76,65 @@ Research-gate acceptance criteria:
 - No large generation run begins solely on the basis of schema validation or
   passing unit tests.
 
+## P1 — Unified `nrl-curate` command-line interface
+
+- [ ] Complete and record the mandatory research-first gate for CLI design,
+  saturation stopping, resumability, configuration precedence, and packaging.
+  Compare the reference application's CLI with the current pipeline, current
+  Curator APIs, Python packaging guidance, and established CLI conventions
+  before changing production code.
+- [ ] Register an `nrl-curate` project script in `pyproject.toml` and implement
+  an `all` command that orchestrates preprocessing when requested, ordinary QA,
+  QA with auditable rationale, cross-document QA, cross-document QA with
+  auditable rationale, drafting, independent judging, validation, and export.
+- [ ] Support a convenient command shape such as:
+
+  ```bash
+  nrl-curate all \
+    --generation-profile glm \
+    --judge-profile nemotron \
+    --limit 200 \
+    --cross-document-limit 200 \
+    --drafting-limit 2 \
+    --max-passes 0
+  ```
+
+- [ ] Keep model identities, endpoints, credentials, generation parameters,
+  structured-output modes, concurrency, retry counts, and rate limits in
+  `.env`/`config.yaml`. CLI model/profile switches select configuration; they
+  must not require code changes or expose API keys in manifests or logs.
+- [ ] Preserve independent generation and judge selection. If a shorthand such
+  as `--model nemotron120b` is supported, define whether it selects generation
+  only or a named paired profile; never silently use the same endpoint as its
+  own judge when independent judging is required.
+- [ ] Define `--max-passes` unambiguously: `0` means a full saturation run with
+  no numeric pass cap; a positive integer caps the number of passes. A
+  saturation run must stop only on a researched, configured convergence rule,
+  not merely when one pass produces fewer records than requested.
+- [ ] Make saturation termination safe and auditable: persist per-stage/pass
+  state; measure novel accepted records after deterministic validation,
+  deduplication, and independent judging; require the configured consecutive
+  no-progress/low-yield condition; stop when the eligible source/planning space
+  is exhausted; and record the exact stopping reason and pass metrics in the
+  manifest. Resume must continue from persisted saturation state rather than
+  reset the evidence window.
+- [ ] Generate a safe dynamic run ID when `--run-id` is omitted, while allowing
+  an explicit run ID for reproducible pilots and resumptions.
+- [ ] Preserve local-only operation: Curator Viewer and telemetry remain off,
+  source content goes only to configured private endpoints, caches remain under
+  `.curator_working/<run-id>/<stage>`, and outputs remain under
+  `outputs/<run-id>/files`.
+- [ ] Make every substage resumable and make `all` fail with an auditable
+  terminal manifest rather than silently omitting failed requests.
+- [ ] Retain the existing direct Python entry point during migration or provide
+  a documented compatibility path; CLI orchestration must call shared pipeline
+  functions rather than duplicate generation logic.
+- [ ] Add unit tests for argument/config precedence, profile switching,
+  independent-judge enforcement, dynamic and explicit run IDs, pass bounds,
+  resume behavior, local-only paths, exit codes, and secret redaction.
+- [ ] Validate with a user-run bounded pilot before approving the CLI for a
+  full `--limit 200` execution. Codex must not run model-backed pilots.
+
 ## Capability research — pilot-003 quality recovery
 
 Status: researched and approved for implementation on 2026-07-28. Conclusions
