@@ -1001,6 +1001,37 @@ Pilot-004 live evidence:
   the remaining requests were still outstanding. Thus the displayed low
   lifetime requests/minute is not evidence of serial Curator dispatch.
 
+Pilot-004 terminal audit:
+
+- The run completed with manifest status `partial`, not `complete`. It produced
+  five canonical records: three `qa`, one `qa_cot`, and one
+  `cross_document_qa`; it produced no `cross_document_qa_cot`.
+- Single-document coverage was 3/5 planned requests materialized, yielding six
+  generated records and four accepted records. Cross-document coverage was
+  1/5 planned requests materialized, yielding one accepted record. Missing
+  request IDs are preserved in the manifest.
+- Both drafting seeds generated, passed deterministic checks and independent
+  judging, and were exported with seed-compatible citation IDs plus structured
+  manual/tender citation details. No drafting record was rejected.
+- The final cross-generation stage took about eight minutes after all five
+  requests were dispatched together, but only one request materialized a
+  record. Nemotron judge stages completed their single batches in roughly
+  4–16 seconds. The dominant observed latency and materialization loss remain
+  on GLM generation, not Nemotron judging or Curator rate limiting.
+- Citations on accepted QA and cross-document records include manual ID/title,
+  source file, page, section, chunk ID, exact quote, and character offsets.
+  The inspected accepted cross-document comparison uses one exact quotation
+  from each manual and passes both-source ablation.
+- Two otherwise fully grounded `qa_cot` records were rejected only because the
+  Nemotron judge placed multiple individually exact but non-contiguous source
+  excerpts into its single `answer_quote`. The deterministic citations resolve
+  every excerpt exactly, and all other judge dimensions were true with score
+  5. This is a judge-witness serialization defect: a concatenation of separated
+  quotations is not itself one exact substring. Research and implement a
+  general witness contract (for example, a typed list of independently
+  resolved quotes) rather than weakening grounding or special-casing these two
+  records.
+
 Pilot-003 correction and retry-tail finding:
 
 - Pilot-003 proves that the earlier inference about the cross-document delay
