@@ -338,7 +338,6 @@ class BaseOnlineRequestProcessor(BaseRequestProcessor, ABC):
             status_tracker: Tracker containing rate limit status
         """
         # Initialize trackers
-        queue_of_requests_to_retry: asyncio.Queue[APIRequest] = asyncio.Queue()
         if self.max_concurrent_requests is not None:
             self._semaphore = asyncio.Semaphore(t.cast(int, self.max_concurrent_requests))
 
@@ -398,7 +397,6 @@ class BaseOnlineRequestProcessor(BaseRequestProcessor, ABC):
                         self.handle_single_request_with_retries(
                             request=request,
                             session=session,
-                            retry_queue=queue_of_requests_to_retry,
                             response_file=response_file,
                             status_tracker=status_tracker,
                             blocked_capacity=token_estimate,
@@ -411,53 +409,6 @@ class BaseOnlineRequestProcessor(BaseRequestProcessor, ABC):
 
             if pending_requests:
                 await asyncio.gather(*pending_requests)
-
-            # Process any remaining retries in the queue
-            pending_retries = set()
-            while not queue_of_requests_to_retry.empty() or pending_retries:
-                # Process new items from the queue if we have capacity
-                if self._semaphore:
-                    await self._semaphore.acquire()
-
-                if not queue_of_requests_to_retry.empty():
-                    retry_request = await queue_of_requests_to_retry.get()
-                    if status_tracker.max_tokens_per_minute is not None:
-                        token_estimate = self.estimate_total_tokens(retry_request.generic_request.messages)
-                    else:
-                        token_estimate = _TokenUsage()  # Empty
-
-                    attempt_number = self.config.max_retries - retry_request.attempts_left
-                    logger.debug(
-                        f"Retrying request {retry_request.task_id} "
-                        f"(attempt #{attempt_number} of {self.config.max_retries})"
-                        f"Previous errors: {retry_request.result}"
-                    )
-
-                    # Wait for capacity if needed
-                    while not status_tracker.has_capacity(token_estimate):
-                        await asyncio.sleep(0.1)
-
-                    # Wait for rate limits cool down if needed
-                    await self.cool_down_if_rate_limit_error(status_tracker)
-
-                    # Consume capacity before making request
-                    status_tracker.consume_capacity(token_estimate)
-
-                    task = asyncio.create_task(
-                        self.handle_single_request_with_retries(
-                            request=retry_request,
-                            session=session,
-                            retry_queue=queue_of_requests_to_retry,
-                            response_file=response_file,
-                            status_tracker=status_tracker,
-                            blocked_capacity=token_estimate,
-                        )
-                    )
-                    pending_retries.add(task)
-
-                # Wait for some tasks to complete
-                if pending_retries:
-                    done, pending_retries = await asyncio.wait(pending_retries, timeout=0.1)
 
         status_tracker.stop_tracker()
         await self.viewer_client.session_completed()
@@ -480,113 +431,126 @@ class BaseOnlineRequestProcessor(BaseRequestProcessor, ABC):
         self,
         request: APIRequest,
         session: aiohttp.ClientSession,
-        retry_queue: asyncio.Queue,
         response_file: str,
         status_tracker: OnlineStatusTracker,
         blocked_capacity: "_TokenUsage",
     ) -> None:
-        """Common wrapper for handling a single request with error handling and retries.
+        """Process all attempts for one request in its active task.
 
-        This method implements the common try/except logic and retry mechanism,
-        while delegating the actual API call to call_single_request.
+        Keeping retries in the same task avoids a low-concurrency retry tail and
+        ensures one semaphore acquisition is paired with exactly one release.
 
         Args:
             request: The request to process
             session: Async HTTP session
-            retry_queue: Queue for failed requests
             response_file: Path where the response data will be saved
             status_tracker: Tracks request status
             blocked_capacity: Blocked token capacity
         """
+        token_estimate = blocked_capacity or self.estimate_total_tokens(request.generic_request.messages)
+        generic_response = None
+
         try:
-            # Estimate tokens before making request
-            generic_response = None
-            token_estimate: _TokenUsage = blocked_capacity or self.estimate_total_tokens(request.generic_request.messages)
+            while True:
+                generic_response = None
+                status_tracker.update_cost_projection(token_estimate, pre_request=True)
 
-            # Add new estimate to projection (pre_request=True indicates new estimate)
-            status_tracker.update_cost_projection(token_estimate, pre_request=True)
+                try:
+                    generic_response = await self.call_single_request(
+                        request=request,
+                        session=session,
+                        status_tracker=status_tracker,
+                    )
 
-            generic_response = await self.call_single_request(
-                request=request,
-                session=session,
-                status_tracker=status_tracker,
-            )
+                    if generic_response.finish_reason in self.config.invalid_finish_reasons:
+                        logger.debug(
+                            f"Invalid finish_reason {generic_response.finish_reason}. "
+                            f"Raw response {generic_response.raw_response} for request "
+                            f"{generic_response.raw_request}"
+                        )
+                        status_tracker.update_stats(
+                            generic_response.token_usage,
+                            generic_response.response_cost,
+                        )
+                        raise ValueError(f"finish_reason was {generic_response.finish_reason}")
 
-            if generic_response.finish_reason in self.config.invalid_finish_reasons:
-                logger.debug(
-                    f"Invalid finish_reason {generic_response.finish_reason}."
-                    " Raw response {generic_response.raw_response} "
-                    "for request {generic_response.raw_request}"
-                )
-                # Update cost projection with actual usage but mark as failed
-                status_tracker.update_stats(generic_response.token_usage, generic_response.response_cost)
-                raise ValueError(f"finish_reason was {generic_response.finish_reason}")
+                    # Retry responses that fail schema or parse validation.
+                    self.prompt_formatter.response_to_response_format(generic_response.response_message)
+                    await self._viewer_client.log_cost_projection(status_tracker)
 
-            # Allows us to retry on responses that don't match the response format
-            self.prompt_formatter.response_to_response_format(generic_response.response_message)
+                except Exception as exc:
+                    status_tracker.num_other_errors += 1
+                    request.result.append(exc)
 
-            # Log cost projection to viewer
-            await self._viewer_client.log_cost_projection(status_tracker)
+                    if generic_response and generic_response.token_usage is not None:
+                        used_tokens = _TokenUsage(
+                            input=generic_response.token_usage.input,
+                            output=generic_response.token_usage.output,
+                        )
+                        status_tracker.update_cost_projection(used_tokens)
+                        self._free_capacity(status_tracker, used_tokens, token_estimate)
+                    else:
+                        status_tracker.update_cost_projection(None)
 
-        except Exception as e:
-            status_tracker.num_other_errors += 1
-            request.result.append(e)
+                    if request.attempts_left <= 0:
+                        error_counts = Counter(str(error) for error in request.result)
+                        formatted_errors = [f"{error}(x{count})" for error, count in error_counts.items()]
+                        logger.error(
+                            f"Request {request.task_id} failed permanently after exhausting all "
+                            f"{self.config.max_retries} retry attempts. Errors: {formatted_errors}"
+                        )
+                        failure_response = GenericResponse(
+                            response_message=None,
+                            response_errors=formatted_errors,
+                            raw_request=request.api_specific_request,
+                            raw_response=None,
+                            generic_request=request.generic_request,
+                            created_at=request.created_at,
+                            finished_at=datetime.datetime.now(),
+                        )
+                        await self.append_generic_response(status_tracker, failure_response, response_file)
+                        status_tracker.num_tasks_in_progress -= 1
+                        status_tracker.num_tasks_failed += 1
+                        return
 
-            if generic_response and generic_response.token_usage is not None:
-                used_tokens: _TokenUsage = _TokenUsage(input=generic_response.token_usage.input, output=generic_response.token_usage.output)
-                status_tracker.update_cost_projection(used_tokens)
-            else:
-                status_tracker.update_cost_projection(None)
+                    request.attempts_left -= 1
+                    attempt_number = self.config.max_retries - request.attempts_left
+                    logger.warning(
+                        f"Encountered '{exc.__class__.__name__}: {exc}' during attempt "
+                        f"{attempt_number} of {self.config.max_retries} while processing "
+                        f"request {request.task_id}"
+                    )
 
-            if request.attempts_left > 0:
-                request.attempts_left -= 1
-                logger.warning(
-                    f"Encountered '{e.__class__.__name__}: {e}' during attempt "
-                    f"{self.config.max_retries - request.attempts_left} of {self.config.max_retries} "
-                    f"while processing request {request.task_id}"
-                )
-                retry_queue.put_nowait(request)
-            else:
-                error_counts = Counter(str(err) for err in request.result)
-                formatted_errors = [f"{error}(x{count})" for error, count in error_counts.items()]
-                logger.error(
-                    f"Request {request.task_id} failed permanently after exhausting all {self.config.max_retries} retry attempts. "
-                    f"Errors: {formatted_errors}"
-                )
+                    if status_tracker.max_tokens_per_minute is not None:
+                        token_estimate = self.estimate_total_tokens(request.generic_request.messages)
+                    else:
+                        token_estimate = _TokenUsage()
 
-                generic_response = GenericResponse(
-                    response_message=None,
-                    response_errors=formatted_errors,
-                    raw_request=request.api_specific_request,
-                    raw_response=None,
-                    generic_request=request.generic_request,
-                    created_at=request.created_at,
-                    finished_at=datetime.datetime.now(),
-                )
+                    while not status_tracker.has_capacity(token_estimate):
+                        await asyncio.sleep(0.1)
+                    await self.cool_down_if_rate_limit_error(status_tracker)
+                    status_tracker.consume_capacity(token_estimate)
+                    continue
+
+                self._add_output_token_moving_window(generic_response.token_usage.output)
                 await self.append_generic_response(status_tracker, generic_response, response_file)
                 status_tracker.num_tasks_in_progress -= 1
-                status_tracker.num_tasks_failed += 1
-            return
-        else:
-            self._add_output_token_moving_window(generic_response.token_usage.output)
+                status_tracker.num_tasks_succeeded += 1
+
+                used_tokens = _TokenUsage(
+                    input=generic_response.token_usage.input,
+                    output=generic_response.token_usage.output,
+                )
+                status_tracker.update_stats(
+                    generic_response.token_usage,
+                    generic_response.response_cost,
+                )
+                status_tracker.update_cost_projection(used_tokens)
+                self._free_capacity(status_tracker, used_tokens, token_estimate)
+                return
         finally:
             if self._semaphore:
                 self._semaphore.release()
-
-        # Save response in the base class
-        await self.append_generic_response(status_tracker, generic_response, response_file)
-
-        status_tracker.num_tasks_in_progress -= 1
-        status_tracker.num_tasks_succeeded += 1
-
-        # Update cost projection with actual usage
-        used_tokens: _TokenUsage = _TokenUsage(input=generic_response.token_usage.input, output=generic_response.token_usage.output)
-        # Update stats with actual usage
-        status_tracker.update_stats(generic_response.token_usage, generic_response.response_cost)
-        status_tracker.update_cost_projection(used_tokens)
-
-        # Free the extra capacity blocked before request with actual consumed capacity.
-        self._free_capacity(status_tracker, used_tokens, blocked_capacity)
 
     def _add_output_token_moving_window(self, tokens):
         self._output_tokens_window.append(tokens)

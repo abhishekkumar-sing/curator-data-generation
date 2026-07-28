@@ -68,6 +68,23 @@ pytest-timeout = "^2.3.1"
 pytest-cov = "^6.0.0"
 psutil = "^6.1.1"
 
+[dependency-groups]
+# Standard PEP 735 mirror of the Poetry dev group so uv can install the
+# complete development toolchain with `uv pip install --group dev`.
+dev = [
+    "twine>=5,<6",
+    "ruff>=0.8.6,<0.9",
+    "vcrpy>=7,<8",
+    "isort>=5.13.2,<6",
+    "pre-commit>=4.0.1,<5",
+    "pytest>=8.3.3,<9",
+    "pytest-asyncio>=0.24,<0.25",
+    "pytest-dependency>=0.6,<0.7",
+    "pytest-timeout>=2.3.1,<3",
+    "pytest-cov>=6,<7",
+    "psutil>=6.1.1,<7",
+]
+
 [build-system]
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"

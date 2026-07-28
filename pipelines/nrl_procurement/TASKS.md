@@ -224,6 +224,92 @@ Rejected alternatives:
   environment replacement would destroy recovery state and the requested cache
   name is `.curator_working`.
 
+## Capability research — work-conserving Curator online retries
+
+Status: researched and approved for implementation on 2026-07-28.
+
+Research question:
+
+- Does the reference project's Curator retry monkey patch address a real
+  throughput problem in the installed Curator 0.1.29, and if so, what is the
+  safest way to apply the fix here?
+
+Sources consulted:
+
+- [Official Curator repository](https://github.com/bespokelabsai/curator)
+  at tagged commit `461b4170` (`v0.1.29`, fetched 2026-07-28): the online
+  processor still gathers every initial request before consuming its deferred
+  retry queue.
+- Official Curator source,
+  `base_online_request_processor.py`: the retry-only loop acquires the
+  concurrency semaphore before checking whether the queue contains a request,
+  and retries do not begin until `asyncio.gather(*pending_requests)` completes.
+- Reference project commit `d9364846`
+  (`fix(slm-data/curator): retry a request inside its own task, not on a
+  deferred queue`, inspected 2026-07-28): replaces deferred retries with an
+  in-task retry loop and adds success/permanent-failure accounting tests.
+
+Code and history verification:
+
+- This checkout and the official `v0.1.29` source have the same deferred retry
+  architecture. This is not merely a workaround for the reference project's
+  older Curator 0.1.27 pin.
+- A fast failure cannot retry while any unrelated first attempt is still
+  running. The resulting tail is largest when request latency is variable.
+- While only retry tasks remain, the dispatcher can acquire permits during
+  queue-empty iterations before observing task completion. This temporarily
+  removes otherwise available permits and can serialize the retry tail.
+- The reference checkout is heavily dirty and its current compatibility file
+  contains uncommitted changes. Only the committed patch and tests were treated
+  as evidence.
+- A controlled asynchronous simulation with 16 requests, one 0.40-second slow
+  first attempt, 15 fast failures, and 0.10-second retries measured:
+  deferred retries starting at 0.401 seconds and finishing at 0.502 seconds;
+  in-task retries starting at 0.010 seconds and finishing at 0.401 seconds.
+  This is a synthetic scheduler measurement, not an endpoint throughput claim.
+
+Decision:
+
+- [x] Use work-conserving in-task retries for online Curator requests.
+- [x] Hold exactly one concurrency permit for a request across all its attempts
+  and release it once on success or permanent failure.
+- [x] Re-check request/token capacity and rate-limit cooldown before every
+  additional attempt.
+- [x] Preserve response caching, structured-response validation, permanent
+  failure records, viewer cost projection, and status counters.
+- [x] Return unused reserved token capacity after failed responses that report
+  actual token use.
+- [x] Implement the correction directly in this editable Curator source rather
+  than monkey-patching private methods at runtime.
+- [ ] Submit or track an upstream fix before rebasing onto a later Curator
+  release; remove the local change once an equivalent tested fix is upstream.
+
+Risks and validation:
+
+- Immediate per-request retries can be less fair than putting failed requests
+  behind all first attempts, and sustained endpoint failures can keep permits
+  occupied. Curator's cooldown, RPM/TPM capacity checks, and retry bound remain
+  mandatory.
+- Unit tests must cover transient success, permanent failure, exact attempt
+  counts, empty deferred queues, status counters, failure persistence, token
+  capacity consumption, and exactly one semaphore release.
+- The first local-model pilot should record retry counts and elapsed tail time;
+  quality conclusions must not be inferred from scheduler tests.
+
+Rejected alternatives:
+
+- Copying the entire reference `compat.py`: rejected because it targets pinned
+  Curator 0.1.27/LiteLLM 1.61.3 internals and bundles unrelated platform,
+  serialization, credential, Arrow, and recovery patches.
+- Runtime monkey-patching: rejected here because the Curator source is part of
+  this editable repository; a normal source change is visible, type-checkable,
+  and testable.
+- Disabling retries: rejected because transient endpoint and schema failures
+  are expected during large local-model runs.
+- Increasing concurrency alone: rejected because it does not allow queued
+  failures to retry before the initial barrier and does not correct permit
+  acquisition when the retry queue is empty.
+
 ## Capability research — seed-driven grounded drafting
 
 Status: researched and approved for implementation on 2026-07-28; generated
