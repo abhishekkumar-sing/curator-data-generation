@@ -59,6 +59,52 @@ quality:
   dedupe_threshold: 94
   allow_unjudged_exports: false
 
+# Explicit relationships define which manuals may be combined. Lexical alignment
+# only proposes passages within these pairs; it never establishes legal equivalence.
+cross_document:
+  enabled: true
+  examples_per_bundle: 2
+  minimum_similarity: 12
+  minimum_shared_terms: 5
+  max_bundles_per_pair: 25
+  pairs:
+    - pair_id: government_nrl_goods
+      left_manual: goods_2022
+      right_manual: nrl_goods_rev1
+      relationship_type: government_company_comparison
+    - pair_id: government_nrl_works
+      left_manual: works_2022
+      right_manual: nrl_works_rev1
+      relationship_type: government_company_comparison
+    - pair_id: government_nrl_services
+      left_manual: services_2022
+      right_manual: nrl_consultancy_other_services_rev1
+      relationship_type: government_company_comparison
+    - pair_id: government_goods_temporal
+      left_manual: goods_2017
+      right_manual: goods_2024
+      relationship_type: same_authority_temporal
+    - pair_id: government_works_temporal
+      left_manual: works_2019
+      right_manual: works_2025
+      relationship_type: same_authority_temporal
+    - pair_id: government_services_consultancy_temporal
+      left_manual: services_2017
+      right_manual: services_consultancy_2025
+      relationship_type: same_authority_temporal
+    - pair_id: nrl_goods_works
+      left_manual: nrl_goods_rev1
+      right_manual: nrl_works_rev1
+      relationship_type: company_cross_domain
+    - pair_id: nrl_goods_services
+      left_manual: nrl_goods_rev1
+      right_manual: nrl_consultancy_other_services_rev1
+      relationship_type: company_cross_domain
+    - pair_id: nrl_works_services
+      left_manual: nrl_works_rev1
+      right_manual: nrl_consultancy_other_services_rev1
+      relationship_type: company_cross_domain
+
 splits:
   train: 0.8
   validation: 0.1

@@ -15,6 +15,8 @@ from datasets import Dataset
 
 from settings import CONFIG, PROJECT_ROOT, require_private_endpoint, require_setting
 from corpus import load_corpus
+from cross_document import build_bundles
+from cross_stage import CrossDocumentGenerator, CrossDocumentJudge, cross_judge_rows
 from export import assign_splits, export_records
 from schemas import CandidateBatch, JudgeBatch
 from validation import deduplicate, validate_record
@@ -61,6 +63,7 @@ class ProcurementGenerator(curator.LLM):
     response_format = CandidateBatch
 
     def prompt(self, row: dict) -> str:
+        """Render a grounded single-document generation request."""
         return f"""Generate up to {QUALITY.get("examples_per_chunk", 3)} diverse training records.
 
 Allowed question types: direct_fact, definition, authority, threshold,
@@ -95,6 +98,7 @@ Passage:
 """
 
     def parse(self, row: dict, response: CandidateBatch) -> list[dict]:
+        """Verify drafts and attach stable source provenance."""
         records = []
         for candidate in response.examples:
             draft = candidate.model_dump()
@@ -148,6 +152,7 @@ class ProcurementJudge(curator.LLM):
     response_format = JudgeBatch
 
     def prompt(self, row: dict) -> str:
+        """Render the deterministic-survivor quality review batch."""
         return f"""Judge every record strictly against its supplied evidence.
 
 Check factual support, answer relevance, preservation of conditions/exceptions,
@@ -157,10 +162,11 @@ supported only if the evidence truly does not answer it. Scores 4-5 are accepted
 Return one judgment for every record_id and do not rewrite records.
 
 Records:
-{json.dumps(row["judge_items"], ensure_ascii=False)}
+{json.dumps([item["review"] for item in row["judge_items"]], ensure_ascii=False)}
 """
 
     def parse(self, row: dict, response: JudgeBatch) -> list[dict]:
+        """Attach judge decisions and enforce the configured threshold."""
         original = {item["record_id"]: item["record"] for item in row["judge_items"]}
         results = []
         for judgment in response.judgments:
@@ -211,15 +217,23 @@ def _judge_rows(records: list[dict[str, Any]], batch_size: int) -> Dataset:
 
 
 def main() -> None:
+    """Run single- and cross-document generation through verified exports."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--source-dir", type=Path, default=PROJECT_ROOT / PATHS["source_dir"])
     parser.add_argument("--ocr-dir", type=Path, default=PROJECT_ROOT / PATHS["ocr_dir"])
     parser.add_argument("--output-dir", type=Path, default=PROJECT_ROOT / PATHS["output_dir"])
     parser.add_argument("--limit", type=int, help="Limit corpus chunks for a pilot")
+    parser.add_argument(
+        "--cross-document-limit",
+        type=int,
+        help="Limit cross-document source bundles (defaults to --limit for pilots)",
+    )
+    parser.add_argument("--skip-cross-document", action="store_true")
     parser.add_argument("--skip-judge", action="store_true", help="Development only")
     args = parser.parse_args()
 
-    rows, manuals = load_corpus(args.source_dir.resolve(), args.ocr_dir.resolve())
+    all_rows, manuals = load_corpus(args.source_dir.resolve(), args.ocr_dir.resolve())
+    rows = all_rows
     if args.limit is not None:
         rows = rows[: args.limit]
     os.environ["HOSTED_VLLM_API_KEY"] = _model_settings(GENERATION)[2]
@@ -248,6 +262,45 @@ def main() -> None:
         ).dataset.to_list()
         accepted = [row for row in judged if row["judge"]["accepted"]]
 
+    cross_accepted: list[dict[str, Any]] = []
+    cross_duplicates = 0
+    cross_config = CONFIG.get("cross_document", {})
+    if cross_config.get("enabled", False) and not args.skip_cross_document:
+        bundles = build_bundles(all_rows, cross_config)
+        cross_limit = (
+            args.cross_document_limit
+            if args.cross_document_limit is not None
+            else args.limit
+        )
+        if cross_limit is not None:
+            bundles = bundles[:cross_limit]
+        if bundles:
+            os.environ["HOSTED_VLLM_API_KEY"] = _model_settings(GENERATION)[2]
+            cross_generated = CrossDocumentGenerator(**_llm_kwargs(GENERATION))(
+                Dataset.from_list(bundles),
+                working_dir=str(args.output_dir / ".cache" / "cross_generation"),
+            ).dataset.to_list()
+            cross_generated, cross_duplicates = deduplicate(
+                cross_generated, float(QUALITY.get("dedupe_threshold", 94))
+            )
+            if args.skip_judge:
+                cross_accepted = cross_generated
+            elif cross_generated:
+                judge_profile = CONFIG["models"].get("judge", GENERATION)
+                os.environ["HOSTED_VLLM_API_KEY"] = _model_settings(judge_profile)[2]
+                cross_judged = CrossDocumentJudge(**_llm_kwargs(judge_profile))(
+                    Dataset.from_list(
+                        cross_judge_rows(
+                            cross_generated, int(QUALITY.get("judge_batch_size", 8))
+                        )
+                    ),
+                    working_dir=str(args.output_dir / ".cache" / "cross_judge"),
+                ).dataset.to_list()
+                cross_accepted = [
+                    row for row in cross_judged if row["judge"]["accepted"]
+                ]
+
+    accepted.extend(cross_accepted)
     if not accepted:
         raise SystemExit("No records passed the quality judge")
     for record in accepted:
@@ -267,7 +320,8 @@ def main() -> None:
     stats = export_records(accepted, manuals, args.output_dir.resolve())
     print(
         f"Exported {stats['records']} accepted records to {args.output_dir.resolve()} "
-        f"({duplicates} near-duplicates removed)"
+        f"({duplicates + cross_duplicates} near-duplicates removed; "
+        f"{len(cross_accepted)} cross-document records)"
     )
 
 

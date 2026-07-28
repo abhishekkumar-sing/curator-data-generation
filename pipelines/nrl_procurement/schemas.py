@@ -1,5 +1,7 @@
 """Typed records shared by generation, validation, and export."""
 
+# ruff: noqa: D101
+
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -59,3 +61,73 @@ class JudgedCandidate(BaseModel):
 
 class JudgeBatch(BaseModel):
     judgments: list[JudgedCandidate]
+
+
+CrossRelationship = Literal[
+    "same_authority_temporal",
+    "government_company_comparison",
+    "company_cross_domain",
+    "complementary_procedure",
+]
+
+
+class CrossEvidenceDraft(BaseModel):
+    source_id: str
+    quote: str = Field(min_length=8)
+
+
+class CrossClaimDraft(BaseModel):
+    statement: str = Field(min_length=8)
+    evidence: list[CrossEvidenceDraft] = Field(min_length=1)
+
+
+class CrossReasoningStepDraft(BaseModel):
+    operation: Literal[
+        "lookup",
+        "compare",
+        "apply_condition",
+        "resolve_authority",
+        "resolve_time",
+        "combine",
+        "calculate",
+        "conclude",
+    ]
+    statement: str = Field(min_length=8)
+    evidence: list[CrossEvidenceDraft] = Field(min_length=1)
+
+
+class CrossCandidate(BaseModel):
+    task_type: Literal["cross_document_qa", "cross_document_qa_cot"]
+    question_type: Literal[
+        "comparison",
+        "temporal",
+        "complementary",
+        "bridge",
+        "cross_domain",
+        "unanswerable",
+    ]
+    question: str = Field(min_length=12)
+    answer: str = Field(min_length=1)
+    answerable: bool = True
+    claims: list[CrossClaimDraft] = Field(min_length=1)
+    reasoning_steps: list[CrossReasoningStepDraft] = Field(default_factory=list)
+
+
+class CrossCandidateBatch(BaseModel):
+    examples: list[CrossCandidate]
+
+
+class CrossJudgeDecision(JudgeDecision):
+    full_context_supported: bool
+    unsupported_without_source_ids: list[str]
+    connected_reasoning: bool
+    relationship_correct: bool
+
+
+class CrossJudgedCandidate(BaseModel):
+    record_id: str
+    decision: CrossJudgeDecision
+
+
+class CrossJudgeBatch(BaseModel):
+    judgments: list[CrossJudgedCandidate]

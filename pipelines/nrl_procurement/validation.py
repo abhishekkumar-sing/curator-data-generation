@@ -65,3 +65,43 @@ def deduplicate(
     for record in accepted:
         record.pop("_normalized_question", None)
     return accepted, removed
+
+
+def validate_cross_record(record: dict[str, Any], documents: list[dict[str, Any]]) -> list[str]:
+    """Check source-specific evidence and connected two-document structure."""
+    reasons: list[str] = []
+    known = {document["source_id"]: document["passage"] for document in documents}
+    used_claim_sources: set[str] = set()
+    used_reasoning_sources: set[str] = set()
+    if set(known) != {"source_a", "source_b"}:
+        reasons.append("invalid_source_bundle")
+    for claim in record.get("claims", []):
+        if not claim.get("evidence"):
+            reasons.append("claim_without_evidence")
+        for evidence in claim.get("evidence", []):
+            source_id, quote = evidence["source_id"], evidence["quote"]
+            if source_id not in known or quote not in known.get(source_id, ""):
+                reasons.append("misattributed_or_non_verbatim_evidence")
+            used_claim_sources.add(source_id)
+    claim_support = " ".join(
+        evidence["quote"]
+        for claim in record.get("claims", [])
+        for evidence in claim.get("evidence", [])
+    ).lower()
+    for number in NUMBER.findall(record["answer"]):
+        if number.strip().lower() not in claim_support:
+            reasons.append(f"unsupported_number:{number.strip()}")
+    for step in record.get("reasoning_steps", []):
+        for evidence in step.get("evidence", []):
+            source_id, quote = evidence["source_id"], evidence["quote"]
+            if source_id not in known or quote not in known.get(source_id, ""):
+                reasons.append("misattributed_or_non_verbatim_reasoning_evidence")
+            used_reasoning_sources.add(source_id)
+    if record["answerable"] and used_claim_sources != {"source_a", "source_b"}:
+        reasons.append("claims_do_not_require_both_sources")
+    is_cot = record["task_type"] == "cross_document_qa_cot"
+    if is_cot and (len(record.get("reasoning_steps", [])) < 2 or used_reasoning_sources != {"source_a", "source_b"}):
+        reasons.append("cot_is_not_connected_to_both_sources")
+    if not is_cot and record.get("reasoning_steps"):
+        reasons.append("qa_must_not_include_reasoning_steps")
+    return sorted(set(reasons))

@@ -126,6 +126,64 @@ exceptions, procedures, or temporal questions. Its steps are concise,
 auditable rationales tied to quoted source evidence; they are not represented
 as a model's private hidden chain of thought.
 
+## Cross-document QA
+
+Cross-document generation is enabled by default. Approved manual relationships
+are listed under `cross_document.pairs` in `config.yaml`; passages are never
+combined from arbitrary documents. The configured relationships cover:
+
+- Government and NRL manuals for the same procurement domain
+- Historical and newer Government manual editions
+- NRL Goods, Works, and Services cross-domain comparisons
+
+Lexical alignment only proposes candidate passage pairs. It does not establish
+adoption, equivalence, precedence, supersession, or current applicability.
+Every accepted answerable record must:
+
+- contain source-specific claims grounded by exact quotations from both manuals;
+- preserve both manuals' issuer, policy scope, revision, and page provenance;
+- pass a connected-reasoning check;
+- be fully supported with both sources present; and
+- become unsupported or materially incomplete when either required source is
+  removed, as determined by the configured judge.
+
+This last source-ablation test prevents records that merely quote two documents
+but are actually answerable from one.
+
+For a small combined pilot, `--limit` bounds both the single-document chunks and
+cross-document bundles:
+
+```bash
+.curator/bin/python pipelines/nrl_procurement/generate.py --limit 5
+```
+
+To control cross-document volume independently:
+
+```bash
+.curator/bin/python pipelines/nrl_procurement/generate.py \
+  --limit 20 \
+  --cross-document-limit 10
+```
+
+Use `--skip-cross-document` for a single-document-only run.
+
+Additional cross-document exports are:
+
+- `cross_document_qa_sft.jsonl`
+- `cross_document_qa_cot_sft.jsonl`
+
+QA-with-CoT records contain short, auditable operations such as lookup,
+comparison, authority/time resolution, condition application, combination, and
+conclusion. The rationale is evidence-linked teaching supervision rather than
+a claim about hidden model reasoning.
+
+The design follows the supporting-fact supervision in
+[HotpotQA](https://arxiv.org/abs/1809.09600), connected question construction
+in [MuSiQue](https://arxiv.org/abs/2108.00573), explicit evidence paths in
+[2WikiMultiHopQA](https://aclanthology.org/2020.coling-main.580/), and
+contrastive support sufficiency from
+[DiRe](https://arxiv.org/abs/2005.00789).
+
 For a local development run without judging, first set
 `quality.allow_unjudged_exports: true` in `config.yaml`, then pass
 `--skip-judge`. This is intentionally disabled by default.
