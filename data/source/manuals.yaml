@@ -1,0 +1,217 @@
+# Source documents for corpus preprocessing (nrl_curator_native.preprocess).
+#
+# The corpus contains two deliberately distinguished source groups:
+#
+# 1. 16 Government of India documents under procurement_manuals/: full
+#    editions across three eras plus amendment/corrigendum Office Memoranda.
+# 2. 3 Numaligarh Refinery Limited Rev1 PDF manuals beside this file: NRL's
+#    company manuals for Goods, Works, and Consultancy & Other Services.
+#
+# Every source is registered separately so generated records retain exact
+# manual/page provenance. Government reference guidance and NRL company policy
+# must not be presented as though they have the same issuing authority.
+#
+# procurement_manuals/ is a cleaner re-conversion of the same 16 editions
+# that used to live under the now-removed "Manuals md output/" tree: one
+# Markdown file per manual instead of combined.md plus per-page files, same
+# source conversion tool and the same `<!-- Page N -->` marker convention --
+# the Markdown extractor splits on these directly, so every chunk keeps a
+# true, citable page number exactly like the original PDF path did.
+#
+# Dates use only the precision each document itself states (a full
+# "DD.MM.YYYY" for OMs, which are dated letters; "Month YYYY" or "YYYY" for
+# manual editions, which state a revision month/year on the cover but not
+# a specific day).
+
+manuals:
+  # --- Goods ---
+  - manual_id: goods_2017
+    title: Manual for Procurement of Goods, 2017
+    file: "procurement_manuals/goods_2017_full/Manual_for_Procurement_of_Goods_2017_FULL_MANUAL_ORIGINAL.md"
+    release_date: "2017"
+    revision_date: "2017"
+    as_of_date: "2017"
+    start_page: 1
+    exclude_pages: []
+
+  - manual_id: goods_2022
+    title: Manual for Procurement of Goods (Updated June, 2022)
+    file: "procurement_manuals/goods_2022_full/Manual_for_Procurement_of_Goods_2022_FULL_MANUAL_UPDATE.md"
+    release_date: "2017"
+    revision_date: "June 2022"
+    as_of_date: "June 2022"
+    start_page: 1
+    exclude_pages: []
+
+  - manual_id: goods_2024
+    title: Manual for Procurement of Goods, Second Edition, 2024
+    file: "procurement_manuals/goods_2024_full/Manual_for_Procurement_of_Goods_2024_FULL_MANUAL_CURRENT.md"
+    release_date: "2024"
+    revision_date: "2024"
+    as_of_date: "2024"
+    start_page: 1
+    exclude_pages: []
+
+  - manual_id: goods_om_2018_issuance
+    title: >-
+      OM: Issuance of Manual for Procurement of Goods, 2017 and Manual for
+      Procurement of Consultancy & Other Services, 2017
+    file: "procurement_manuals/goods_notice_2018_issuance/Amendment_Notice_2018-12-28_Goods_and_Services_2017_Manuals_Issuance_OM.md"
+    release_date: "28.12.2018"
+    revision_date: "28.12.2018"
+    as_of_date: "28.12.2018"
+    start_page: 1
+    exclude_pages: []
+    # Issued for both families, so a services-scoped run must also see it.
+    amends: [goods_2017, services_2017]
+
+  - manual_id: goods_om_2021_networth
+    title: "OM: Amendment to Annexure 9 Prequalification Criteria (Net Worth), Manual for Procurement of Goods 2017"
+    file: "procurement_manuals/goods_amend_2021_criteria3b/Amendment_Notice_2021-02-11_Goods2017_Annexure9_Criteria3b_FinancialLossClause_Deleted.md"
+    release_date: "11.02.2021"
+    revision_date: "11.02.2021"
+    as_of_date: "11.02.2021"
+    start_page: 1
+    exclude_pages: []
+
+  - manual_id: goods_om_2022_l1_withdrawal
+    title: "OM: Withdrawal of Offer by L-1 — Amendment to Manual for Procurement of Goods 2017 and Works 2019"
+    file: "procurement_manuals/goods_works_amend_2022_l1/Amendment_Notice_2022-04-21_Goods2017_and_Works2019_L1_Withdrawal_Retender_Rule_Change.md"
+    release_date: "21.04.2022"
+    revision_date: "21.04.2022"
+    as_of_date: "21.04.2022"
+    start_page: 1
+    exclude_pages: []
+    # Amends paras 5.6.8 (Goods 2017) and 7.5.11 (Works 2019).
+    amends: [goods_2017, works_2019]
+
+  # --- Services ---
+  - manual_id: services_2017
+    title: Manual for Procurement of Consultancy & Other Services 2017
+    file: "procurement_manuals/services_2017_full/Manual_for_Procurement_of_Consultancy_and_Other_Services_2017_FULL_MANUAL_ORIGINAL.md"
+    release_date: "2017"
+    revision_date: "2017"
+    as_of_date: "2017"
+    start_page: 1
+    exclude_pages: []
+
+  - manual_id: services_2022
+    title: Manual for Procurement of Consultancy & Other Services (Updated June, 2022)
+    file: "procurement_manuals/services_2022_full/Manual_for_Procurement_of_Consultancy_and_Other_Services_2022_FULL_MANUAL_UPDATE.md"
+    release_date: "2017"
+    revision_date: "June 2022"
+    as_of_date: "June 2022"
+    start_page: 1
+    exclude_pages: []
+
+  - manual_id: services_consultancy_2025
+    title: Manual for Procurement of Consultancy Services, Second Edition, 2025
+    file: "procurement_manuals/services_2025_consultancy_full/Manual_for_Procurement_of_Consultancy_Services_2025_FULL_MANUAL_CURRENT.md"
+    release_date: "2025"
+    revision_date: "2025"
+    as_of_date: "2025"
+    start_page: 1
+    exclude_pages: []
+
+  - manual_id: services_non_consultancy_2025
+    title: Manual for Procurement of Non-Consultancy Services (2025)
+    file: "procurement_manuals/services_2025_nonconsultancy_full/Manual_for_Procurement_of_Non_Consultancy_Services_2025_FULL_MANUAL_CURRENT.md"
+    release_date: "2025"
+    revision_date: "2025"
+    as_of_date: "2025"
+    start_page: 1
+    exclude_pages: []
+
+  - manual_id: services_om_2021_startup_definition
+    title: "OM: Amendment to Manual for Procurement of Consultancy & Other Services 2017 — Startup Definition"
+    file: "procurement_manuals/services_amend_2021_startup/Amendment_Notice_2021-08-02_Services2017_Para1.9.1ix_Startup_Definition_Changed.md"
+    release_date: "02.08.2021"
+    revision_date: "02.08.2021"
+    as_of_date: "02.08.2021"
+    start_page: 1
+    exclude_pages: []
+
+  # --- Works ---
+  - manual_id: works_2019
+    title: Manual for Procurement of Works, 2019 Revision
+    file: "procurement_manuals/works_2019_full/Manual_for_Procurement_of_Works_2019_FULL_MANUAL_ORIGINAL.md"
+    release_date: "04.07.2019"
+    revision_date: "04.07.2019"
+    as_of_date: "2019"
+    start_page: 1
+    exclude_pages: []
+
+  - manual_id: works_2022
+    title: Manual for Procurement of Works (Updated June, 2022)
+    file: "procurement_manuals/works_2022_full/Manual_for_Procurement_of_Works_2022_FULL_MANUAL_UPDATE.md"
+    release_date: "2019"
+    revision_date: "June 2022"
+    as_of_date: "June 2022"
+    start_page: 1
+    exclude_pages: []
+
+  - manual_id: works_2025
+    title: Manual for Procurement of Works, Second Edition, 2025
+    file: "procurement_manuals/works_2025_full/Manual_for_Procurement_of_Works_2025_FULL_MANUAL_CURRENT.md"
+    release_date: "2025"
+    revision_date: "2025"
+    as_of_date: "2025"
+    start_page: 1
+    exclude_pages: []
+
+  - manual_id: works_om_2022_corrigendum_pqb
+    title: "Corrigendum: Updated Manual for Procurement of Works — Para 3.3.6(iv) PQB Submission Period"
+    file: "procurement_manuals/works_corrigendum_2022/Amendment_Notice_2022-08-04_Works2022_Para3.3.6iv_PQB_Submission_Period_Corrigendum.md"
+    release_date: "04.08.2022"
+    revision_date: "04.08.2022"
+    as_of_date: "04.08.2022"
+    start_page: 1
+    exclude_pages: []
+
+  - manual_id: works_om_2022_para763_certification
+    title: "OM: Manuals for Procurement of Works (Updated 2022) — Amendment to Para 7.6.3 Project Staff Certification"
+    file: "procurement_manuals/works_amend_2022_para7_6_3/Amendment_Notice_2022-09-28_Works2022_Para7.6.3_ProjectStaffCertification_Changed.md"
+    release_date: "28.09.2022"
+    revision_date: "28.09.2022"
+    as_of_date: "28.09.2022"
+    start_page: 1
+    exclude_pages: []
+
+  # --- NRL company manuals ---
+  # Page 1 is the cover and page 2 is blank. Starting at page 3 retains the
+  # disclaimer/currentness warning and every substantive/manual page.
+  - manual_id: nrl_goods_rev1
+    title: NRL Manual for Procurement of Goods, Rev1
+    file: "nrlManual_Procurement_of_Goods_Rev1.pdf"
+    release_date: "07.11.2022"
+    revision_date: "16.03.2023"
+    as_of_date: "16.03.2023"
+    source_category: company_manual
+    issuing_organization: Numaligarh Refinery Limited
+    policy_scope: nrl_company_policy
+    start_page: 3
+    exclude_pages: []
+
+  - manual_id: nrl_works_rev1
+    title: NRL Manual for Procurement of Works, Rev1
+    file: "nrlManual_Procurement_of_Works_Rev1.pdf"
+    release_date: "07.11.2022"
+    revision_date: "16.03.2023"
+    as_of_date: "16.03.2023"
+    source_category: company_manual
+    issuing_organization: Numaligarh Refinery Limited
+    policy_scope: nrl_company_policy
+    start_page: 3
+    exclude_pages: []
+
+  - manual_id: nrl_consultancy_other_services_rev1
+    title: NRL Manual for Procurement of Consultancy & Other Services, Rev1
+    file: "nrlManual_Procurement_of_Consultancy_Other_Services_Rev1.pdf"
+    release_date: "07.11.2022"
+    revision_date: "16.03.2023"
+    as_of_date: "16.03.2023"
+    source_category: company_manual
+    issuing_organization: Numaligarh Refinery Limited
+    policy_scope: nrl_company_policy
+    start_page: 3
+    exclude_pages: []
