@@ -1,6 +1,6 @@
 # NRL procurement synthetic data
 
-This example reads procurement manuals from
+This pipeline reads procurement manuals from
 `/home/abhishek/curator/data/source` and generates grounded question-answer
 examples through an OpenAI-compatible local endpoint. Existing Markdown
 documents are consumed directly; PDFs are converted with Chandra OCR 2 first.
@@ -17,11 +17,17 @@ TELEMETRY_ENABLED=false
 GENERATION_MODEL=nvidia/nemotron-3-super
 GENERATION_BASE_URL=http://10.180.148.183:3011/v1
 GENERATION_API_KEY=replace-me
+
+JUDGE_MODEL=nvidia/nemotron-3-super
+JUDGE_BASE_URL=http://10.180.148.183:3011/v1
+JUDGE_API_KEY=replace-me
 ```
 
-The Python code contains no fixed model name or endpoint. To use another model,
-change these three values only. `.env` is gitignored; `.env.example` is the safe
-template that can be committed.
+The Python code contains no fixed model name or endpoint. Generation, judging,
+and OCR can each be changed through `.env` without editing Python. Use a
+different judge model for production when one is available; using the
+generation model for both roles is supported for pilots. `.env` is gitignored;
+`.env.example` is the safe template that can be committed.
 
 `config.yaml` contains committed, non-secret defaults for paths, model
 parameters, model environment-variable names, and privacy behavior. `.env`
@@ -77,28 +83,57 @@ OCR_COMMAND=chandra
 Then convert all PDFs:
 
 ```bash
-python pipelines/nrl_procurement/preprocess_pdfs.py
+.curator/bin/python pipelines/nrl_procurement/preprocess_pdfs.py
 ```
+
+The command enables Chandra's official paginated output. Corpus loading
+requires exactly one OCR result for every registered PDF and retains its page
+number, source hash, revision, issuer, and policy scope.
 
 ## Run
 
 Start with a small pilot:
 
 ```bash
-python pipelines/nrl_procurement/generate.py --limit 5
+.curator/bin/python pipelines/nrl_procurement/generate.py --limit 5
 ```
 
 Remove `--limit` to process all Markdown pages:
 
 ```bash
-python pipelines/nrl_procurement/generate.py
+.curator/bin/python pipelines/nrl_procurement/generate.py
 ```
 
-Curator request and response caches are written under `data/synthetic`. The
-final Hugging Face dataset is saved under
-`data/synthetic/procurement_qa`.
+Curator request and response caches are written under
+`data/synthetic/.cache`. Accepted records are written to:
 
-The generator consumes both the 16 page-preserving Markdown documents under
-`data/source/procurement_manuals` and OCR Markdown under
-`data/interim/ocr`. Native page markers are retained where available;
-otherwise Chandra Markdown is divided into bounded, numbered source chunks.
+- `canonical.jsonl`: lossless records, provenance, checks, and judge output
+- `qa_sft.jsonl`: concise QA chat training data
+- `qa_cot_sft.jsonl`: QA with short evidence-based teaching rationales
+- `rag.jsonl`: questions, contexts, and answerability labels
+- `eval.jsonl`: reference answers and evidence for evaluation
+- `manifest.json`: source hashes, metadata, and output statistics
+
+Only files registered in `data/source/manuals.yaml` are consumed. Records are
+rejected for non-verbatim evidence, unsupported answer numbers, lost
+qualifications, invalid rationale evidence, or a failing judge score.
+Near-duplicate questions are removed. Train/validation/test assignment keeps an
+entire manual—and manuals connected by an amendment—in one split to reduce
+leakage.
+
+`qa_cot` is used only for genuinely multi-step scenarios, conditions,
+exceptions, procedures, or temporal questions. Its steps are concise,
+auditable rationales tied to quoted source evidence; they are not represented
+as a model's private hidden chain of thought.
+
+For a local development run without judging, first set
+`quality.allow_unjudged_exports: true` in `config.yaml`, then pass
+`--skip-judge`. This is intentionally disabled by default.
+
+## Tests
+
+After installing the project environment:
+
+```bash
+.curator/bin/python -m pytest -q --confcutdir=tests/nrl_procurement tests/nrl_procurement
+```

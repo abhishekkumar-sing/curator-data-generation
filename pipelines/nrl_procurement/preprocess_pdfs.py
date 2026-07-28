@@ -60,6 +60,7 @@ def main() -> None:
             "--method",
             "vllm",
             "--no-images",
+            "--paginate_output",
             "--batch-size",
             str(args.batch_size),
             "--max-workers",
