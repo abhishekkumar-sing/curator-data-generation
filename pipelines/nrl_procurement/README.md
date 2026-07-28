@@ -41,7 +41,7 @@ OCR_COMMAND=chandra
 Then convert all PDFs:
 
 ```bash
-python examples/nrl-procurement/preprocess_pdfs.py
+python pipelines/nrl_procurement/preprocess_pdfs.py
 ```
 
 ## Run
@@ -49,13 +49,13 @@ python examples/nrl-procurement/preprocess_pdfs.py
 Start with a small pilot:
 
 ```bash
-python examples/nrl-procurement/generate.py --limit 5
+python pipelines/nrl_procurement/generate.py --limit 5
 ```
 
 Remove `--limit` to process all Markdown pages:
 
 ```bash
-python examples/nrl-procurement/generate.py
+python pipelines/nrl_procurement/generate.py
 ```
 
 Curator request and response caches are written under `data/synthetic`. The
