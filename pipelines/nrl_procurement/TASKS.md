@@ -801,6 +801,242 @@ Primary references:
 - [Curator LiteLLM guide](https://docs.bespokelabs.ai/bespoke-curator/how-to-guides/using-litellm-with-curator)
 - [Official Curator GitHub repository](https://github.com/bespokelabsai/curator)
 
+## Holistic pilot-quality and OCR research
+
+Status: researched on 2026-07-28; implementation intentionally deferred until
+the complete failure system was examined.
+
+### Scope
+
+The `pilot-001` failures must not be treated as isolated prompt or regular
+expression bugs. The quality system spans:
+
+1. source registration and OCR provenance;
+2. page/chunk preparation;
+3. representative input selection;
+4. task planning;
+5. structured generation and bounded recovery;
+6. deterministic grounding checks;
+7. independent model judgment;
+8. leakage-safe exports and complete run reporting;
+9. controlled human review before scale.
+
+### Research basis
+
+- [Official Chandra OCR repository](https://github.com/datalab-to/chandra)
+  documents page-oriented PDF conversion to structured Markdown/HTML/JSON and
+  reports materially different accuracy across tables, layout, scans, and
+  languages. Page completion alone is therefore necessary but not a semantic
+  accuracy guarantee.
+- [Official Chandra OCR 2 model card](https://huggingface.co/datalab-to/chandra-ocr-2)
+  identifies the exact model family, supported output forms, benchmark
+  categories, throughput, and model-weight license.
+- [Official Curator structured-output guide](https://docs.bespokelabs.ai/bespoke-curator/getting-started/structured-output)
+  and [API reference](https://docs.bespokelabs.ai/bespoke-curator/api-reference)
+  establish Pydantic response formats and parse-stage conversion. A valid
+  object schema does not establish that free text inside a string is grounded,
+  correctly formatted, or complete.
+- [Official vLLM structured-output documentation](https://docs.vllm.ai/en/latest/features/structured_outputs/)
+  establishes schema-constrained decoding for OpenAI-compatible servers. The
+  pipeline must still perform domain validation after decoding.
+- [Pydantic validator documentation](https://docs.pydantic.dev/latest/concepts/validators/)
+  supports deterministic before/after validation, but repair must be narrow,
+  observable, and must not invent procurement content.
+- [Instructor retry documentation](https://python.useinstructor.com/concepts/retrying/)
+  supports validation-aware retries. Recovery must remain bounded and preserve
+  the failed attempt for audit rather than silently reducing expected output.
+- Yehudai et al., [Achieving Human Parity in Content-Grounded Datasets
+  Generation](https://proceedings.iclr.cc/paper_files/paper/2024/hash/a774503daed55eb53c634847ae071ec7-Abstract-Conference.html),
+  separates content preparation, generation, and faithfulness filtering.
+- Min et al., [FActScore](https://ai.meta.com/research/publications/factscore-fine-grained-atomic-evaluation-of-factual-precision-in-long-form-text-generation/),
+  evaluates long-form output as atomic claims supported by reliable sources.
+  Drafting validation should likewise judge material claims, not only declared
+  evidence lists.
+- Alberti et al., [Training Question Answering Models From Synthetic
+  Data](https://aclanthology.org/2020.emnlp-main.468/), uses round-trip
+  consistency filtering for synthetic QA.
+- Rajpurkar et al., [SQuAD 2.0](https://aclanthology.org/P18-2124/), includes
+  plausible unanswerable questions to teach abstention. It does not justify an
+  accidental abstention ratio produced by sampling cover pages.
+- Vacareanu et al., [General Purpose Verification for Chain of Thought
+  Prompting](https://arxiv.org/abs/2405.00204), validates individual reasoning
+  steps for relevance, accuracy, and logical consistency. Answer correctness
+  alone is insufficient for rationale supervision.
+- Wang et al., [Diversity Measurement and Subset Selection for Instruction
+  Tuning Datasets](https://arxiv.org/abs/2402.02318), and Liu et al.,
+  [What Makes Good Data for Alignment?](https://proceedings.iclr.cc/paper_files/paper/2024/hash/6091f2bb355e960600f62566ac0e2862-Abstract-Conference.html),
+  support explicit quality, complexity, and diversity measurement rather than
+  prefix sampling.
+- Document-group isolation is required to avoid evaluation leakage; related or
+  amendment-connected manuals must remain atomic split groups. A tiny pilot is
+  a coverage test, not evidence that train/validation/test proportions have
+  converged.
+
+### Local data and OCR audit
+
+Observed under `data/`:
+
+- `manuals.yaml` registers 19 unique documents with 19 unique paths: 16
+  Government of India Markdown sources and three NRL PDFs.
+- The three PDF SHA-256 values exactly match their `.chandra-cache.json`
+  records.
+- Chandra metadata reports 79 consultancy/services pages, 270 goods pages, and
+  148 works pages. The corpus page parser resolves exactly 79, 270, and 148
+  pages respectively, with no empty pages or Unicode replacement characters.
+- The cache records the input hash, `vllm` method, and pagination flag but not
+  the OCR model identifier, package/model revision, generation parameters, or
+  output hashes. An input match therefore cannot prove reproducible extraction.
+- The loaded corpus contains 3,006 chunks. Of these, 621 contain image Markdown
+  and 679 contain HTML layout elements, mainly tables. Image descriptions and
+  duplicated cover text can generate low-value questions; table markup may
+  contain essential policy and must not be stripped indiscriminately.
+- `--limit 5`, `--limit 20`, and even `--limit 100` currently select only the
+  beginning of `goods_2017`. The five-row pilot sampled pages 1, 2, 4, 6, and
+  8, including cover/front matter. This directly explains the narrow authority
+  coverage and elevated unanswerable share.
+- Drafting seed IDs resolve to this corpus's current chunk IDs. Both seeds were
+  generated in `pilot-001`; neither passed the final drafting gate.
+
+### `pilot-001` quality audit
+
+- Ten canonical records were accepted: seven single-document QA, two
+  cross-document QA, and one cross-document QA-with-rationale.
+- All accepted records were assigned to `train`; a ten-record, highly connected
+  pilot is too small to assess requested split proportions.
+- Three of seven single-document records are abstentions. The observed ratio is
+  caused by front-matter prefix sampling and is not an authored target.
+- `qa_cot_sft.jsonl` contains the same cross-document rationale also written to
+  `cross_document_qa_cot_sft.jsonl`; there is no accepted single-document
+  `qa_cot` record.
+- The three cross-document records are well grounded and require both sources,
+  but two of five requested cross-document generations did not materialize as
+  dataset rows. The run manifest does not report that incompleteness.
+- Both drafting generations were rejected. The NIT output used `<br>` instead
+  of newline characters. The LD output was one line, invented `NRL Procurement
+  Division`, and exposed a numeric checker that treats list ordinals and a
+  hyphenated tender ID as policy numbers.
+- The manifest reports accepted QA task counts only. It omits expected versus
+  materialized requests, deterministic/model rejection counts and reasons,
+  drafting counts, repair counts, latency, source coverage, OCR fingerprint,
+  and model/config fingerprints.
+
+### Design decisions
+
+#### Source and OCR integrity
+
+- [ ] Validate registered source uniqueness, source hashes, OCR page count, and
+  non-empty pages before generation.
+- [ ] Extend OCR cache provenance with OCR model, package/model revision,
+  relevant command settings, and hashes of canonical Markdown and metadata.
+- [ ] Emit a corpus-quality report with page/chunk counts, short-page outliers,
+  image-only/front-matter candidates, HTML/table counts, replacement
+  characters, and seed-anchor resolution.
+- [ ] Remove image references and generated image captions from text supplied
+  to QA generation while retaining page provenance. Preserve meaningful table
+  structure through a tested canonical representation.
+- [ ] Do not drop cover/front matter globally: authority, edition, and issuance
+  facts can be useful. Classify it and sample it deliberately at a bounded rate.
+
+#### Representative planning
+
+- [ ] Replace prefix limiting with deterministic round-robin stratification by
+  manual, authority/source category, document family, page band/section, and
+  content class.
+- [ ] Make a pilot coverage plan explicit before model calls. Report requested,
+  generated, accepted, and rejected counts per manual, task type, question
+  type, answerability, authority, and relationship type.
+- [ ] Treat `--limit` as total planned source units, not the first N corpus
+  rows. A limit smaller than the number of required strata must fail clearly or
+  report which strata were intentionally omitted.
+- [ ] Use an authored/configured answerable/unanswerable target range. Generate
+  unanswerable examples from plausible evidence gaps or counterfactual
+  removals, not because cover text lacks an answer.
+
+#### QA and rationale contracts
+
+- [ ] Plan `qa` and `qa_cot` separately. Do not depend on the generator to
+  choose the run's task distribution.
+- [ ] Assign `qa_cot` only to evidence windows with at least two connected
+  material claims or operations. Never force a decorative rationale onto a
+  direct lookup.
+- [ ] Validate every rationale step for an explicit operation, grounded inputs,
+  supported output, connectivity to adjacent steps, and contribution to the
+  final answer.
+- [ ] Keep single-document QA/CoT exports distinct from cross-document QA/CoT
+  exports. A combined export, if desired, must have a different explicit name.
+- [ ] Preserve abstention records separately in metrics and optionally in a
+  dedicated export so their training weight can be chosen from downstream
+  validation rather than accidental corpus order.
+
+#### Grounded drafting
+
+- [ ] Normalize only lossless surface variants before validation: line endings,
+  surrounding whitespace, and explicit `<br>` tags to newline characters.
+  Record every repair. Do not infer headings, facts, clauses, or missing text.
+- [ ] Reject remaining HTML markup in final plain-text drafting records.
+- [ ] Remove ordered-list markers before numeric fact comparison and ensure
+  hyphenated identifiers are compared as identifiers, not partial numbers.
+  Continue rejecting genuine unsupported percentages, amounts, dates,
+  durations, emails, and identifiers.
+- [ ] Extract material drafting claims/fields (organization, authority,
+  contacts, references, thresholds, remedies, conditions, exceptions) and
+  require support from tender facts or manual evidence. A model-declared
+  `tender_facts_used` list is not sufficient.
+- [ ] Explicitly reject unsupported labeled authority/organization fields such
+  as the observed `NRL Procurement Division`.
+- [ ] Send deterministically valid drafts to the independent judge; do not let a
+  formatting false positive prevent semantic judgment. Do not weaken
+  deterministic grounding to increase acceptance.
+
+#### Completeness, recovery, and judging
+
+- [ ] Track expected request IDs through generation, parse, deterministic
+  validation, judge, and export. No requested row may silently disappear.
+- [ ] Quarantine malformed/missing outputs with exact failure class and raw
+  cache lineage.
+- [ ] Add bounded rescue only for explicitly recoverable failures such as
+  schema truncation or lossless formatting. Rescue uses its own cache stage and
+  attempt budget; it must not retry deterministic unsupported content
+  indefinitely.
+- [ ] Enforce generator/judge independence for production profiles and record
+  endpoint/model identities. Add a small adversarial judge preflight containing
+  supported, unsupported, qualification-losing, and malformed examples.
+- [ ] Report judge score distributions and disagreement with deterministic
+  checks. An all-5 pilot is a calibration warning, not proof of perfect data.
+
+#### Exports, splits, and run manifest
+
+- [ ] Write the manifest last, atomically, with a terminal status of
+  `complete`, `partial`, or `failed`.
+- [ ] Include code revision, source/OCR fingerprints, non-secret model/config
+  fingerprints, stage timing, expected/materialized/accepted/rejected counts,
+  rejection reasons, repairs, retries, cache reuse, and coverage distributions.
+- [ ] Never label a partial run complete. Preserve audit and rejection files on
+  failure, but withhold publishable final files when required gates fail.
+- [ ] Keep amendment/edition/authority-connected documents in atomic split
+  groups. Report absent splits as a pilot-size limitation; require minimum
+  independent group counts before producing evaluation claims.
+- [ ] Add a frozen, human-reviewed evaluation set outside generated training
+  data. Generated `eval.jsonl` is useful for pipeline testing but is not an
+  independent gold benchmark.
+
+### Acceptance criteria before the next pilot
+
+- [ ] Corpus preflight passes and writes an auditable quality report.
+- [ ] A fixed-seed pilot covers multiple manuals, both authority classes,
+  multiple document families/page bands, single QA, genuine single QA-CoT,
+  cross-document QA, and cross-document QA-CoT.
+- [ ] Every planned request has a terminal lineage state.
+- [ ] Final task-specific exports are non-overlapping and their counts reconcile
+  exactly with canonical records and manifest statistics.
+- [ ] Both drafting seeds either pass all deterministic and independent-judge
+  gates into `drafting.jsonl`, or remain rejected with accurate non-spurious
+  reasons.
+- [ ] No unsupported authority, identifier, numeric value, email, condition,
+  exception, or remedy is present in accepted drafting.
+- [ ] Human review of all records in the small pilot confirms grounding,
+  naturalness, task usefulness, and rationale faithfulness before scale.
+
 ## Quality metrics
 
 Every generation run must report the following.
