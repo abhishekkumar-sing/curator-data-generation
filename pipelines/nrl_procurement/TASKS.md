@@ -765,9 +765,16 @@ Evidence:
   request and zero available tokens. Its replenishment loop then adds capacity
   linearly and caps it at the configured per-minute limits. Consequently a
   known-safe local endpoint unnecessarily starts with an almost-empty bucket.
-- Reference commit `39fca352` identifies the same issue and initializes both
-  buckets from their configured limits. This is a focused token-bucket fix,
-  not a pipeline monkey patch.
+- Curator repository commit `39fca352` identifies the same issue and
+  initializes both buckets from their configured limits. This is a focused
+  Curator token-bucket fix, not a reference-pipeline monkey patch.
+- The separate `nrl_curator_native_glm52` application does not patch
+  `OnlineStatusTracker` and its history contains no
+  `available_request_capacity` change. It configures official backend knobs
+  (10,000 RPM, 100,000,000 TPM, and endpoint-specific concurrency) and patches
+  Curator 0.1.27's deferred retry scheduler. The retry fix prevents a
+  low-concurrency retry tail but cannot reduce a model server's time to
+  generate one response.
 - The `pilot-001` logs confirm manual limits of 10,000 RPM and 100,000,000 TPM
   were active. They also show that all five cross-document tasks started with
   no rate-limit errors. The stage still took about 7 minutes 53 seconds because
