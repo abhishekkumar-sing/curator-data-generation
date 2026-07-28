@@ -76,6 +76,93 @@ Research-gate acceptance criteria:
 - No large generation run begins solely on the basis of schema validation or
   passing unit tests.
 
+## Capability research — prompt specification refactor
+
+Status: researched and approved for implementation on 2026-07-28; output
+quality remains provisional until fixed-case prompt evaluations and a manually
+reviewed local-model pilot are complete.
+
+Research question:
+
+- How should all existing generation and judge prompts be rewritten as clear,
+  grounded, model-portable specifications without changing their dataset
+  schemas or weakening deterministic validation?
+
+Sources consulted:
+
+- [OpenAI prompt-engineering best practices](https://help.openai.com/en/articles/6654000-how-to-use-advanced-prompt-engineering)
+  (accessed 2026-07-28): put clear instructions first, separate instructions
+  from context with delimiters, specify the desired output, and use examples
+  when zero-shot instructions are insufficient.
+- [OpenAI model guidance](https://developers.openai.com/api/docs/guides/latest-model)
+  (accessed 2026-07-28): leaner prompts can outperform accumulated instruction
+  blocks; prompt changes should be evaluated rather than assumed beneficial.
+- [Anthropic prompting best practices](https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/claude-prompting-best-practices)
+  (accessed 2026-07-28): use clear, direct instructions, consistent structure,
+  explicit context, and relevant examples for difficult formats.
+- [Google Gemini prompt-design strategies](https://ai.google.dev/gemini-api/docs/prompting-strategies)
+  (accessed 2026-07-28): define inputs and constraints, partition complex
+  prompts, keep few-shot formatting consistent, and iteratively test prompt
+  variants. The exact model documentation controls long-context ordering and
+  decoding recommendations.
+- [Hugging Face structured-output guide](https://huggingface.co/docs/inference-providers/guides/structured-output)
+  (accessed 2026-07-28): API-enforced JSON Schema is more reliable than asking
+  for JSON only; prompt-only JSON remains a compatibility fallback.
+- The repository's
+  [`PROMPTING_STANDARD.md`](PROMPTING_STANDARD.md): the resulting SPEC-EVAL
+  method requires a direct task, partitioned untrusted input, evidence policy,
+  prioritized constraints, schema-backed output contract, observable final
+  checks, selective examples, and a repeatable evaluation loop.
+
+Code verification:
+
+- Six pipeline prompts exist: single-document generation and judging in
+  `generate.py`, cross-document generation and judging in `cross_stage.py`,
+  and drafting generation and judging in `drafting.py`.
+- All six already use typed Pydantic response formats, but their prompts do not
+  consistently label source text as untrusted input, define every field's
+  semantics, state cardinality requirements, define missing/conflicting-source
+  behavior, or provide an observable final checklist.
+- Deterministic validators enforce exact quotations, numeric support,
+  qualification preservation, QA/rationale separation, two-source evidence,
+  and drafting-specific number/email support. Prompt requirements should align
+  exactly with those checks rather than introduce a second, inconsistent
+  contract.
+- Judge acceptance is computed in code. The prompts must define boolean and
+  scoring semantics, but must not claim that a model judgment replaces
+  deterministic checks.
+
+Decision:
+
+- [x] Rewrite all six prompts using consistent TASK, SOURCE POLICY,
+  CONSTRAINTS, OUTPUT CONTRACT, UNTRUSTED INPUT, and FINAL CHECK sections.
+- [x] Keep output shape in Pydantic schemas and structured-output transport;
+  prompts explain semantics and relationships rather than embedding raw JSON
+  examples.
+- [x] Require exact evidence, explicit source authority, safe missing/conflict
+  behavior, and complete one-to-one judge coverage.
+- [x] Request concise auditable rationales only for rationale dataset variants;
+  never request private hidden chain-of-thought.
+- [x] Keep sampling, thinking controls, model names, endpoints, and structured
+  output modes in configuration.
+- [ ] Evaluate old and new prompts on a fixed representative set before a
+  production-scale generation run.
+
+Rejected alternatives:
+
+- Adding a long persona to every prompt: rejected because it does not define
+  observable correctness and adds tokens without resolving a domain ambiguity.
+- Embedding hand-written JSON examples in every prompt: rejected because the
+  response is already schema-constrained and examples can leak content or
+  create false format conflicts. Add examples only in response to measured
+  failures.
+- Asking for unrestricted chain-of-thought: rejected because the training
+  contract needs short, evidence-linked teaching rationales, not hidden model
+  reasoning.
+- Relying on prompt instructions alone: rejected because deterministic checks,
+  schema validation, judge review, and human pilot review cover different
+  failure modes.
+
 ## Capability research — seed-driven grounded drafting
 
 Status: researched and approved for implementation on 2026-07-28; generated

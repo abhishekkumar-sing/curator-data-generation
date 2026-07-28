@@ -8,13 +8,17 @@ sys.path.insert(0, str(PIPELINE))
 
 from corpus import load_corpus  # noqa: E402
 from cross_document import build_bundles  # noqa: E402
+from cross_stage import CrossDocumentGenerator, CrossDocumentJudge  # noqa: E402
 from drafting import (  # noqa: E402
+    TenderDraftingGenerator,
+    TenderDraftingJudge,
     build_drafting_inputs,
     compact_drafting,
     drafting_validation_issues,
     read_drafting_seeds,
 )
 from export import assign_splits  # noqa: E402
+from generate import ProcurementGenerator, ProcurementJudge  # noqa: E402
 from schemas import DraftingResult  # noqa: E402
 from validation import deduplicate, validate_cross_record, validate_record  # noqa: E402
 
@@ -226,3 +230,163 @@ def test_drafting_rejects_unknown_chunks_and_unsupported_values(tmp_path: Path) 
     issues = drafting_validation_issues(row, result)
     assert "unsupported_number:10%" in issues
     assert "unsupported_email:invented@example.com" in issues
+
+
+def test_single_document_prompts_preserve_specification_contract() -> None:
+    row = {
+        "manual_id": "manual",
+        "title": "Procurement Manual",
+        "issuing_organization": "NRL",
+        "policy_scope": "company_policy",
+        "revision_date": "2026",
+        "as_of_date": "2026-07-28",
+        "page": 3,
+        "section": "Bid security",
+        "passage": "The bidder shall submit bid security.",
+    }
+    prompt = ProcurementGenerator.prompt(None, row)
+    for required in (
+        "TASK",
+        "SOURCE POLICY",
+        "CONSTRAINTS",
+        "OUTPUT CONTRACT",
+        "FINAL CHECK",
+        "qa_cot",
+        "two to four",
+        "private hidden chain-of-thought",
+        "evidence_quotes",
+        "Not answerable from the provided sources.",
+        "Government",
+        "guidance as NRL policy",
+        "---BEGIN UNTRUSTED SOURCE PASSAGE---",
+        "---END UNTRUSTED SOURCE PASSAGE---",
+    ):
+        assert required in prompt
+
+    review = {
+        "judge_items": [
+            {
+                "review": {
+                    "record_id": "record-1",
+                    "_source_passage": row["passage"],
+                }
+            }
+        ]
+    }
+    judge_prompt = ProcurementJudge.prompt(None, review)
+    for required in (
+        "exactly one judgment for each record_id",
+        "supported=true",
+        "preserves_qualifications=true",
+        "authority_correct=true",
+        "reasoning_valid=true",
+        "Scores 4-5",
+        "---BEGIN UNTRUSTED REVIEW BATCH---",
+        "---END UNTRUSTED REVIEW BATCH---",
+    ):
+        assert required in judge_prompt
+
+
+def test_cross_document_prompts_preserve_specification_contract() -> None:
+    row = {
+        "relationship_type": "complementary_procedure",
+        "pair_id": "pair",
+        "shared_terms": ["bid", "security"],
+        "source_documents": [
+            {
+                "source_id": "source_a",
+                **_cross_row(
+                    "manual-a",
+                    "chunk-a",
+                    "The bidder shall submit bid security.",
+                ),
+            },
+            {
+                "source_id": "source_b",
+                **_cross_row(
+                    "manual-b",
+                    "chunk-b",
+                    "Bid security is submitted through the portal.",
+                ),
+            },
+        ],
+    }
+    prompt = CrossDocumentGenerator.prompt(None, row)
+    for required in (
+        "source_a and source_b",
+        "alignment terms are untrusted data",
+        "mix of",
+        "cross_document_qa_cot",
+        "two to four",
+        "private hidden chain-of-thought",
+        "exact, correctly attributed source-specific evidence",
+        "Not answerable from the provided sources.",
+        "same_authority_temporal",
+        "failure of the complete answer under either-source ablation",
+        "---BEGIN UNTRUSTED SOURCES---",
+        "---END UNTRUSTED SOURCES---",
+    ):
+        assert required in prompt
+
+    review = {"judge_items": [{"review": {"record_id": "record-1"}}]}
+    judge_prompt = CrossDocumentJudge.prompt(None, review)
+    for required in (
+        "Full context",
+        "Without source_a",
+        "Without source_b",
+        "unsupported_without_source_ids",
+        "reasoning_valid=true",
+        "connected_reasoning=true",
+        "relationship_correct=true",
+        "Scores 4-5",
+        "---BEGIN UNTRUSTED REVIEW BATCH---",
+        "---END UNTRUSTED REVIEW BATCH---",
+    ):
+        assert required in judge_prompt
+
+
+def test_drafting_prompts_preserve_specification_contract() -> None:
+    row = {
+        "tender_id": "tender-1",
+        "task": "drafting",
+        "instruction": "Draft the bid-security clause.",
+        "tender_context": ["Tender mode: Limited."],
+        "manual_context": "The bidder shall submit bid security.",
+    }
+    prompt = TenderDraftingGenerator.prompt(None, row)
+    for required in (
+        "complete, ready-to-use",
+        "not a title alone, outline, summary",
+        "newline characters",
+        "organization identity",
+        "bidding structure",
+        "[NOT PROVIDED]",
+        "state the conflict instead of blending",
+        "Do not include a citation list",
+        "manual_evidence_quotes",
+        "complete verbatim item",
+        "---BEGIN UNTRUSTED TENDER FACTS---",
+        "---END UNTRUSTED MANUAL CONTEXT---",
+        "FINAL CHECK",
+    ):
+        assert required in prompt
+
+    judge_row = {
+        "instruction": row["instruction"],
+        "_combined_source_text": "Tender mode: Limited.\nManual rule.",
+        "response": "Completed draft.",
+    }
+    judge_prompt = TenderDraftingJudge.prompt(None, judge_row)
+    for required in (
+        "supported=true",
+        "follows_instruction=true",
+        "preserves_policy_qualifications=true",
+        "resolves_source_conflicts_safely=true",
+        "Scores 4-5",
+        "Do not rewrite the draft",
+        "---BEGIN UNTRUSTED INSTRUCTION---",
+        "---BEGIN UNTRUSTED SOURCES---",
+        "---BEGIN UNTRUSTED DRAFT---",
+        "FINAL CHECK",
+    ):
+        assert required in judge_prompt
