@@ -1,0 +1,7 @@
+{
+  "extra_args": [
+    "--paginate_output"
+  ],
+  "method": "vllm",
+  "source_sha256": "f344c2e3c9fb5eda267a0c0614a760a0281219eae79b9587e4e1de2cdcb7b709"
+}
