@@ -1515,3 +1515,76 @@ Local verification:
 - `tests/nrl_procurement/test_pipeline.py`: compact drafting, canonical, QA,
   QA-CoT, cross-document QA, and cross-document QA-CoT JSONL serialize
   `citations` as the final top-level key.
+
+## Pilot-006 output and content audit (2026-07-28)
+
+Status: audited; persistence fix confirmed, but the run is not suitable as a
+full acceptance pilot because cross-document yield is zero.
+
+Observed results:
+
+- All provider calls completed and all raw responses were persisted: 5
+  single-document generation responses, 9 single-document judge responses, 5
+  cross-document generation responses, 2 drafting generation responses, and 2
+  drafting judge responses. The Pilot-005 missing-response crash did not recur.
+- Final accepted output contains 8 single-document records (7 QA and 1 QA with
+  rationale) plus 2 drafting records. One additional single-document QA-with-
+  rationale record was rejected.
+- All 5 cross-document provider responses contain structured candidates, but
+  deterministic parsing filtered every candidate. Consequently all
+  cross-document audit, rejected, and SFT files are empty and the manifest
+  correctly reports the run as `partial`.
+- Every non-empty JSONL file is syntactically valid. Whenever a top-level
+  `citations` field is present, it is the final serialized key. Drafting
+  `citations` intentionally contains compact citation IDs; full traceability is
+  carried by the preceding `citation_details`.
+- Citation objects contain manual ID/title, source file, page, section, chunk,
+  quote, and offsets. Drafting records additionally trace authored tender facts
+  to the tender and seed IDs.
+
+Quality findings:
+
+- The 8 accepted single-document records are generally grounded and useful:
+  seven received judge score 5 and one received score 4.
+- The score-4 final-payment/PBG record relies on a source quote truncated at
+  “from the”. It is understandable but should not qualify as exemplary
+  production evidence.
+- Both drafting records received score 5, preserve the authored seed facts, and
+  provide source traceability. The NIT record retains the requested
+  organization, GeM two-part bidding, E-File reference, job name, contacts, and
+  footer. The LD record retains the delayed-portion basis, 0.5% weekly rate, 5%
+  cap, cancellation limitation, and risk-purchase meaning.
+- The rejected single-document QA-with-rationale record also received score 5.
+  It was rejected only because the judge returned an `answer_quote` made from
+  two exact excerpts joined by an ellipsis, while the acceptance checker
+  requires one contiguous source substring.
+
+Root causes requiring a general fix:
+
+- The numeric regex currently consumes a following word (`2019 Manual`, `2025
+  Manuals`, `10 percent`) and compares that combined token literally with claim
+  evidence. It also validates answer metadata dates only against claim quotes.
+  These checks falsely rejected otherwise grounded cross-document candidates.
+- One of five cross-document candidates genuinely violated its preassigned
+  format by returning `cross_document_qa_cot` for a
+  `cross_document_qa` request; this rejection is correct.
+- Deterministic parse failures are preserved in raw Curator responses but are
+  not materialized into `cross_rejected.jsonl`, so the user-facing rejection
+  audit still lacks reason codes for parse-filtered candidates.
+
+Required follow-up before the next pilot:
+
+- Replace numeric/quantity detection with typed normalization that checks
+  actual numeric values and units without swallowing arbitrary following words,
+  and allow source metadata to support authority/version dates.
+- Make judge quotation evidence structurally multi-span or require and validate
+  one exact contiguous quote consistently.
+- Emit deterministic rejection audit rows with explicit reason codes before
+  discarding candidates.
+- Add a source-integrity gate for truncated evidence fragments and regression
+  tests using all five Pilot-006 cross-document response shapes.
+
+Pilot artifacts:
+
+- `outputs/pilot-006/files/manifest.json`
+- `.curator_working/pilot-006/cross_generation/035c2fe81112a763/responses_0.jsonl`
