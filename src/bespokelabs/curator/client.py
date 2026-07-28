@@ -32,9 +32,16 @@ class Client:
         self._state = None
         self._last_cost_projection_time = 0
 
-        # Use environment variable to determine if hosted
-        self._hosted = os.environ.get("CURATOR_VIEWER") in ["True", "true", "1", "t"]
-        self._hosted = self._hosted or hosted
+        # Local-only mode is a hard guard around every hosted Viewer entrypoint,
+        # including explicit push_to_viewer() calls.
+        local_only = os.environ.get("CURATOR_LOCAL_ONLY", "").lower() in ["true", "1", "t"]
+        requested_hosted = os.environ.get("CURATOR_VIEWER") in ["True", "true", "1", "t"]
+        requested_hosted = requested_hosted or hosted
+        if local_only and requested_hosted:
+            raise RuntimeError(
+                "Curator's hosted Viewer is disabled by CURATOR_LOCAL_ONLY"
+            )
+        self._hosted = requested_hosted
         self.semaphore = asyncio.Semaphore(N_CONCURRENT_VIEWER_REQUESTS)
         self._async_client = None
         self.api_key = os.environ.get("BESPOKE_API_KEY")

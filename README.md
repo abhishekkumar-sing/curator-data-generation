@@ -219,7 +219,8 @@ are submitted normally with the new parameters.
 > Make sure to set your API keys as environment variables for the model you are calling. For example running `export OPENAI_API_KEY=sk-...` and `export ANTHROPIC_API_KEY=ant-...` will allow you to run the previous two examples. A full list of supported models and their associated environment variable names can be found [in the litellm docs](https://docs.litellm.ai/docs/providers).
 ### Anonymized Telemetry
 
-We collect minimal, anonymized usage telemetry to help prioritize new features and improvements that benefit the Curator community. You can opt out by setting the `TELEMETRY_ENABLED` environment variable to `False`. 
+Telemetry is disabled by default in this repository. It can be enabled by
+setting `TELEMETRY_ENABLED=True`, unless `CURATOR_LOCAL_ONLY=True` is active.
 
 ## 📖 Providers
 Curator supports a wide range of providers, including OpenAI, Anthropic, and many more. 
@@ -491,11 +492,12 @@ We support a range of environment variables to customize the behavior of Curator
 Here is a complete table of environment variables:
 | Variable | Description | Default |
 |----------|-------------|---------|
+| `CURATOR_LOCAL_ONLY` | Hard-disables the hosted Curator Viewer and telemetry when `True`. | `False` |
 | `CURATOR_VIEWER` | Enables the Curator viewer for visualizing data curation when `True`. | `False` |
 | `CURATOR_DISABLE_CACHE` | Disables caching for `curator.LLM` generations when `True`. Useful for fresh runs. | `False` |
 | `CURATOR_CACHE_DIR` | Sets the cache directory used for `curator.LLM` generations. | `~/.cache/curator` |
 | `CURATOR_DISABLE_RICH_DISPLAY` | When `True`, disables [Rich CLI](https://github.com/Textualize/rich) output (and falls back to [tqdm](https://tqdm.github.io/) logging) for local data generation monitoring. This is useful when debugging with inline breakpoints or interactive debuggers like `pdb`, where Rich's dynamic output can interfere with terminal input. | `False` |
-| `TELEMETRY_ENABLED` | Enable telemetry for curator usage tracking when `True` | `True` |
+| `TELEMETRY_ENABLED` | Enable telemetry for curator usage tracking when `True` | `False` |
 
 ## Contributing
 Thank you to all the contributors for making this project possible!

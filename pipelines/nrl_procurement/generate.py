@@ -1,5 +1,7 @@
 """Generate grounded synthetic procurement QA data with a hosted Nemotron model."""
 
+# ruff: noqa: I001
+
 import argparse
 import os
 import re
@@ -8,12 +10,16 @@ from pathlib import Path
 from datasets import Dataset
 from pydantic import BaseModel, Field
 
+from settings import CONFIG, PROJECT_ROOT, require_private_endpoint, require_setting
+
+# settings applies privacy controls before this import.
 from bespokelabs import curator
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_SOURCE_DIR = PROJECT_ROOT / "data" / "source"
-DEFAULT_OCR_DIR = PROJECT_ROOT / "data" / "interim" / "ocr"
-DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "data" / "synthetic"
+PATH_CONFIG = CONFIG["paths"]
+GENERATION_CONFIG = CONFIG["models"]["generation"]
+DEFAULT_SOURCE_DIR = PROJECT_ROOT / PATH_CONFIG["source_dir"]
+DEFAULT_OCR_DIR = PROJECT_ROOT / PATH_CONFIG["ocr_dir"]
+DEFAULT_OUTPUT_DIR = PROJECT_ROOT / PATH_CONFIG["output_dir"]
 PAGE_PATTERN = re.compile(r"<!-- Page (\d+) -->")
 
 
@@ -29,18 +35,6 @@ class SyntheticExamples(BaseModel):
     """Synthetic examples generated from one source passage."""
 
     examples: list[QuestionAnswer]
-
-
-def load_dotenv(path: Path) -> None:
-    """Load simple KEY=VALUE settings without adding a runtime dependency."""
-    if not path.is_file():
-        return
-    for raw_line in path.read_text(encoding="utf-8").splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        os.environ.setdefault(key.strip(), value.strip())
 
 
 def markdown_pages(path: Path, source_dir: Path, source_prefix: str = "") -> list[dict]:
@@ -158,27 +152,26 @@ def main() -> None:
     parser.add_argument("--limit", type=int, help="Limit source pages for a pilot run")
     args = parser.parse_args()
 
-    load_dotenv(PROJECT_ROOT / ".env")
-    model = os.environ["GENERATION_MODEL"]
-    base_url = os.environ["GENERATION_BASE_URL"]
-    api_key = os.environ["GENERATION_API_KEY"]
+    model = require_setting(GENERATION_CONFIG["served_model_env"])
+    base_url_name = GENERATION_CONFIG["base_url_env"]
+    base_url = (
+        require_private_endpoint(base_url_name)
+        if GENERATION_CONFIG.get("private_endpoint_only", True)
+        else require_setting(base_url_name)
+    )
+    api_key = require_setting(GENERATION_CONFIG["api_key_env"])
     os.environ["HOSTED_VLLM_API_KEY"] = api_key
 
     generator = ProcurementQAGenerator(
         model_name=f"hosted_vllm/{model}",
         backend="litellm",
         response_format=SyntheticExamples,
-        generation_params={
-            "temperature": 1.0,
-            "top_p": 0.95,
-            "max_tokens": 4096,
-            "extra_body": {"chat_template_kwargs": {"enable_thinking": False}},
-        },
+        generation_params=GENERATION_CONFIG["generation_params"],
         backend_params={
             "base_url": base_url,
             "api_key": api_key,
-            "request_timeout": 1800,
-            "max_concurrent_requests": 128,
+            "request_timeout": GENERATION_CONFIG["request_timeout"],
+            "max_concurrent_requests": GENERATION_CONFIG["max_concurrent_requests"],
             "require_all_responses": False,
         },
     )

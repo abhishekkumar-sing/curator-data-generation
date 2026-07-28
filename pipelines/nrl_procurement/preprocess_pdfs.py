@@ -5,15 +5,11 @@ import os
 import subprocess
 from pathlib import Path
 
-from generate import DEFAULT_SOURCE_DIR, PROJECT_ROOT, load_dotenv
+from settings import CONFIG, PROJECT_ROOT, require_private_endpoint, require_setting
 
-
-def require_setting(name: str) -> str:
-    """Return a required non-empty environment setting."""
-    value = os.environ.get(name, "").strip()
-    if not value:
-        raise SystemExit(f"Set {name} in {PROJECT_ROOT / '.env'}")
-    return value
+PATH_CONFIG = CONFIG["paths"]
+OCR_CONFIG = CONFIG["models"]["ocr"]
+DEFAULT_SOURCE_DIR = PROJECT_ROOT / PATH_CONFIG["source_dir"]
 
 
 def main() -> None:
@@ -25,14 +21,20 @@ def main() -> None:
     parser.add_argument("--max-workers", type=int, default=8)
     args = parser.parse_args()
 
-    load_dotenv(PROJECT_ROOT / ".env")
-    base_url = require_setting("OCR_BASE_URL")
-    model = require_setting("OCR_MODEL")
-    api_key = require_setting("OCR_API_KEY")
-    ocr_command = os.environ.get("OCR_COMMAND", "chandra").strip() or "chandra"
+    base_url_name = OCR_CONFIG["base_url_env"]
+    base_url = (
+        require_private_endpoint(base_url_name)
+        if OCR_CONFIG.get("private_endpoint_only", True)
+        else require_setting(base_url_name)
+    )
+    model = require_setting(OCR_CONFIG["model_env"])
+    api_key = require_setting(OCR_CONFIG["api_key_env"])
+    command_env = OCR_CONFIG["command_env"]
+    ocr_command = os.environ.get(command_env, OCR_CONFIG["engine"]).strip() or OCR_CONFIG["engine"]
+    output_dir_env = OCR_CONFIG["output_dir_env"]
     output_dir = args.output_dir or PROJECT_ROOT / os.environ.get(
-        "OCR_OUTPUT_DIR",
-        "data/interim/ocr",
+        output_dir_env,
+        PATH_CONFIG["ocr_dir"],
     )
     output_dir.mkdir(parents=True, exist_ok=True)
 

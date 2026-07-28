@@ -1,0 +1,39 @@
+project:
+  name: nrl-procurement-synthetic-data
+
+# Environment variables in .env override these defaults.
+curator:
+  local_only: true
+  viewer_enabled: false
+  telemetry_enabled: false
+
+paths:
+  source_dir: data/source
+  ocr_dir: data/interim/ocr
+  output_dir: data/synthetic
+
+models:
+  generation:
+    mode: hosted_vllm
+    served_model_env: GENERATION_MODEL
+    base_url_env: GENERATION_BASE_URL
+    api_key_env: GENERATION_API_KEY
+    private_endpoint_only: true
+    request_timeout: 1800
+    max_concurrent_requests: 128
+    generation_params:
+      temperature: 1.0
+      top_p: 0.95
+      max_tokens: 4096
+      extra_body:
+        chat_template_kwargs:
+          enable_thinking: false
+
+  ocr:
+    engine: chandra
+    model_env: OCR_MODEL
+    base_url_env: OCR_BASE_URL
+    api_key_env: OCR_API_KEY
+    private_endpoint_only: true
+    command_env: OCR_COMMAND
+    output_dir_env: OCR_OUTPUT_DIR

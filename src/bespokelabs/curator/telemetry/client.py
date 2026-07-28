@@ -83,7 +83,10 @@ class PosthogClient:
 # Initialize the telemetry client with environment-based configuration
 config = PosthogConfig(
     api_key="phc_HGGTf1LmtsUnBaVBufgIwRsAwdkvH3cSsDKgW5RnJz8",
-    enabled=os.getenv("TELEMETRY_ENABLED", "true").lower() in ("true", "1", "t"),
+    enabled=(
+        os.getenv("TELEMETRY_ENABLED", "false").lower() in ("true", "1", "t")
+        and os.getenv("CURATOR_LOCAL_ONLY", "").lower() not in ("true", "1", "t")
+    ),
     debug=os.getenv("DEBUG_MODE", "false").lower() in ("true", "1", "t"),
     host=os.getenv("POSTHOG_HOST"),
 )
