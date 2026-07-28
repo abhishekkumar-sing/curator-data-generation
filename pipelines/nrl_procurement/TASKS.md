@@ -135,6 +135,36 @@ Research-gate acceptance criteria:
 - [ ] Validate with a user-run bounded pilot before approving the CLI for a
   full `--limit 200` execution. Codex must not run model-backed pilots.
 
+## Capability research — switch independent judge to Gemma 4
+
+Status: researched and approved for configuration on 2026-07-28. Endpoint
+behavior remains provisional until a user-run judge pilot completes.
+
+- The configured endpoint identifies its served model as
+  `/models/gemma4-12b`; it remains independent from the GLM generation
+  endpoint.
+- The official `google/gemma-4-12B` model card and generation configuration
+  recommend `temperature=1.0`, `top_p=0.95`, and `top_k=64` across use cases.
+- The official Gemma 4 Hugging Face model card demonstrates
+  `apply_chat_template(..., enable_thinking=False)`. For an OpenAI-compatible
+  vLLM endpoint, this template argument is carried in
+  `extra_body.chat_template_kwargs`. Gemma therefore needs an explicit
+  `enable_thinking: false` in its own profile; it must not inherit the setting
+  accidentally from another model.
+- The current configuration merges a selected model profile over role
+  defaults. Supplying profile-specific `generation_params` therefore replaces
+  the complete Nemotron-shaped payload without adding model-name conditionals
+  to pipeline code.
+- Keep the existing JSON-schema mode because that is the configured endpoint
+  contract, but treat support as unverified until the exact private endpoint
+  completes a controlled structured judge request. Do not silently fall back
+  or expose unjudged records if it fails.
+- [x] Configure Gemma-specific sampling and explicit non-thinking template
+  behavior from the official model card.
+- [x] Select Gemma as the default and active independent judge.
+- [ ] Validate schema compliance, exact witness behavior, latency, and judge
+  calibration with a user-run pilot before production-scale generation.
+
 ## Capability research — pilot-003 quality recovery
 
 Status: researched and approved for implementation on 2026-07-28. Conclusions
