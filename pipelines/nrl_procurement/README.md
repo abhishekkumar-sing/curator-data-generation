@@ -14,20 +14,31 @@ CURATOR_LOCAL_ONLY=1
 CURATOR_VIEWER=0
 TELEMETRY_ENABLED=false
 
-GENERATION_MODEL=nvidia/nemotron-3-super
-GENERATION_BASE_URL=http://10.180.148.183:3011/v1
-GENERATION_API_KEY=replace-me
+GENERATION_PROFILE=glm
+JUDGE_PROFILE=nemotron
 
-JUDGE_MODEL=nvidia/nemotron-3-super
-JUDGE_BASE_URL=http://10.180.148.183:3011/v1
-JUDGE_API_KEY=replace-me
+GLM_MODEL=replace-me
+GLM_BASE_URL=http://127.0.0.1:8000/v1
+GLM_API_KEY=replace-me
+
+NEMOTRON_MODEL=replace-me
+NEMOTRON_BASE_URL=http://127.0.0.1:8001/v1
+NEMOTRON_API_KEY=replace-me
 ```
 
-The Python code contains no fixed model name or endpoint. Generation, judging,
-and OCR can each be changed through `.env` without editing Python. Use a
-different judge model for production when one is available; using the
-generation model for both roles is supported for pilots. `.env` is gitignored;
-`.env.example` is the safe template that can be committed.
+The Python code contains no fixed model name or endpoint. Named profiles for
+GLM, Nemotron, Gemma, and Qwen are declared in `config.yaml`; credentials and
+served-model IDs stay in `.env`. Switch either role by changing only
+`GENERATION_PROFILE` or `JUDGE_PROFILE`. Use different generator and judge
+models for production when possible. `.env` is gitignored; `.env.example` is
+the safe template that can be committed.
+
+Each profile declares one of Curator's structured-output transports:
+`auto`, `tools`, `json_schema`, `json`, or `md_json`. The choice belongs to the
+specific model-and-server deployment, not just the model family. Run a small
+structure probe after changing an endpoint. Native `json_schema` is preferred
+when verified; `md_json` provides prompt-based JSON plus Pydantic validation
+when the server's native modes are broken or unavailable.
 
 `config.yaml` contains committed, non-secret defaults for paths, model
 parameters, model environment-variable names, and privacy behavior. `.env`
@@ -183,6 +194,44 @@ in [MuSiQue](https://arxiv.org/abs/2108.00573), explicit evidence paths in
 [2WikiMultiHopQA](https://aclanthology.org/2020.coling-main.580/), and
 contrastive support sufficiency from
 [DiRe](https://arxiv.org/abs/2005.00789).
+
+## Seed-driven grounded drafting
+
+Authored requests in `data/seeds/drafting_requests.jsonl` generate tender and
+clause drafting examples by default. The seed path and feature switch are
+configured without Python edits:
+
+```yaml
+paths:
+  drafting_seeds: data/seeds/drafting_requests.jsonl
+
+drafting:
+  enabled: true
+```
+
+Each seed names exact chunk IDs from the current corpus, supplies
+instance-specific tender facts, and requests one draft. Unknown or stale chunk
+IDs fail immediately. The local generation model must return exact manual
+evidence and declare which complete tender facts it used. Deterministic checks
+reject non-verbatim evidence and unsupported numbers or email addresses before
+the configured judge runs.
+
+Accepted compact rows are written to `data/synthetic/drafting.jsonl` with
+`id`, `tender_id`, `task`, `instruction`, `context`, `response`, and
+`citations`. `drafting_generated_audit.jsonl`, `drafting_canonical.jsonl`, and
+`drafting_rejected.jsonl` preserve quality and lineage details. Drafting stays
+separate from the QA exports.
+
+Run one drafting request during a pilot:
+
+```bash
+.curator/bin/python pipelines/nrl_procurement/generate.py \
+  --limit 5 \
+  --drafting-limit 1
+```
+
+Use `--skip-drafting` to disable it for one run, or set
+`drafting.enabled: false` in `config.yaml`.
 
 For a local development run without judging, first set
 `quality.allow_unjudged_exports: true` in `config.yaml`, then pass

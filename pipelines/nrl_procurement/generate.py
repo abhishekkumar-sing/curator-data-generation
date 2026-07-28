@@ -17,6 +17,14 @@ from settings import CONFIG, PROJECT_ROOT, require_private_endpoint, require_set
 from corpus import load_corpus
 from cross_document import build_bundles
 from cross_stage import CrossDocumentGenerator, CrossDocumentJudge, cross_judge_rows
+from drafting import (
+    TenderDraftingGenerator,
+    TenderDraftingJudge,
+    build_drafting_inputs,
+    compact_drafting,
+    read_drafting_seeds,
+    write_jsonl,
+)
 from export import assign_splits, export_records
 from schemas import CandidateBatch, JudgeBatch
 from validation import deduplicate, validate_record
@@ -25,9 +33,27 @@ from validation import deduplicate, validate_record
 from bespokelabs import curator
 
 PATHS = CONFIG["paths"]
-GENERATION = CONFIG["models"]["generation"]
 QUALITY = CONFIG.get("quality", {})
 SPLITS = CONFIG.get("splits", {})
+
+
+def _role_profile(role: str) -> dict[str, Any]:
+    """Resolve a named endpoint profile selected through the environment."""
+    role_settings = CONFIG["models"][role]
+    profile_name = os.environ.get(
+        role_settings["profile_env"], role_settings["default_profile"]
+    ).strip()
+    profiles = CONFIG.get("model_profiles", {})
+    if profile_name not in profiles:
+        available = ", ".join(sorted(profiles))
+        raise SystemExit(
+            f"Unknown {role} model profile {profile_name!r}; available: {available}"
+        )
+    return {**role_settings, **profiles[profile_name], "profile_name": profile_name}
+
+
+GENERATION = _role_profile("generation")
+JUDGE = _role_profile("judge")
 
 
 def _model_settings(profile: dict[str, Any]) -> tuple[str, str, str]:
@@ -52,7 +78,12 @@ def _llm_kwargs(profile: dict[str, Any]) -> dict[str, Any]:
             "api_key": api_key,
             "request_timeout": profile["request_timeout"],
             "max_concurrent_requests": profile["max_concurrent_requests"],
+            "max_requests_per_minute": profile["max_requests_per_minute"],
+            "max_tokens_per_minute": profile["max_tokens_per_minute"],
             "require_all_responses": False,
+            "structured_output_mode": profile.get(
+                "structured_output_mode", "auto"
+            ),
         },
     }
 
@@ -229,6 +260,10 @@ def main() -> None:
         help="Limit cross-document source bundles (defaults to --limit for pilots)",
     )
     parser.add_argument("--skip-cross-document", action="store_true")
+    parser.add_argument(
+        "--drafting-limit", type=int, help="Limit authored drafting seeds for a pilot"
+    )
+    parser.add_argument("--skip-drafting", action="store_true")
     parser.add_argument("--skip-judge", action="store_true", help="Development only")
     args = parser.parse_args()
 
@@ -254,7 +289,7 @@ def main() -> None:
             )
         accepted = generated
     else:
-        judge_profile = CONFIG["models"].get("judge", GENERATION)
+        judge_profile = JUDGE
         os.environ["HOSTED_VLLM_API_KEY"] = _model_settings(judge_profile)[2]
         judged = ProcurementJudge(**_llm_kwargs(judge_profile))(
             _judge_rows(generated, int(QUALITY.get("judge_batch_size", 8))),
@@ -286,7 +321,7 @@ def main() -> None:
             if args.skip_judge:
                 cross_accepted = cross_generated
             elif cross_generated:
-                judge_profile = CONFIG["models"].get("judge", GENERATION)
+                judge_profile = JUDGE
                 os.environ["HOSTED_VLLM_API_KEY"] = _model_settings(judge_profile)[2]
                 cross_judged = CrossDocumentJudge(**_llm_kwargs(judge_profile))(
                     Dataset.from_list(
@@ -318,10 +353,84 @@ def main() -> None:
         str(SPLITS.get("seed", "nrl-procurement-v1")),
     )
     stats = export_records(accepted, manuals, args.output_dir.resolve())
+
+    drafting_accepted: list[dict[str, Any]] = []
+    drafting_config = CONFIG.get("drafting", {})
+    if drafting_config.get("enabled", False) and not args.skip_drafting:
+        seed_path = (PROJECT_ROOT / PATHS["drafting_seeds"]).resolve()
+        drafting_seeds = read_drafting_seeds(seed_path)
+        if args.drafting_limit is not None:
+            drafting_seeds = drafting_seeds[: args.drafting_limit]
+        drafting_inputs = build_drafting_inputs(drafting_seeds, all_rows)
+        os.environ["HOSTED_VLLM_API_KEY"] = _model_settings(GENERATION)[2]
+        drafting_generated = TenderDraftingGenerator(**_llm_kwargs(GENERATION))(
+            Dataset.from_list(drafting_inputs),
+            working_dir=str(args.output_dir / ".cache" / "drafting_generation"),
+        ).dataset.to_list()
+        write_jsonl(
+            args.output_dir / "drafting_generated_audit.jsonl", drafting_generated
+        )
+        deterministic_drafting = [
+            row
+            for row in drafting_generated
+            if row["deterministic_checks"]["passed"]
+        ]
+        deterministic_rejected = [
+            row
+            for row in drafting_generated
+            if not row["deterministic_checks"]["passed"]
+        ]
+        if args.skip_judge:
+            drafting_accepted = deterministic_drafting
+            write_jsonl(
+                args.output_dir / "drafting_rejected.jsonl",
+                deterministic_rejected,
+            )
+        elif deterministic_drafting:
+            judge_profile = JUDGE
+            for row in deterministic_drafting:
+                row["_minimum_judge_score"] = int(
+                    QUALITY.get("minimum_judge_score", 4)
+                )
+            os.environ["HOSTED_VLLM_API_KEY"] = _model_settings(judge_profile)[2]
+            drafting_judged = TenderDraftingJudge(**_llm_kwargs(judge_profile))(
+                Dataset.from_list(deterministic_drafting),
+                working_dir=str(args.output_dir / ".cache" / "drafting_judge"),
+            ).dataset.to_list()
+            drafting_accepted = [
+                row for row in drafting_judged if row["judge"]["accepted"]
+            ]
+            write_jsonl(
+                args.output_dir / "drafting_rejected.jsonl",
+                [
+                    *deterministic_rejected,
+                    *[
+                        row
+                        for row in drafting_judged
+                        if not row["judge"]["accepted"]
+                    ],
+                ],
+            )
+            write_jsonl(
+                args.output_dir / "drafting_canonical.jsonl", drafting_accepted
+            )
+        else:
+            write_jsonl(
+                args.output_dir / "drafting_rejected.jsonl",
+                deterministic_rejected,
+            )
+        if not drafting_accepted:
+            raise SystemExit("No drafting records passed generation and quality checks")
+        write_jsonl(
+            args.output_dir / "drafting.jsonl",
+            [compact_drafting(row) for row in drafting_accepted],
+        )
+
     print(
         f"Exported {stats['records']} accepted records to {args.output_dir.resolve()} "
         f"({duplicates + cross_duplicates} near-duplicates removed; "
-        f"{len(cross_accepted)} cross-document records)"
+        f"{len(cross_accepted)} cross-document records; "
+        f"{len(drafting_accepted)} drafting records)"
     )
 
 

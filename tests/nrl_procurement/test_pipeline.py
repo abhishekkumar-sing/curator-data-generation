@@ -8,7 +8,14 @@ sys.path.insert(0, str(PIPELINE))
 
 from corpus import load_corpus  # noqa: E402
 from cross_document import build_bundles  # noqa: E402
+from drafting import (  # noqa: E402
+    build_drafting_inputs,
+    compact_drafting,
+    drafting_validation_issues,
+    read_drafting_seeds,
+)
 from export import assign_splits  # noqa: E402
+from schemas import DraftingResult  # noqa: E402
 from validation import deduplicate, validate_cross_record, validate_record  # noqa: E402
 
 
@@ -139,3 +146,83 @@ def test_cross_document_bundle_and_source_attribution() -> None:
     assert "misattributed_or_non_verbatim_evidence" in validate_cross_record(
         record, bundle["source_documents"]
     )
+
+
+def test_drafting_seed_resolution_validation_and_compact_output(tmp_path: Path) -> None:
+    seed_path = tmp_path / "drafting.jsonl"
+    seed_path.write_text(
+        '{"id":"draft-1","tender_id":"tender-1","task":"drafting",'
+        '"instruction":"Draft the delayed-delivery clause.",'
+        '"tender_context":["Tender mode: Limited."],'
+        '"manual_chunk_ids":["chunk-1"]}\n',
+        encoding="utf-8",
+    )
+    corpus = [
+        {
+            "chunk_id": "chunk-1",
+            "page": 4,
+            "section": "Liquidated damages",
+            "passage": "LD is 0.5% per week and capped at 5% of delayed goods.",
+        }
+    ]
+    inputs = build_drafting_inputs(read_drafting_seeds(seed_path), corpus)
+    result = DraftingResult(
+        response=(
+            "Delayed Delivery & Liquidated Damages\n"
+            "LD is 0.5% per week and capped at 5% of delayed goods."
+        ),
+        manual_evidence_quotes=[
+            "LD is 0.5% per week and capped at 5% of delayed goods."
+        ],
+        tender_facts_used=["Tender mode: Limited."],
+    )
+    assert drafting_validation_issues(inputs[0], result) == []
+    compact = compact_drafting(
+        {
+            **inputs[0],
+            "context": [*inputs[0]["tender_context"], *result.manual_evidence_quotes],
+            "response": result.response,
+        }
+    )
+    assert list(compact) == [
+        "id",
+        "tender_id",
+        "task",
+        "instruction",
+        "context",
+        "response",
+        "citations",
+    ]
+    assert compact["citations"] == ["chunk-1", "tender-1"]
+
+
+def test_drafting_rejects_unknown_chunks_and_unsupported_values(tmp_path: Path) -> None:
+    seed_path = tmp_path / "drafting.jsonl"
+    seed_path.write_text(
+        '{"id":"draft-1","tender_id":"tender-1","task":"drafting",'
+        '"instruction":"Draft the delayed-delivery clause.",'
+        '"tender_context":["Tender mode: Limited."],'
+        '"manual_chunk_ids":["missing"]}\n',
+        encoding="utf-8",
+    )
+    seeds = read_drafting_seeds(seed_path)
+    try:
+        build_drafting_inputs(seeds, [])
+    except ValueError as exc:
+        assert "unknown chunk" in str(exc)
+    else:
+        raise AssertionError("unknown drafting chunk should fail")
+
+    row = {
+        "manual_passages": ["The cap is 5%."],
+        "combined_source_text": "The cap is 5%.",
+        "tender_context": ["Tender mode: Limited."],
+    }
+    result = DraftingResult(
+        response="The cap is 10%. Contact invented@example.com.",
+        manual_evidence_quotes=["The cap is 5%."],
+        tender_facts_used=["Tender mode: Limited."],
+    )
+    issues = drafting_validation_issues(row, result)
+    assert "unsupported_number:10%" in issues
+    assert "unsupported_email:invented@example.com" in issues

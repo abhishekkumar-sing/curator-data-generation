@@ -11,16 +11,42 @@ paths:
   source_dir: data/source
   ocr_dir: data/interim/ocr
   output_dir: data/synthetic
+  drafting_seeds: data/seeds/drafting_requests.jsonl
+
+model_profiles:
+  glm:
+    served_model_env: GLM_MODEL
+    base_url_env: GLM_BASE_URL
+    api_key_env: GLM_API_KEY
+    structured_output_mode: json_schema
+  nemotron:
+    served_model_env: NEMOTRON_MODEL
+    base_url_env: NEMOTRON_BASE_URL
+    api_key_env: NEMOTRON_API_KEY
+    structured_output_mode: md_json
+  gemma:
+    served_model_env: GEMMA_MODEL
+    base_url_env: GEMMA_BASE_URL
+    api_key_env: GEMMA_API_KEY
+    structured_output_mode: json_schema
+  qwen:
+    served_model_env: QWEN_MODEL
+    base_url_env: QWEN_BASE_URL
+    api_key_env: QWEN_API_KEY
+    # Conservative fallback until this exact endpoint passes its probe.
+    structured_output_mode: md_json
 
 models:
   generation:
     mode: hosted_vllm
-    served_model_env: GENERATION_MODEL
-    base_url_env: GENERATION_BASE_URL
-    api_key_env: GENERATION_API_KEY
+    profile_env: GENERATION_PROFILE
+    default_profile: glm
     private_endpoint_only: true
     request_timeout: 1800
     max_concurrent_requests: 128
+    # Explicit private-provider limits avoid Curator's public-provider fallback.
+    max_requests_per_minute: 10000
+    max_tokens_per_minute: 100000000
     generation_params:
       temperature: 1.0
       top_p: 0.95
@@ -33,15 +59,21 @@ models:
   # is reused so the pipeline remains runnable; production runs should separate them.
   judge:
     mode: hosted_vllm
-    served_model_env: JUDGE_MODEL
-    base_url_env: JUDGE_BASE_URL
-    api_key_env: JUDGE_API_KEY
+    profile_env: JUDGE_PROFILE
+    default_profile: nemotron
     private_endpoint_only: true
     request_timeout: 1800
     max_concurrent_requests: 64
+    # Keep judge throttling independent when it uses a separate local endpoint.
+    max_requests_per_minute: 10000
+    max_tokens_per_minute: 100000000
     generation_params:
-      temperature: 0.0
+      temperature: 1.0
+      top_p: 0.95
       max_tokens: 4096
+      extra_body:
+        chat_template_kwargs:
+          enable_thinking: false
 
   ocr:
     engine: chandra
@@ -58,6 +90,9 @@ quality:
   judge_batch_size: 8
   dedupe_threshold: 94
   allow_unjudged_exports: false
+
+drafting:
+  enabled: true
 
 # Explicit relationships define which manuals may be combined. Lexical alignment
 # only proposes passages within these pairs; it never establishes legal equivalence.

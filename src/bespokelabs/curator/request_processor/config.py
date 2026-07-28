@@ -109,6 +109,9 @@ class OnlineRequestProcessorConfig(RequestProcessorConfig):
     max_input_tokens_per_minute: int | None = Field(default=None, gt=0)
     max_output_tokens_per_minute: int | None = Field(default=None, gt=0)
     seconds_to_pause_on_rate_limit: int = Field(default=10, gt=0)
+    structured_output_mode: t.Literal[
+        "auto", "tools", "json_schema", "json", "md_json"
+    ] = "auto"
 
 
 class OfflineRequestProcessorConfig(RequestProcessorConfig):
@@ -161,6 +164,9 @@ class OnlineBackendParams(BaseBackendParams, total=False):
     max_input_tokens_per_minute: t.Optional[int]
     max_output_tokens_per_minute: t.Optional[int]
     seconds_to_pause_on_rate_limit: t.Optional[int]
+    structured_output_mode: t.Literal[
+        "auto", "tools", "json_schema", "json", "md_json"
+    ]
 
 
 class BatchBackendParams(BaseBackendParams, total=False):

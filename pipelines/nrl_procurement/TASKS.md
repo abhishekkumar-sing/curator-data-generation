@@ -76,6 +76,143 @@ Research-gate acceptance criteria:
 - No large generation run begins solely on the basis of schema validation or
   passing unit tests.
 
+## Capability research — seed-driven grounded drafting
+
+Status: researched and approved for implementation on 2026-07-28; generated
+quality remains provisional until a controlled pilot is manually reviewed.
+
+Research question:
+
+- How should authored tender requests under `data/seeds` drive locally
+  generated drafting records with the requested `id`, `tender_id`, `task`,
+  `instruction`, `context`, `response`, and `citations` output contract?
+
+Sources consulted:
+
+- [Curator upstream repository](https://github.com/bespokelabsai/curator)
+  (accessed 2026-07-28): structured Pydantic responses and explicit `prompt`
+  and `parse` methods support a typed drafting stage.
+- [vLLM structured-output documentation](https://docs.vllm.ai/en/latest/features/structured_outputs/)
+  (accessed 2026-07-28): OpenAI-compatible vLLM servers can constrain output
+  with a JSON schema.
+- [LiteLLM upstream repository](https://github.com/BerriAI/litellm)
+  (accessed 2026-07-28): `hosted_vllm` provides OpenAI-compatible completion
+  transport, but capability lookup for a private served-model name can be
+  absent from its static model registry.
+- [NVIDIA Nemotron 3 Super NVFP4 model card](https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4)
+  and its
+  [generation configuration](https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4/blob/main/generation_config.json)
+  (accessed 2026-07-28): NVIDIA requires `temperature=1.0` and `top_p=0.95`
+  for all tasks and serving backends.
+- [OpenAI GPT-OSS model card](https://huggingface.co/openai/gpt-oss-120b),
+  [OpenAI GPT-OSS announcement](https://openai.com/index/introducing-gpt-oss/),
+  and [OpenAI GPT-OSS support guidance](https://help.openai.com/en/articles/11870455)
+  (accessed 2026-07-28): GPT-OSS supports structured outputs and function
+  calling, requires Harmony response formatting, and delegates exact feature
+  support to the selected self-hosting runtime.
+- [Google Gemma 4 function-calling guide](https://ai.google.dev/gemma/docs/capabilities/text/function-calling-gemma4),
+  [Gemma 4 prompt-format guide](https://ai.google.dev/gemma/docs/core/prompt-formatting-gemma4),
+  and [Gemma 4 model card](https://ai.google.dev/gemma/docs/core/model_card_4)
+  (accessed 2026-07-28): Gemma 4 supports structured tool use through
+  model-specific control tokens and chat templates. Google's Gemini JSON
+  Schema API documentation is not evidence that every self-hosted Gemma
+  generation supports OpenAI `response_format`.
+- [Moonshot Kimi K3 model documentation](https://github.com/MoonshotAI/Kimi-K3/blob/main/README.md)
+  and [Kimi Vendor Verifier](https://github.com/MoonshotAI/Kimi-Vendor-Verifier)
+  (accessed 2026-07-28): Kimi K3 supports `response_format`, but always uses
+  thinking, requires preserved reasoning history for multi-turn/tool use, and
+  requires provider-specific feature verification.
+- [Hugging Face Datasets JSON loading documentation](https://huggingface.co/docs/datasets/loading)
+  (accessed 2026-07-28): JSON Lines is an appropriate one-record-per-line
+  interchange format.
+- [Self-Instruct](https://aclanthology.org/2023.acl-long.754/)
+  (Wang et al., ACL 2023; accessed 2026-07-28): synthetic instruction
+  pipelines require filtering of invalid and similar generations.
+- [Source2Synth](https://openreview.net/forum?id=z9rR3btRFI)
+  (Lupidi et al., ICLR 2025; accessed 2026-07-28): source-grounded synthetic
+  generation benefits from answerability-based curation and explicit
+  grounding in real source data.
+- [Data Provenance Initiative](https://www.dataprovenance.org/)
+  (accessed 2026-07-28): retain source and derivation metadata for post-training
+  datasets.
+- [Judging the Judges](https://arxiv.org/abs/2406.07791)
+  (Shi et al., 2024; accessed 2026-07-28): LLM judges exhibit systematic
+  biases, so a judge cannot replace deterministic checks or human pilot
+  review.
+
+Code verification:
+
+- The reference seed file contains two authored requests with tender facts and
+  `manual_chunk_ids`; it does not contain the final response.
+- The reference `_build_drafting_inputs` resolves every chunk ID and fails on
+  unknown IDs, while `TenderDraftingGenerator` uses Curator structured output.
+- The reference compact exporter emits the requested seven core fields plus
+  `evidence_quotes`.
+- All five reference chunk IDs are absent from this repository's current
+  corpus because the two projects use different chunk construction and ID
+  formats. Copying the seed file unchanged would fail.
+- A controlled request showed Curator rejects the private hosted-vLLM model
+  before contacting it because LiteLLM's static `supports_response_schema`
+  lookup returns false for the custom model name. This affects all existing
+  structured QA stages as well as drafting.
+- Direct endpoint probes showed GLM returns valid schema-constrained JSON with
+  native `json_schema`; the current Nemotron server returns invalid `{"` for
+  both `json_schema` and `json_object`, but valid JSON under prompt-only schema
+  instructions. This is server behavior, not a claim that the underlying
+  Nemotron model lacks structured-output training.
+- A direct probe of the candidate Gemma 4 endpoint at the user-supplied private
+  server verified its exact advertised model ID and successful responses for
+  `json_schema`, `json_object`, prompt-only JSON, and forced tool calling.
+  Native `json_schema` is preferred for that endpoint. Credentials are not
+  recorded in this document.
+- Official documentation confirms that model-family support is not enough to
+  select a transport mode. GPT-OSS, Gemma, and Kimi have different chat
+  templates, reasoning semantics, and runtime/provider requirements.
+- The supplied Qwen2.5-Coder endpoint timed out at `/models` on 2026-07-28, so
+  its deployment capabilities remain unverified. Official Qwen documentation
+  confirms improved JSON generation and notes that vLLM tool calling requires
+  launch-time `--enable-auto-tool-choice` and the Hermes tool parser.
+- The example LD output is not fully grounded: the current NRL Goods source
+  states a 5% cap on the value of **delayed goods**, not total goods, and the
+  quoted example context does not support the added cancellation sentence.
+
+Decision:
+
+- [x] Add a separately configurable drafting track and seed path.
+- [x] Preserve the requested seven-field compact JSONL contract.
+- [x] Resolve seeds against this repository's own current chunk IDs and fail
+  fast on missing or duplicate IDs.
+- [x] Treat authored tender facts as instance-specific source material and
+  manual chunks as governing policy; report conflicts instead of blending.
+- [x] Require exact manual evidence quotes from the structured model response.
+- [x] Reject unsupported numbers and email addresses deterministically before
+  judging.
+- [x] Keep drafting output separate from QA and QA-with-rationale exports.
+- [x] Make the feature and seed path configurable without Python edits.
+- [x] Add an explicit, opt-in hosted-model structured-output capability setting
+  rather than globally monkey-patching Curator or assuming every endpoint
+  supports JSON Schema.
+- [x] Support configurable `auto`, `tools`, `json_schema`, `json`, and
+  prompt-validated `md_json` modes without model-name conditionals.
+- [ ] Add a mandatory per-endpoint structure probe before a newly configured
+  model is allowed to generate production data; do not infer support from a
+  model-family name.
+- [ ] Run a small local-model pilot and manually review grounding, omissions,
+  authority, privacy, and drafting usefulness before scaling.
+
+Rejected alternatives:
+
+- Copying the reference implementation verbatim: rejected because its IDs do
+  not resolve here and its sample demonstrates unsupported clause expansion.
+- Exporting the displayed examples as fixed gold responses: rejected because
+  one example changes the LD basis and fixed rows would not constitute
+  synthetic generation.
+- Trusting only an LLM judge: rejected because judge bias is documented and
+  exact numbers, emails, citations, and evidence membership are
+  deterministically testable.
+- Mixing drafting rows into QA exports: rejected because their schemas and
+  intended training behavior differ.
+
 ## Current baseline
 
 Implemented:

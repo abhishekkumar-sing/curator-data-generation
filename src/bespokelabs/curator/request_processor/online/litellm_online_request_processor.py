@@ -56,7 +56,18 @@ class LiteLLMOnlineRequestProcessor(BaseOnlineRequestProcessor):
         super().__init__(config)
         # NOTE: Removed global litellm.api_base assignment - now passed per-request
         # to allow multiple LLM instances with different base_urls
-        self.client = instructor.from_litellm(litellm.acompletion)
+        modes = {
+            "tools": instructor.Mode.TOOLS,
+            "json_schema": instructor.Mode.JSON_SCHEMA,
+            "json": instructor.Mode.JSON,
+            "md_json": instructor.Mode.MD_JSON,
+        }
+        mode = modes.get(config.structured_output_mode)
+        self.client = (
+            instructor.from_litellm(litellm.acompletion, mode=mode)
+            if mode is not None
+            else instructor.from_litellm(litellm.acompletion)
+        )
         self._rate_limits_initialized = False
 
         self._validate_config(config)
@@ -201,7 +212,11 @@ class LiteLLMOnlineRequestProcessor(BaseOnlineRequestProcessor):
         Returns:
             bool: True if structured output is supported, False otherwise
         """
-        # Check if model supports Pydantic models / json_schema
+        # Explicit modes are operator assertions about a custom endpoint. The
+        # returned payload is still parsed and validated against the schema.
+        if self.config.structured_output_mode != "auto":
+            return True
+        # Automatic mode retains LiteLLM's provider/model capability lookup.
         return supports_response_schema(model=self.config.model)
 
     def estimate_output_tokens(self) -> int:

@@ -4,7 +4,7 @@
 
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 QuestionType = Literal[
     "direct_fact",
@@ -61,6 +61,49 @@ class JudgedCandidate(BaseModel):
 
 class JudgeBatch(BaseModel):
     judgments: list[JudgedCandidate]
+
+
+class DraftingSeed(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(min_length=1)
+    tender_id: str = Field(min_length=1)
+    task: Literal["drafting"]
+    instruction: str = Field(min_length=12)
+    tender_context: list[str] = Field(min_length=1)
+    manual_chunk_ids: list[str] = Field(min_length=1)
+
+
+class DraftingResult(BaseModel):
+    response: str = Field(
+        min_length=40,
+        description=(
+            "Complete ready-to-use text requested by the instruction, not a title, "
+            "outline, summary, or explanation of what should be drafted. Preserve "
+            "document formatting with newline characters between headings, fields, "
+            "paragraphs, contacts, and footers."
+        ),
+    )
+    manual_evidence_quotes: list[str] = Field(
+        min_length=1,
+        description="Exact manual quotations that govern the completed draft.",
+    )
+    tender_facts_used: list[str] = Field(
+        min_length=1,
+        description=(
+            "Every applicable tender fact used in the response, copied as complete "
+            "verbatim items from TENDER FACTS."
+        ),
+    )
+
+
+class DraftingJudgeDecision(BaseModel):
+    supported: bool
+    follows_instruction: bool
+    preserves_policy_qualifications: bool
+    resolves_source_conflicts_safely: bool
+    score: int = Field(ge=1, le=5)
+    issues: list[str] = Field(default_factory=list)
 
 
 CrossRelationship = Literal[

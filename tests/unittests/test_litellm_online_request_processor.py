@@ -1,11 +1,53 @@
 import litellm
 
+from bespokelabs.curator.request_processor.online import (
+    litellm_online_request_processor,
+)
 from bespokelabs.curator.request_processor.config import OnlineRequestProcessorConfig
 from bespokelabs.curator.request_processor.online.base_online_request_processor import TokenLimitStrategy
 from bespokelabs.curator.request_processor.online.litellm_online_request_processor import LiteLLMOnlineRequestProcessor
 from bespokelabs.curator.types.generic_request import GenericRequest
 from bespokelabs.curator.types.prompt import File, _MultiModalPrompt
 from bespokelabs.curator.types.token_usage import _TokenUsage
+
+
+def test_explicit_structured_output_mode_overrides_static_lookup(monkeypatch):
+    calls = []
+
+    def unsupported(**kwargs):
+        calls.append(kwargs)
+        return False
+
+    monkeypatch.setattr(
+        litellm_online_request_processor, "supports_response_schema", unsupported
+    )
+    processor = LiteLLMOnlineRequestProcessor(
+        OnlineRequestProcessorConfig(
+            model="hosted_vllm/private-model",
+            structured_output_mode="md_json",
+        )
+    )
+
+    assert processor.check_structured_output_support()
+    assert calls == []
+
+
+def test_auto_structured_output_mode_uses_static_lookup(monkeypatch):
+    calls = []
+
+    def unsupported(**kwargs):
+        calls.append(kwargs)
+        return False
+
+    monkeypatch.setattr(
+        litellm_online_request_processor, "supports_response_schema", unsupported
+    )
+    processor = LiteLLMOnlineRequestProcessor(
+        OnlineRequestProcessorConfig(model="hosted_vllm/private-model")
+    )
+
+    assert not processor.check_structured_output_support()
+    assert calls == [{"model": "hosted_vllm/private-model"}]
 
 
 def test_multimodal_support_falls_back_for_claude_aliases(monkeypatch):
