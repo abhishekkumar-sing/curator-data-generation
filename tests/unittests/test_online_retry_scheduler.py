@@ -1,8 +1,12 @@
 """Tests for work-conserving online request retries."""
 
 import asyncio
+import json
 from types import SimpleNamespace
 
+from bespokelabs.curator.request_processor.base_request_processor import (
+    BaseRequestProcessor,
+)
 from bespokelabs.curator.request_processor.online.base_online_request_processor import (
     APIRequest,
     BaseOnlineRequestProcessor,
@@ -174,3 +178,94 @@ def test_permanent_failure_is_recorded_and_releases_once() -> None:
     assert len(appended) == 1
     assert appended[0].response_message is None
     assert appended[0].response_errors == ["still unavailable(x2)"]
+
+
+def test_filtered_parse_response_is_still_persisted(monkeypatch) -> None:
+    """A successful provider response must survive parse-time filtering."""
+
+    request = _request(attempts_left=0)
+    response = GenericResponse(
+        response_message={"answer": "provider output"},
+        raw_response={"id": "response-1"},
+        raw_request={"model": "test-model"},
+        generic_request=request.generic_request,
+        created_at=request.created_at,
+        finished_at=request.created_at,
+        token_usage=_TokenUsage(input=10, output=5),
+        response_cost=0.0,
+        finish_reason="stop",
+    )
+
+    async def stream_response(*args, **kwargs) -> None:
+        pass
+
+    processor = SimpleNamespace(
+        _process_response=lambda data: [],
+        viewer_client=SimpleNamespace(stream_response=stream_response),
+    )
+    status = SimpleNamespace(num_parsed_responses=0)
+    writes = []
+
+    class _AsyncFile:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        async def write(self, value):
+            writes.append(value)
+
+    monkeypatch.setattr(
+        "bespokelabs.curator.request_processor.online.base_online_request_processor.aiofiles.open",
+        lambda *args, **kwargs: _AsyncFile(),
+    )
+
+    asyncio.run(
+        BaseOnlineRequestProcessor.append_generic_response(
+            processor,
+            status,
+            response,
+            "responses_0.jsonl",
+        )
+    )
+
+    persisted = json.loads(writes[0])
+    assert persisted["response_message"] == {"answer": "provider output"}
+    assert persisted["parsed_response_message"] is None
+    assert status.num_parsed_responses == 0
+
+
+def test_all_filtered_provider_responses_return_empty_dataset(tmp_path) -> None:
+    """Filtering every valid response is not equivalent to provider failure."""
+
+    request = _request(attempts_left=0)
+    response = GenericResponse(
+        response_message={"answer": "provider output"},
+        raw_response={"id": "response-1"},
+        raw_request={"model": "test-model"},
+        generic_request=request.generic_request,
+        created_at=request.created_at,
+        finished_at=request.created_at,
+        token_usage=_TokenUsage(input=10, output=5),
+        response_cost=0.0,
+        finish_reason="stop",
+    )
+    (tmp_path / "responses_0.jsonl").write_text(
+        response.model_dump_json() + "\n",
+        encoding="utf-8",
+    )
+    processor = SimpleNamespace(
+        working_dir=str(tmp_path),
+        _process_response=lambda data: [],
+        prompt_formatter=SimpleNamespace(
+            response_to_response_format=lambda value: value,
+            parse_func=lambda row, value: [],
+        ),
+        config=SimpleNamespace(require_all_responses=False),
+    )
+
+    dataset = BaseRequestProcessor.create_dataset_files(processor, "filtered")
+
+    assert dataset.to_list() == []
+    assert not (tmp_path / "filtered.arrow").exists()

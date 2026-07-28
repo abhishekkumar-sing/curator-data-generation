@@ -8,6 +8,8 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
+from jsonl_io import write_jsonl_rows
+
 
 def _components(manuals: list[dict[str, Any]], records: list[dict[str, Any]]) -> dict[str, str]:
     parent = {manual["manual_id"]: manual["manual_id"] for manual in manuals}
@@ -55,9 +57,7 @@ def assign_splits(
 
 
 def _write(path: Path, rows: list[dict[str, Any]]) -> None:
-    with path.open("w", encoding="utf-8") as stream:
-        for row in rows:
-            stream.write(json.dumps(row, ensure_ascii=False) + "\n")
+    write_jsonl_rows(path, rows)
 
 
 def write_manifest(output_dir: Path, manifest: dict[str, Any]) -> None:

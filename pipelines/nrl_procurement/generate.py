@@ -28,6 +28,7 @@ from drafting import (
     write_jsonl,
 )
 from export import assign_splits, export_records, write_manifest
+from jsonl_io import write_jsonl_rows
 from schemas import CandidateBatch, JudgeBatch
 from validation import deduplicate, validate_record
 
@@ -210,9 +211,7 @@ def request_coverage(planned: list[dict[str, Any]], records: list[dict[str, Any]
 
 
 def _write_audit(path: Path, rows: list[dict[str, Any]]) -> None:
-    with path.open("w", encoding="utf-8") as stream:
-        for row in rows:
-            stream.write(json.dumps(row, ensure_ascii=False) + "\n")
+    write_jsonl_rows(path, rows)
 
 
 def _non_secret_model_manifest(profile: dict[str, Any]) -> dict[str, Any]:

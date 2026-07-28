@@ -590,9 +590,11 @@ class BaseOnlineRequestProcessor(BaseRequestProcessor, ABC):
         """
         raw_response = data.response_message
         responses = self._process_response(data)
-        if not responses:
-            return
-        data.parsed_response_message = responses
+        # Always persist a completed provider response. A parse function may
+        # intentionally filter a response by returning []/None; dropping that
+        # response here makes a successful request look missing and leaves no
+        # response file when every row is filtered.
+        data.parsed_response_message = responses or None
         data.response_message = raw_response
         data_dump = data.model_dump()
         json_string = json.dumps(data_dump, default=str)
@@ -601,5 +603,5 @@ class BaseOnlineRequestProcessor(BaseRequestProcessor, ABC):
         logger.debug(f"Successfully appended response to {filename}")
         filename = os.path.basename(filename).split(".")[0]
         idx = status_tracker.num_parsed_responses
-        status_tracker.num_parsed_responses = idx + len(responses)
+        status_tracker.num_parsed_responses = idx + len(responses or [])
         await self.viewer_client.stream_response(json_string, idx)

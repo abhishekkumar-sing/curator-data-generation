@@ -1,5 +1,6 @@
 """Focused tests for the local procurement pipeline."""
 
+import json
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -219,8 +220,8 @@ def test_drafting_seed_resolution_validation_and_compact_output(tmp_path: Path) 
         "instruction",
         "context",
         "response",
-        "citations",
         "citation_details",
+        "citations",
     ]
     assert compact["citations"] == ["chunk-1", "tender-1"]
 
@@ -631,6 +632,9 @@ def test_exports_keep_qa_and_rationale_task_files_disjoint(tmp_path: Path) -> No
         text = (tmp_path / filename).read_text(encoding="utf-8")
         assert record_id in text
         assert text.count("\n") == 1
+        assert list(json.loads(text))[-1] == "citations"
+    for line in (tmp_path / "canonical.jsonl").read_text(encoding="utf-8").splitlines():
+        assert list(json.loads(line))[-1] == "citations"
 
 
 def test_run_layout_and_curator_cache_are_project_local(tmp_path: Path, monkeypatch) -> None:

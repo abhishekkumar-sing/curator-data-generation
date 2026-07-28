@@ -7,6 +7,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+from jsonl_io import write_jsonl_rows
 from pydantic import ValidationError
 from schemas import DraftingJudgeDecision, DraftingResult, DraftingSeed
 from settings import CONFIG
@@ -351,14 +352,11 @@ def compact_drafting(row: dict[str, Any]) -> dict[str, Any]:
         "instruction": row["instruction"],
         "context": row["context"],
         "response": row["response"],
-        "citations": row["citations"],
         "citation_details": row["citation_details"],
+        "citations": row["citations"],
     }
 
 
 def write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
     """Write one JSON object per line."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as stream:
-        for row in rows:
-            stream.write(json.dumps(row, ensure_ascii=False) + "\n")
+    write_jsonl_rows(path, rows)

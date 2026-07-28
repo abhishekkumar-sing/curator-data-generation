@@ -1464,3 +1464,54 @@ Primary references:
 - [Hugging Face dataset-card metadata](https://huggingface.co/docs/huggingface_hub/en/package_reference/cards):
   `task_categories` and `task_ids` are explicit metadata, reinforcing documented
   task identity.
+
+## Pilot-005 response persistence and citation ordering (2026-07-28)
+
+Status: implemented and locally verified; a model-backed rerun remains user-owned.
+
+Pilot evidence and root cause:
+
+- The GLM endpoint was reachable. Both generation stages reported 5/5 provider
+  successes, zero API errors, and zero rate-limit errors.
+- Single-document generation persisted only four of five successful responses;
+  cross-document generation persisted none of five. Curator then raised
+  `No responses files found` after the cross stage.
+- Curator's online writer called the pipeline `parse()` before persistence and
+  silently returned when parsing produced `[]` or `None`. This conflated a
+  successful provider response filtered by deterministic validation with a
+  missing or failed request.
+
+Implemented contract:
+
+- Persist every completed provider response, including responses whose parsed
+  row set is empty. Store `parsed_response_message=null` for filtered responses.
+- If at least one provider response succeeded but every row is filtered,
+  materialize an empty dataset and allow the calling pipeline to continue.
+  Preserve the existing hard failure when every provider request genuinely
+  failed.
+- Future user-facing and audit JSONL writers preserve all fields but serialize
+  top-level `citations` last. `citation_details`, when present, immediately
+  precedes `citations`.
+- Completed historical run artifacts such as `outputs/pilot-004` are not
+  rewritten; the presentation rule applies to newly written output.
+
+Research basis:
+
+- [Curator Key Concepts](https://docs.bespokelabs.ai/bespoke-curator/getting-started/key-concepts)
+  defines `parse` as converting each provider response into zero or more final
+  rows; Curator's own documented feature-extraction example returns `[]` when a
+  response cannot be converted.
+- [RFC 8259](https://www.rfc-editor.org/rfc/rfc8259) defines a JSON object as an
+  unordered collection, so citation-last is a stable presentation contract, not
+  a semantic JSON requirement.
+- [Python `json` documentation](https://docs.python.org/3/library/json.html)
+  states that encoders preserve input order by default, which makes the
+  requested presentation deterministic in JSONL.
+
+Local verification:
+
+- `tests/unittests/test_online_retry_scheduler.py`: provider responses survive
+  parse filtering and all-filtered successful responses return an empty dataset.
+- `tests/nrl_procurement/test_pipeline.py`: compact drafting, canonical, QA,
+  QA-CoT, cross-document QA, and cross-document QA-CoT JSONL serialize
+  `citations` as the final top-level key.

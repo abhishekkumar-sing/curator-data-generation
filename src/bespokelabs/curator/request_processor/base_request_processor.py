@@ -467,6 +467,8 @@ class BaseRequestProcessor(ABC):
         # Process all response files
         total_responses_count = 0
         failed_responses_count = 0
+        provider_success_count = 0
+        parsed_rows_count = 0
         error_sample = []
         dataset_file = os.path.join(self.working_dir, f"{parse_func_hash}.arrow")
         from datasets.arrow_writer import ArrowWriter
@@ -484,6 +486,7 @@ class BaseRequestProcessor(ABC):
                                 error_sample.append(str(response.response_errors))
                             continue
 
+                        provider_success_count += 1
                         # TODO: Find a way to not process responses that have already been processed
                         # We cannot just check if parsed_response_message is not None because it could be from cached previous run
                         # response.
@@ -507,15 +510,32 @@ class BaseRequestProcessor(ABC):
                             # Add the original row index to the row so that we can sort by it later.
                             row["__original_row_idx"] = response.generic_request.original_row_idx
                             writer.write(row)
+                            parsed_rows_count += 1
 
             logger.info(f"Read {total_responses_count} responses.")
             error_sample_str = "\n".join(error_sample)
             error_sample_msg = f"Sample of the first {len(error_sample)} errors encountered: \n {error_sample_str}"
-            if failed_responses_count == total_responses_count:
+            if provider_success_count == 0:
                 writer.write({"error": "All requests failed"})
                 writer.finalize()
                 os.remove(dataset_file)
                 raise ValueError(f"All requests failed. {error_sample_msg}")
+            elif parsed_rows_count == 0:
+                # parse() may intentionally filter every successful provider
+                # response by returning []/None. Keep that distinct from
+                # provider failure and return a valid empty dataset so chained
+                # pipeline stages can continue.
+                writer.write({"__curator_filtered__": True})
+                writer.finalize()
+                os.remove(dataset_file)
+                if self.config.require_all_responses and provider_success_count != total_responses_count:
+                    raise ValueError(f"Some requests failed and require_all_responses is True. {error_sample_msg}")
+                logger.warning(
+                    "All %s successful provider responses were filtered by `parse_func`; "
+                    "returning an empty dataset.",
+                    provider_success_count,
+                )
+                return Dataset.from_list([])
             else:
                 logger.info("Finalizing writer")
                 writer.finalize()
