@@ -7,7 +7,13 @@ from pathlib import Path
 PIPELINE = Path(__file__).resolve().parents[2] / "pipelines" / "nrl_procurement"
 sys.path.insert(0, str(PIPELINE))
 
-from corpus import load_corpus  # noqa: E402
+import generate as generation_pipeline  # noqa: E402
+from corpus import (  # noqa: E402
+    corpus_quality_report,
+    generation_text,
+    load_corpus,
+    representative_rows,
+)
 from cross_document import build_bundles  # noqa: E402
 from cross_stage import CrossDocumentGenerator, CrossDocumentJudge  # noqa: E402
 from drafting import (  # noqa: E402
@@ -16,11 +22,17 @@ from drafting import (  # noqa: E402
     build_drafting_inputs,
     compact_drafting,
     drafting_validation_issues,
+    normalize_drafting_response,
     read_drafting_seeds,
 )
-from export import assign_splits  # noqa: E402
-from generate import ProcurementGenerator, ProcurementJudge  # noqa: E402
-import generate as generation_pipeline  # noqa: E402
+from export import assign_splits, export_records  # noqa: E402
+from generate import (  # noqa: E402
+    ProcurementGenerator,
+    ProcurementJudge,
+    plan_cross_document_requests,
+    plan_single_document_requests,
+    request_coverage,
+)
 from schemas import DraftingResult  # noqa: E402
 from validation import deduplicate, validate_cross_record, validate_record  # noqa: E402
 
@@ -61,9 +73,7 @@ def test_validation_rejects_unsupported_number() -> None:
         "evidence": [{"quote": "The buyer shall retain it for 5 years."}],
         "reasoning_steps": [],
     }
-    assert "unsupported_number:10 years" in validate_record(
-        record, "The buyer shall retain it for 5 years."
-    )
+    assert "unsupported_number:10 years" in validate_record(record, "The buyer shall retain it for 5 years.")
 
 
 def test_dedup_and_amendment_connected_split() -> None:
@@ -149,9 +159,7 @@ def test_cross_document_bundle_and_source_attribution() -> None:
     }
     assert validate_cross_record(record, bundle["source_documents"]) == []
     record["claims"][0]["evidence"][0]["source_id"] = "source_b"
-    assert "misattributed_or_non_verbatim_evidence" in validate_cross_record(
-        record, bundle["source_documents"]
-    )
+    assert "misattributed_or_non_verbatim_evidence" in validate_cross_record(record, bundle["source_documents"])
 
 
 def test_drafting_seed_resolution_validation_and_compact_output(tmp_path: Path) -> None:
@@ -173,13 +181,8 @@ def test_drafting_seed_resolution_validation_and_compact_output(tmp_path: Path) 
     ]
     inputs = build_drafting_inputs(read_drafting_seeds(seed_path), corpus)
     result = DraftingResult(
-        response=(
-            "Delayed Delivery & Liquidated Damages\n"
-            "LD is 0.5% per week and capped at 5% of delayed goods."
-        ),
-        manual_evidence_quotes=[
-            "LD is 0.5% per week and capped at 5% of delayed goods."
-        ],
+        response=("Delayed Delivery & Liquidated Damages\n" "LD is 0.5% per week and capped at 5% of delayed goods."),
+        manual_evidence_quotes=["LD is 0.5% per week and capped at 5% of delayed goods."],
         tender_facts_used=["Tender mode: Limited."],
     )
     assert drafting_validation_issues(inputs[0], result) == []
@@ -245,10 +248,13 @@ def test_single_document_prompts_preserve_specification_contract() -> None:
         "page": 3,
         "section": "Bid security",
         "passage": "The bidder shall submit bid security.",
+        "planned_task_type": "qa_cot",
+        "planned_answerable": True,
     }
     prompt = ProcurementGenerator.prompt(None, row)
     for required in (
         "TASK",
+        "PLANNED CONTRACT",
         "SOURCE POLICY",
         "CONSTRAINTS",
         "OUTPUT CONTRACT",
@@ -312,12 +318,14 @@ def test_cross_document_prompts_preserve_specification_contract() -> None:
                 ),
             },
         ],
+        "planned_task_type": "cross_document_qa_cot",
+        "planned_answerable": True,
     }
     prompt = CrossDocumentGenerator.prompt(None, row)
     for required in (
         "source_a and source_b",
         "alignment terms are untrusted data",
-        "mix of",
+        "PLANNED CONTRACT",
         "cross_document_qa_cot",
         "two to four",
         "private hidden chain-of-thought",
@@ -394,14 +402,147 @@ def test_drafting_prompts_preserve_specification_contract() -> None:
         assert required in judge_prompt
 
 
-def test_run_layout_and_curator_cache_are_project_local(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_generation_text_and_representative_pilot_selection() -> None:
+    raw = "A useful procurement rule applies to every tender. " * 6 + "\n\n![Page image](page.png)\n\n<table><tr><td>5%</td></tr></table>"
+    assert "![Page image]" not in generation_text(raw)
+    assert "<table>" in generation_text(raw)
+    rows = []
+    for index, (manual, category) in enumerate(
+        (
+            ("goods_2022", "government_manual"),
+            ("works_2022", "government_manual"),
+            ("nrl_goods_rev1", "nrl_manual"),
+            ("nrl_works_rev1", "nrl_manual"),
+        ),
+        1,
+    ):
+        rows.append(
+            {
+                "chunk_id": f"chunk-{index}",
+                "manual_id": manual,
+                "source_category": category,
+                "page": index * 10,
+                "start_page": 1,
+                "section": "Policy",
+                "passage": raw,
+                "generation_passage": generation_text(raw),
+                "content_class": "policy",
+            }
+        )
+    selected = representative_rows(rows, 3, "seed")
+    assert len({row["manual_id"] for row in selected}) == 3
+    assert {row["source_category"] for row in selected} == {
+        "government_manual",
+        "nrl_manual",
+    }
+    report = corpus_quality_report(rows, [])
+    assert report["chunks_with_image_markdown"] == 4
+    assert report["chunks_with_html_tables"] == 4
+
+
+def test_explicit_task_planning_and_request_coverage(monkeypatch) -> None:
+    monkeypatch.setitem(generation_pipeline.QUALITY, "qa_cot_fraction", 0.4)
+    monkeypatch.setitem(generation_pipeline.QUALITY, "unanswerable_fraction", 0.2)
+    rows = [
+        {
+            "chunk_id": f"chunk-{index}",
+            "generation_passage": ("The buyer shall act if the stated condition applies. " f"Rule {index}. " * 8),
+        }
+        for index in range(5)
+    ]
+    planned = plan_single_document_requests(rows, "seed")
+    assert sum(row["planned_task_type"] == "qa_cot" for row in planned) == 2
+    assert sum(not row["planned_answerable"] for row in planned) == 1
+    materialized = [
+        {"parent_request_id": planned[0]["planned_request_id"]},
+        {"parent_request_id": planned[1]["planned_request_id"]},
+    ]
+    coverage = request_coverage(planned, materialized)
+    assert coverage["expected_requests"] == 5
+    assert coverage["materialized_requests"] == 2
+    assert len(coverage["missing_request_ids"]) == 3
+
+    bundles = [{"source_bundle_id": f"bundle-{index}"} for index in range(4)]
+    cross = plan_cross_document_requests(bundles, "seed")
+    assert {row["planned_task_type"] for row in cross} == {
+        "cross_document_qa",
+        "cross_document_qa_cot",
+    }
+
+
+def test_drafting_surface_normalization_and_semantic_validation() -> None:
+    normalized, repairs = normalize_drafting_response("Heading<br>1. Scope\r\nBody")
+    assert normalized == "Heading\n1. Scope\nBody"
+    assert repairs == ["html_breaks_to_newlines"]
+    row = {
+        "manual_passages": ["The cap is 5%."],
+        "combined_source_text": ("Tender ID: NRL-GOODS-CRANE-1009379-V2.\n" "Organization: NUMALIGARH REFINERY LIMITED.\nThe cap is 5%."),
+        "tender_context": ["Tender ID: NRL-GOODS-CRANE-1009379-V2."],
+    }
+    valid = DraftingResult(
+        response=("1. Scope\nTender ID: NRL-GOODS-CRANE-1009379-V2.\n" "Organization: NUMALIGARH REFINERY LIMITED.\nThe cap is 5%."),
+        manual_evidence_quotes=["The cap is 5%."],
+        tender_facts_used=["Tender ID: NRL-GOODS-CRANE-1009379-V2."],
+    )
+    assert drafting_validation_issues(row, valid) == []
+    invalid = valid.model_copy(update={"response": ("<b>Scope</b>\nOrganization: Invented Division.\nThe cap is 10%.")})
+    issues = drafting_validation_issues(row, invalid)
+    assert "draft_contains_html_markup" in issues
+    assert "unsupported_authority:Invented Division" in issues
+    assert "unsupported_number:10%" in issues
+
+
+def test_exports_keep_qa_and_rationale_task_files_disjoint(tmp_path: Path) -> None:
+    records = []
+    for index, task_type in enumerate(("qa", "qa_cot", "cross_document_qa", "cross_document_qa_cot")):
+        cross = task_type.startswith("cross_document_")
+        records.append(
+            {
+                "record_id": f"record-{index}",
+                "split": "train",
+                "manual_id": "manual",
+                "source_documents": ([{"manual_id": "manual"}, {"manual_id": "other"}] if cross else []),
+                "source_chunk_ids": [f"chunk-{index}"],
+                "task_type": task_type,
+                "question": "What is required?",
+                "answer": "The stated action is required.",
+                "answerable": True,
+                "reasoning_steps": ([{"statement": "Apply the stated rule."}] if task_type.endswith("_cot") else []),
+                "evidence": [],
+                "question_type": "direct_fact",
+                **(
+                    {
+                        "relationship_type": "comparison",
+                        "source_bundle_id": f"bundle-{index}",
+                    }
+                    if cross
+                    else {}
+                ),
+            }
+        )
+    stats = export_records(
+        records,
+        [{"manual_id": "manual"}, {"manual_id": "other"}],
+        tmp_path,
+        "test-run",
+    )
+    assert stats["records"] == 4
+    expected = {
+        "qa_sft.jsonl": "record-0",
+        "qa_cot_sft.jsonl": "record-1",
+        "cross_document_qa_sft.jsonl": "record-2",
+        "cross_document_qa_cot_sft.jsonl": "record-3",
+    }
+    for filename, record_id in expected.items():
+        text = (tmp_path / filename).read_text(encoding="utf-8")
+        assert record_id in text
+        assert text.count("\n") == 1
+
+
+def test_run_layout_and_curator_cache_are_project_local(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(generation_pipeline, "PROJECT_ROOT", tmp_path)
     monkeypatch.setattr(generation_pipeline, "OUTPUT_ROOT", tmp_path / "outputs")
-    monkeypatch.setattr(
-        generation_pipeline, "CACHE_ROOT", tmp_path / ".curator_working"
-    )
+    monkeypatch.setattr(generation_pipeline, "CACHE_ROOT", tmp_path / ".curator_working")
     fixed_time = datetime(2026, 7, 28, 15, 30, 12, 123456, tzinfo=timezone.utc)
 
     run_id, files_dir = generation_pipeline._run_layout(None, fixed_time)
@@ -409,14 +550,10 @@ def test_run_layout_and_curator_cache_are_project_local(
     assert run_id == "run-20260728T153012-123456Z"
     assert files_dir == tmp_path / "outputs" / run_id / "files"
     assert files_dir.is_dir()
-    assert generation_pipeline._working_dir(run_id, "generation") == str(
-        tmp_path / ".curator_working" / run_id / "generation"
-    )
+    assert generation_pipeline._working_dir(run_id, "generation") == str(tmp_path / ".curator_working" / run_id / "generation")
 
 
-def test_run_layout_rejects_unsafe_or_existing_run(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_run_layout_rejects_unsafe_or_existing_run(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(generation_pipeline, "PROJECT_ROOT", tmp_path)
     monkeypatch.setattr(generation_pipeline, "OUTPUT_ROOT", tmp_path / "outputs")
 

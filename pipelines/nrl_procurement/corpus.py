@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +14,8 @@ import yaml
 PAGE_PATTERN = re.compile(r"<!--\s*Page\s+(\d+)\s*-->", re.IGNORECASE)
 CHANDRA_PAGE_PATTERN = re.compile(r"(?m)^\s*(\d+)-{20,}\s*$")
 HEADING_PATTERN = re.compile(r"^(#{1,6})\s+(.+)$", re.MULTILINE)
+IMAGE_LINE_PATTERN = re.compile(r"(?m)^\s*!\[[^\]]*]\([^)]+\).*$")
+HTML_IMAGE_PATTERN = re.compile(r"(?is)<(?:img|figure)\b[^>]*>.*?</figure>|<img\b[^>]*>")
 
 
 def _sha256(path: Path) -> str:
@@ -23,17 +27,32 @@ def _sha256(path: Path) -> str:
 
 
 def _ocr_markdown(ocr_dir: Path, source: Path) -> Path:
-    matches = sorted(
-        path
-        for path in ocr_dir.rglob("*.md")
-        if path.stem == source.stem or path.parent.name == source.stem
-    )
+    matches = sorted(path for path in ocr_dir.rglob("*.md") if path.stem == source.stem or path.parent.name == source.stem)
     if len(matches) != 1:
         raise ValueError(
-            f"Expected exactly one Chandra Markdown output for {source.name} under "
-            f"{ocr_dir}; found {len(matches)}. Run preprocess_pdfs.py first."
+            f"Expected exactly one Chandra Markdown output for {source.name} under " f"{ocr_dir}; found {len(matches)}. Run preprocess_pdfs.py first."
         )
     return matches[0]
+
+
+def _ocr_provenance(ocr_dir: Path, source: Path, markdown: Path) -> dict[str, Any]:
+    cache = ocr_dir / source.stem / ".chandra-cache.json"
+    if not cache.is_file():
+        return {"status": "missing", "cache_file": str(cache)}
+    payload = json.loads(cache.read_text(encoding="utf-8"))
+    if payload.get("source_sha256") != _sha256(source):
+        raise ValueError(f"Stale OCR cache for {source.name}: source hash mismatch")
+    markdown_hash = payload.get("markdown_sha256")
+    if markdown_hash and markdown_hash != _sha256(markdown):
+        raise ValueError(f"Stale OCR cache for {source.name}: Markdown hash mismatch")
+    return {
+        "status": "complete" if markdown_hash and payload.get("model") else "legacy",
+        "cache_file": str(cache),
+        "model": payload.get("model"),
+        "engine": payload.get("engine"),
+        "chandra_ocr_version": payload.get("chandra_ocr_version"),
+        "markdown_sha256": markdown_hash,
+    }
 
 
 def _pages(text: str) -> list[tuple[int | None, str]]:
@@ -48,11 +67,7 @@ def _pages(text: str) -> list[tuple[int | None, str]]:
         pages.extend(
             (
                 int(marker.group(1)) + 1,
-                text[
-                    marker.end() : chandra_markers[index + 1].start()
-                    if index + 1 < len(chandra_markers)
-                    else len(text)
-                ].strip(),
+                text[marker.end() : chandra_markers[index + 1].start() if index + 1 < len(chandra_markers) else len(text)].strip(),
             )
             for index, marker in enumerate(chandra_markers)
         )
@@ -60,11 +75,7 @@ def _pages(text: str) -> list[tuple[int | None, str]]:
     return [
         (
             int(marker.group(1)),
-            text[
-                marker.end() : markers[index + 1].start()
-                if index + 1 < len(markers)
-                else len(text)
-            ].strip(),
+            text[marker.end() : markers[index + 1].start() if index + 1 < len(markers) else len(text)].strip(),
         )
         for index, marker in enumerate(markers)
     ]
@@ -84,6 +95,113 @@ def _chunks(text: str, maximum: int) -> list[str]:
     if current:
         result.append("\n\n".join(current))
     return result
+
+
+def generation_text(passage: str) -> str:
+    """Remove non-policy image descriptions while preserving tables and prose."""
+    value = IMAGE_LINE_PATTERN.sub("", passage)
+    value = HTML_IMAGE_PATTERN.sub("", value)
+    value = re.sub(r"\n[ \t]+\n", "\n\n", value)
+    value = re.sub(r"\n{3,}", "\n\n", value)
+    return value.strip()
+
+
+def _document_family(manual_id: str) -> str:
+    for family in ("goods", "works", "services", "consultancy"):
+        if family in manual_id:
+            return family
+    return "other"
+
+
+def _content_class(row: dict[str, Any]) -> str:
+    passage = row["generation_passage"]
+    section = str(row.get("section") or "").casefold()
+    if "<table" in passage.casefold():
+        return "table"
+    if int(row.get("page") or 1) <= int(row.get("start_page", 1)) + 7 or any(label in section for label in ("foreword", "preface", "introduction", "contents")):
+        return "front_matter"
+    return "policy"
+
+
+def representative_rows(rows: list[dict[str, Any]], limit: int | None, seed: str) -> list[dict[str, Any]]:
+    """Select a deterministic diversity-first pilot instead of a corpus prefix."""
+    eligible = [
+        row
+        for row in rows
+        if len(row["generation_passage"]) >= 200
+        and row["content_class"] != "front_matter"
+    ]
+    if limit is None or limit >= len(eligible):
+        return eligible
+    if limit < 1:
+        return []
+
+    maximum_page = {manual_id: max(int(row.get("page") or 1) for row in eligible) for manual_id in {str(row["manual_id"]) for row in eligible}}
+    remaining = sorted(
+        eligible,
+        key=lambda row: hashlib.sha256(f"{seed}:{row['chunk_id']}".encode()).hexdigest(),
+    )
+    selected: list[dict[str, Any]] = []
+    covered: dict[str, set[str | int]] = {
+        "source_category": set(),
+        "family": set(),
+        "manual": set(),
+        "content_class": set(),
+        "page_band": set(),
+    }
+    while remaining and len(selected) < limit:
+
+        def score(row: dict[str, Any]) -> tuple[int, str]:
+            page = int(row.get("page") or 1)
+            maximum = maximum_page[str(row["manual_id"])]
+            dimensions: dict[str, str | int] = {
+                "source_category": str(row["source_category"]),
+                "family": _document_family(str(row["manual_id"])),
+                "manual": str(row["manual_id"]),
+                "content_class": str(row["content_class"]),
+                "page_band": min(3, (page - 1) * 4 // max(maximum, 1)),
+            }
+            value = sum(
+                weight
+                for name, weight in (
+                    ("source_category", 100),
+                    ("family", 40),
+                    ("manual", 20),
+                    ("content_class", 8),
+                    ("page_band", 4),
+                )
+                if dimensions[name] not in covered[name]
+            )
+            tie = hashlib.sha256(f"{seed}:{row['chunk_id']}".encode()).hexdigest()
+            return value, tie
+
+        chosen = max(remaining, key=score)
+        remaining.remove(chosen)
+        selected.append(chosen)
+        page = int(chosen.get("page") or 1)
+        maximum = maximum_page[str(chosen["manual_id"])]
+        covered["source_category"].add(str(chosen["source_category"]))
+        covered["family"].add(_document_family(str(chosen["manual_id"])))
+        covered["manual"].add(str(chosen["manual_id"]))
+        covered["content_class"].add(str(chosen["content_class"]))
+        covered["page_band"].add(min(3, (page - 1) * 4 // max(maximum, 1)))
+    return selected
+
+
+def corpus_quality_report(rows: list[dict[str, Any]], manuals: list[dict[str, Any]]) -> dict[str, Any]:
+    """Return deterministic corpus coverage and extraction-risk metrics."""
+    return {
+        "manuals": len(manuals),
+        "chunks": len(rows),
+        "ocr_provenance_status": dict(sorted(Counter(manual["ocr_provenance"]["status"] for manual in manuals if manual.get("ocr_provenance")).items())),
+        "chunks_by_manual": dict(sorted(Counter(row["manual_id"] for row in rows).items())),
+        "chunks_by_source_category": dict(sorted(Counter(row["source_category"] for row in rows).items())),
+        "chunks_by_content_class": dict(sorted(Counter(row["content_class"] for row in rows).items())),
+        "chunks_with_image_markdown": sum("![" in row["passage"] for row in rows),
+        "chunks_with_html_tables": sum("<table" in row["passage"].casefold() for row in rows),
+        "chunks_with_replacement_characters": sum("\ufffd" in row["passage"] for row in rows),
+        "empty_generation_chunks": sum(not row["generation_passage"] for row in rows),
+    }
 
 
 def load_corpus(
@@ -113,11 +231,8 @@ def load_corpus(
         source_path = (source_dir / manual["file"]).resolve()
         if not source_path.is_file():
             raise FileNotFoundError(source_path)
-        content_path = (
-            _ocr_markdown(ocr_dir, source_path)
-            if source_path.suffix.lower() == ".pdf"
-            else source_path
-        )
+        content_path = _ocr_markdown(ocr_dir, source_path) if source_path.suffix.lower() == ".pdf" else source_path
+        ocr_provenance = _ocr_provenance(ocr_dir, source_path, content_path) if source_path.suffix.lower() == ".pdf" else None
         source_hash = _sha256(source_path)
         content_hash = _sha256(content_path)
         defaults = {
@@ -132,6 +247,7 @@ def load_corpus(
                 "source_sha256": source_hash,
                 "content_file": str(content_path),
                 "content_sha256": content_hash,
+                "ocr_provenance": ocr_provenance,
             }
         )
         normalized_manuals.append(metadata)
@@ -160,8 +276,11 @@ def load_corpus(
                         "section": current_section,
                         "chunk_id": chunk_id,
                         "passage": passage,
+                        "generation_passage": generation_text(passage),
                     }
                 )
     if not rows:
         raise ValueError("The registered corpus produced no usable chunks")
+    for row in rows:
+        row["content_class"] = _content_class(row)
     return rows, normalized_manuals

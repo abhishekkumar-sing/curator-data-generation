@@ -87,10 +87,19 @@ models:
 
 quality:
   examples_per_chunk: 3
+  qa_cot_fraction: 0.25
+  cross_qa_cot_fraction: 0.25
+  unanswerable_fraction: 0.1
   minimum_judge_score: 4
   judge_batch_size: 8
   dedupe_threshold: 94
   allow_unjudged_exports: false
+  require_independent_judge: true
+  required_task_types:
+    - qa
+    - qa_cot
+    - cross_document_qa
+    - cross_document_qa_cot
 
 drafting:
   enabled: true
