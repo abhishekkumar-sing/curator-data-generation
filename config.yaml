@@ -30,12 +30,14 @@ model_profiles:
     base_url_env: GEMMA_BASE_URL
     api_key_env: GEMMA_API_KEY
     structured_output_mode: json_schema
+    # Verified from this private vLLM endpoint's /models metadata.
+    context_window: 8192
     # Gemma 4 official generation defaults and non-thinking chat-template mode.
     generation_params:
       temperature: 1.0
       top_p: 0.95
       top_k: 64
-      max_tokens: 4096
+      max_tokens: 2048
       extra_body:
         chat_template_kwargs:
           enable_thinking: false
@@ -105,7 +107,8 @@ quality:
   # answerability-verification stage is implemented.
   unanswerable_fraction: 0.0
   minimum_judge_score: 4
-  judge_batch_size: 8
+  # The configured Gemma judge server has an 8,192-token runtime context.
+  judge_batch_size: 1
   dedupe_threshold: 94
   allow_unjudged_exports: false
   require_independent_judge: true

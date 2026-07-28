@@ -143,6 +143,9 @@ behavior remains provisional until a user-run judge pilot completes.
 - The configured endpoint identifies its served model as
   `/models/gemma4-12b`; it remains independent from the GLM generation
   endpoint.
+- A read-only authenticated `/models` query on 2026-07-28 confirms that vLLM
+  serves this endpoint with `max_model_len: 8192`. The official checkpoint's
+  256K capability does not override the server's much smaller runtime limit.
 - The official `google/gemma-4-12B` model card and generation configuration
   recommend `temperature=1.0`, `top_p=0.95`, and `top_k=64` across use cases.
 - The official Gemma 4 Hugging Face model card demonstrates
@@ -159,9 +162,21 @@ behavior remains provisional until a user-run judge pilot completes.
   contract, but treat support as unverified until the exact private endpoint
   completes a controlled structured judge request. Do not silently fall back
   or expose unjudged records if it fails.
+- Pilot-004's six-record Nemotron judge batch used 9,115 input tokens and would
+  not fit this Gemma server before any output. Its one-record cross judge used
+  5,483 input tokens, while individual drafting judges used 2,982 and 3,518.
+  Configure one record per judge request and a 2,048-token output ceiling so
+  the observed largest one-record shape fits below 8,192 with limited
+  headroom.
 - [x] Configure Gemma-specific sampling and explicit non-thinking template
   behavior from the official model card.
 - [x] Select Gemma as the default and active independent judge.
+- [x] Record the endpoint's verified 8,192-token runtime limit, reduce the
+  output ceiling to 2,048, and use one record per judge request.
+- [ ] Add a model-aware preflight that estimates the complete rendered prompt,
+  response schema, and output reserve against the selected profile's actual
+  server context. A fixed batch size is conservative but cannot prove every
+  future source record fits.
 - [ ] Validate schema compliance, exact witness behavior, latency, and judge
   calibration with a user-run pilot before production-scale generation.
 
