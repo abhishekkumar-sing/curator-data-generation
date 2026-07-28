@@ -945,6 +945,16 @@ Evidence:
 - Curator repository commit `39fca352` identifies the same issue and
   initializes both buckets from their configured limits. This is a focused
   Curator token-bucket fix, not a reference-pipeline monkey patch.
+- Pilot-004 exposed a separate startup cost: LiteLLM's
+  `_ensure_rate_limits()` makes a real completion request to inspect response
+  headers even when explicit manual RPM and TPM are both configured. Curator's
+  documented and implemented precedence selects the manual limits regardless
+  of those headers, so the probe cannot change the effective limits in this
+  configuration.
+- Pilot-004 measured about 2.5 seconds for the generation probe and 9.5 seconds
+  for the cross-generation probe. Skipping this redundant request will remove
+  repeated per-stage endpoint work, but it cannot remove the dominant model
+  latency measured below.
 - The separate `nrl_curator_native_glm52` application does not patch
   `OnlineStatusTracker` and its history contains no
   `available_request_capacity` change. It configures official backend knobs
@@ -968,9 +978,28 @@ Decision:
   absent and Curator must discover them.
 - [x] Cover configured combined, configured separate, and unconfigured startup
   behavior with unit tests.
+- [ ] When both manual RPM and manual TPM are present, skip the LiteLLM
+  header-discovery completion. Preserve discovery whenever either manual limit
+  is absent, and cover both branches with unit tests. Do not edit the imported
+  processor while pilot-004 is running.
 - [ ] Separately investigate the GLM server's long generation latency and the
   two cross-document responses that were not materialized; do not mislabel
   these as Curator throttling.
+
+Pilot-004 live evidence:
+
+- All five single-document generation requests were created within
+  milliseconds. The three materialized GLM responses finished after about 99,
+  170, and 296 seconds; Curator reported zero API, rate-limit, or other errors.
+- Curator counted all five calls as succeeded, but only three response rows
+  were materialized. The other two requests parsed to no dataset rows and were
+  copied to `failed_requests.jsonl`; this is an observability/coverage problem,
+  not proof of an API failure.
+- The one batched Nemotron judge request completed in about 15.5 seconds.
+- All five cross-document requests were dispatched together after the startup
+  probe. The first materialized response arrived after about 84 seconds while
+  the remaining requests were still outstanding. Thus the displayed low
+  lifetime requests/minute is not evidence of serial Curator dispatch.
 
 Pilot-003 correction and retry-tail finding:
 
