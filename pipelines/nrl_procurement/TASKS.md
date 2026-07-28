@@ -15,6 +15,51 @@ with stricter multi-source necessity checks:
 - explicit authority and temporal boundaries;
 - leakage-safe evaluation.
 
+## Mandatory research-first gate
+
+No task in this roadmap may move into implementation merely because the
+reference project contains similar code. Before reaching a design conclusion
+or changing code:
+
+- [ ] Inspect the relevant implementation in both
+  `/home/abhishek/curator` and
+  `/home/abhishek/nrl_curator_native_glm52`.
+- [ ] Treat the reference project as an untrusted design input that may be
+  incomplete, outdated, corrupt, or buggy.
+- [ ] Check official documentation and upstream source code for Curator and
+  every material dependency or external model involved.
+- [ ] Review relevant primary research papers and official benchmark
+  specifications.
+- [ ] Prefer primary sources such as papers, official repositories, and
+  official documentation over blogs or unsourced summaries.
+- [ ] Verify research claims against the actual source code and tests rather
+  than assuming the published method matches a local implementation.
+- [ ] Identify assumptions, conflicting evidence, unresolved questions, and
+  facts that require empirical validation.
+- [ ] Separate verified facts, research-supported conclusions, code-derived
+  inferences, and hypotheses in the research report.
+- [ ] Compare viable alternatives using explicit criteria such as grounding,
+  faithfulness, coverage, diversity, leakage, cost, reproducibility, and
+  operational risk.
+- [ ] Present the findings and recommended design before making material code
+  changes.
+- [ ] When evidence is inconclusive, run a small controlled experiment or
+  pilot instead of choosing an approach by intuition.
+- [ ] Record the sources consulted and the decision rationale in the task,
+  design document, or commit documentation.
+
+Research-gate acceptance criteria:
+
+- The recommendation cites primary or official sources.
+- Statements about either codebase are verified against concrete files,
+  behavior, or tests.
+- Known weaknesses in the chosen approach are recorded.
+- Rejected alternatives and their tradeoffs are recorded.
+- Any conclusion that depends on generated-data quality is labelled
+  provisional until evaluated through a controlled pilot.
+- No large generation run begins solely on the basis of schema validation or
+  passing unit tests.
+
 ## Current baseline
 
 Implemented:
@@ -373,4 +418,3 @@ both-source rate and very low A-only and B-only full-answer rates.
   generation, question merging, multiple sampling, and verification.
 - [HopWeaver](https://aclanthology.org/2026.acl-long.1295/) — complementary
   document discovery and authentic cross-document reasoning paths.
-
