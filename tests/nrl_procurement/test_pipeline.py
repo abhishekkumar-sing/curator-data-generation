@@ -154,6 +154,28 @@ def test_quantity_validation_does_not_swallow_following_prose() -> None:
     assert validate_record(record, "The 2025 edition applies.") == []
 
 
+def test_validation_rejects_dangling_evidence_without_requiring_punctuation() -> None:
+    truncated = (
+        "Before releasing the PBG, ensure that there is nothing outstanding from the"
+    )
+    record = {
+        "task_type": "qa",
+        "question": "What must be checked before releasing the PBG?",
+        "answer": "Ensure that nothing is outstanding from the contractor.",
+        "answerable": True,
+        "evidence": [{"quote": truncated}],
+        "reasoning_steps": [],
+    }
+    assert "incomplete_evidence_fragment" in validate_record(record, truncated)
+
+    heading_evidence = "Defects Liability Certificate"
+    record["answer"] = "A Defects Liability Certificate is required."
+    record["evidence"] = [{"quote": heading_evidence}]
+    assert "incomplete_evidence_fragment" not in validate_record(
+        record, heading_evidence
+    )
+
+
 def test_dedup_and_amendment_connected_split() -> None:
     records = [
         {"record_id": "a", "manual_id": "base", "question": "What is the threshold?"},

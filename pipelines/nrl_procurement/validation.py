@@ -14,7 +14,7 @@ from rapidfuzz.fuzz import token_set_ratio
 NUMBER = re.compile(
     r"""(?<!\w)
     (?P<prefix>₹|Rs\.?\s*)?
-    (?P<value>\d[\d,.]*(?:/\d[\d,.]*)?)
+    (?P<value>\d(?:[\d,.]*\d)?(?:/\d(?:[\d,.]*\d)?)?)
     (?:\s*\([^)]{1,24}\))?
     (?P<unit>
         \s*(?:%|per\s+cent|percent|percentage|
@@ -26,6 +26,11 @@ NUMBER = re.compile(
     re.IGNORECASE | re.VERBOSE,
 )
 QUALIFIERS = {"must", "shall", "may", "not", "except", "unless", "only", "subject to"}
+DANGLING_FINAL_WORD = re.compile(
+    r"\b(?:a|an|and|at|but|by|for|from|if|in|of|on|or|over|than|that|the|"
+    r"to|under|when|which|while|whose|with)\s*$",
+    re.IGNORECASE,
+)
 
 
 def _canonical_unit(unit: str) -> str:
@@ -47,11 +52,26 @@ def _quantities(text: str) -> list[tuple[str, str, str]]:
 
 def _unsupported_quantities(answer: str, support_text: str) -> list[str]:
     supported = {(value, unit) for _, value, unit in _quantities(support_text)}
-    return [
-        display
-        for display, value, unit in _quantities(answer)
-        if (value, unit) not in supported
-    ]
+    unsupported = []
+    for display, value, unit in _quantities(answer):
+        exact = (value, unit) in supported
+        parent_section = (
+            not unit
+            and value.isdigit()
+            and any(
+                not support_unit and support_value.startswith(f"{value}.")
+                for support_value, support_unit in supported
+            )
+        )
+        if not exact and not parent_section:
+            unsupported.append(display)
+    return unsupported
+
+
+def _is_incomplete_evidence_fragment(quote: str) -> bool:
+    """Detect only high-confidence dangling prose without rejecting headings."""
+    text = quote.strip()
+    return bool(text and DANGLING_FINAL_WORD.search(text))
 
 
 def validate_record(record: dict[str, Any], passage: str) -> list[str]:
@@ -69,6 +89,8 @@ def validate_record(record: dict[str, Any], passage: str) -> list[str]:
     for quote in quotes:
         if quote not in passage:
             reasons.append("non_verbatim_evidence")
+        if _is_incomplete_evidence_fragment(quote):
+            reasons.append("incomplete_evidence_fragment")
     support = " ".join(quotes)
     for number in _unsupported_quantities(record["answer"], support):
         reasons.append(f"unsupported_number:{number}")
@@ -124,6 +146,8 @@ def validate_cross_record(record: dict[str, Any], documents: list[dict[str, Any]
             source_id, quote = evidence["source_id"], evidence["quote"]
             if source_id not in known or quote not in known.get(source_id, ""):
                 reasons.append("misattributed_or_non_verbatim_evidence")
+            if _is_incomplete_evidence_fragment(quote):
+                reasons.append("incomplete_evidence_fragment")
             used_claim_sources.add(source_id)
     claim_support = " ".join(
         evidence["quote"]
@@ -153,6 +177,8 @@ def validate_cross_record(record: dict[str, Any], documents: list[dict[str, Any]
             source_id, quote = evidence["source_id"], evidence["quote"]
             if source_id not in known or quote not in known.get(source_id, ""):
                 reasons.append("misattributed_or_non_verbatim_reasoning_evidence")
+            if _is_incomplete_evidence_fragment(quote):
+                reasons.append("incomplete_reasoning_evidence_fragment")
             used_reasoning_sources.add(source_id)
     if record["answerable"] and used_claim_sources != {"source_a", "source_b"}:
         reasons.append("claims_do_not_require_both_sources")

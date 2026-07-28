@@ -1581,7 +1581,7 @@ Required follow-up before the next pilot:
   one exact contiguous quote consistently.
 - [x] Emit deterministic rejection audit rows with explicit reason codes before
   discarding candidates.
-- [ ] Add a source-integrity gate for truncated evidence fragments and regression
+- [x] Add a source-integrity gate for truncated evidence fragments and regression
   tests using all five Pilot-006 cross-document response shapes.
 
 Implementation status (2026-07-28):
@@ -1601,6 +1601,15 @@ Implementation status (2026-07-28):
   deterministic failures are also written to the corresponding rejected file.
 - Focused verification after these three changes: 20 tests passed and Ruff
   passed. No model-backed pipeline was run.
+- Source-integrity verification now rejects high-confidence dangling evidence
+  endings such as `from the`, without imposing a punctuation requirement that
+  would reject valid headings or table cells. Typed normalization also excludes
+  trailing prose punctuation and recognizes a parent section locator such as
+  `2` when the supplied evidence contains subsection `2.3`.
+- Final stored-response replay: four of the five Pilot-006 cross-document
+  candidates now pass deterministic validation. The fifth retains the correct
+  `planned_task_type_mismatch:cross_document_qa` rejection. Combined focused
+  verification: 25 tests passed and Ruff passed.
 
 Research basis:
 
@@ -1615,6 +1624,14 @@ Research basis:
 - [Hugging Face Datasets processing](https://huggingface.co/docs/datasets/process):
   rows can be materialized first and filtered afterward, allowing audit rows to
   remain observable while quality gates stay strict.
+- [Unstructured chunking documentation](https://docs.unstructured.io/open-source/core-functionality/chunking):
+  preserving document elements and semantic boundaries is preferred to blind
+  character splitting.
+- [spaCy sentence-boundary documentation](https://spacy.io/usage/linguistic-features#sbd):
+  robust general sentence-boundary detection is model-based, while punctuation
+  segmentation is only a simpler rule-based alternative. The implemented gate
+  therefore targets only high-confidence dangling function words rather than
+  pretending punctuation alone proves completeness.
 
 Pilot artifacts:
 
