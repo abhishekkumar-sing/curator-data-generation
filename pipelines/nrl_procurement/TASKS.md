@@ -932,6 +932,23 @@ Pilot-003 correction and retry-tail finding:
   It prevents deferred low-concurrency retries, but intentionally still honors
   the configured retry count. Reapplying its old monkey patch cannot solve an
   excessive retry count.
+- The reference monkey patch was read in full from
+  `src/nrl_curator_native/compat.py`, including its installer,
+  compatibility self-test, and retry tests. Its committed implementation from
+  reference commit `d9364846` is the same scheduling strategy now implemented
+  directly in Curator core here: there is no deferred `retry_queue`, each
+  request retries within its active task, and its semaphore permit is released
+  exactly once.
+- Runtime inspection with `.curator/bin/python` resolves
+  `BaseOnlineRequestProcessor` to this checkout's editable source at
+  `src/bespokelabs/curator/request_processor/online/base_online_request_processor.py`;
+  its active method signature has no `retry_queue`, and
+  `process_requests_from_file` gathers the concurrently scheduled first-attempt
+  tasks. This rules out accidentally importing an unpatched wheel.
+- `pilot-003` predates commit `ca31c9df`, which added and propagated
+  `max_retries: 1`. Its manifest records no `max_retries` field, proving that
+  the observed run used the earlier configuration and therefore cannot
+  validate or invalidate the current retry-tail fix.
 
 Additional decision:
 
