@@ -16,6 +16,7 @@ from validation import validate_cross_record
 from bespokelabs import curator
 
 QUALITY = CONFIG.get("quality", {})
+TAXONOMY = CONFIG.get("taxonomy", {})
 
 
 def _render_sources(row: dict[str, Any]) -> str:
@@ -67,6 +68,10 @@ SOURCE POLICY
   rule is currently in force unless the sources explicitly establish it.
 
 CONSTRAINTS
+- Select task from {json.dumps(TAXONOMY.get("tasks", []))}. It describes the
+  underlying procurement work and is independent of the QA/CoT task_type.
+- Select persona from {json.dumps(TAXONOMY.get("personas", []))}. Choose a
+  specialized actor only when the supplied sources support that role.
 - A complete answer to every answerable question must become unsupported or materially
   incomplete when either source_a or source_b is removed. If one source can answer the
   whole question, do not return that record.
@@ -94,8 +99,8 @@ CONSTRAINTS
 
 OUTPUT CONTRACT
 Return CrossCandidateBatch.examples under the enforced response schema. Every example
-contains task_type, question_type, question, answer, answerable, claims, and
-reasoning_steps. Each claim contains one material statement and one or more evidence
+contains task_type, task, persona, question_type, question, answer, answerable,
+claims, and reasoning_steps. Each claim contains one material statement and one or more evidence
 items with source_id and a verbatim quote. Each rationale step contains an allowed
 operation, a concise statement, and its exact source-specific evidence.
 
@@ -120,6 +125,10 @@ preserved authority and qualifications, and task_type-consistent rationale struc
         for candidate in response.examples:
             draft = candidate.model_dump()
             if draft["task_type"] != row["planned_task_type"] or draft["answerable"] != row["planned_answerable"]:
+                continue
+            if draft["task"] not in TAXONOMY.get("tasks", []) or draft[
+                "persona"
+            ] not in TAXONOMY.get("personas", []):
                 continue
             reasons = validate_cross_record(draft, row["source_documents"])
             if reasons:
@@ -220,6 +229,9 @@ EVALUATION CONTRACT
 - relationship_correct=true only when the question and answer respect the declared
   relationship_type without inventing equivalence, adoption, precedence, or temporal
   status.
+- task_correct=true only when task names the underlying procurement work rather
+  than the QA/CoT format. persona_correct=true only when the selected actor is
+  supported by the supplied sources.
 - score is 1 to 5: 1 unusable or fabricated; 2 major grounding or cross-document failure;
   3 partially useful but requiring material correction; 4 fully usable with at most a
   minor non-substantive issue; 5 fully supported, necessary, precise, and exemplary.
@@ -261,6 +273,8 @@ and consistency among booleans, ablation list, score, and issues.
                 "full_context_supported",
                 "connected_reasoning",
                 "relationship_correct",
+                "task_correct",
+                "persona_correct",
             )
             record["judge"] = {
                 **decision,
@@ -283,6 +297,8 @@ def cross_judge_rows(records: list[dict[str, Any]], batch_size: int) -> list[dic
                 for key in (
                     "record_id",
                     "task_type",
+                    "task",
+                    "persona",
                     "relationship_type",
                     "question",
                     "answer",

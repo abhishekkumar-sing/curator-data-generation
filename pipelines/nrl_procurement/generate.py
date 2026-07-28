@@ -37,6 +37,7 @@ from bespokelabs import curator
 PATHS = CONFIG["paths"]
 QUALITY = CONFIG.get("quality", {})
 SPLITS = CONFIG.get("splits", {})
+TAXONOMY = CONFIG.get("taxonomy", {})
 RUN_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 CACHE_ROOT = (PROJECT_ROOT / CONFIG["curator"]["cache_dir"]).resolve()
 OUTPUT_ROOT = (PROJECT_ROOT / PATHS["output_root"]).resolve()
@@ -267,6 +268,13 @@ SOURCE POLICY
   amendments exactly. Do not fill missing information from outside knowledge.
 
 CONSTRAINTS
+- Select task from {json.dumps(TAXONOMY.get("tasks", []))}. It describes the
+  underlying procurement work, independently of QA/CoT format. Use drafting when
+  the user asks to compose document text; use nit_filling only for entering or
+  completing structured NIT fields, not merely because an NIT is discussed.
+- Select persona from {json.dumps(TAXONOMY.get("personas", []))}. It is the actor
+  whose authentic work or information need the question represents. Choose a
+  specific role only when supported by the passage; otherwise use general_user.
 - Each question must stand alone and identify the organization, manual, domain, or
   date needed to make its authority and temporal scope unambiguous.
 - Allowed question_type values are direct_fact, definition, authority, threshold,
@@ -292,9 +300,10 @@ CONSTRAINTS
 
 OUTPUT CONTRACT
 Return CandidateBatch.examples under the enforced response schema. Every example
-must contain task_type, question_type, question, answer, answerable, evidence, and
-reasoning_steps. Evidence entries contain a verbatim quote. Rationale steps contain
-a concise statement and the verbatim evidence_quotes supporting that statement.
+must contain task_type, task, persona, question_type, question, answer, answerable,
+evidence, and reasoning_steps. Evidence entries contain a verbatim quote. Rationale
+steps contain a concise statement and the verbatim evidence_quotes supporting that
+statement.
 
 UNTRUSTED SOURCE METADATA
 manual_id: {row["manual_id"]}
@@ -322,6 +331,10 @@ rationale shape, and every unanswerable record uses the required exact answer.
         for candidate in response.examples:
             draft = candidate.model_dump()
             if draft["task_type"] != row["planned_task_type"] or draft["answerable"] != row["planned_answerable"]:
+                continue
+            if draft["task"] not in TAXONOMY.get("tasks", []) or draft[
+                "persona"
+            ] not in TAXONOMY.get("personas", []):
                 continue
             reasons = validate_record(draft, row["passage"])
             if reasons:
@@ -399,6 +412,12 @@ EVALUATION CONTRACT
   step must be necessary or useful, concise, logically connected, and supported by
   its exact evidence quotes; it must be an auditable teaching rationale rather than
   unsupported hidden reasoning.
+- task_correct=true only when task names the user's underlying procurement work,
+  independently of QA/CoT format. Drafting NIT text is drafting; nit_filling is
+  reserved for populating structured NIT fields.
+- persona_correct=true only when the selected actor's duties or information need
+  are supported by the source. Do not accept a platform role without platform
+  context or a specialized role based only on plausible outside knowledge.
 - score is 1 to 5: 1 unusable or fabricated; 2 major unsupported or task failures;
   3 partially useful but requiring material correction; 4 fully usable with at most
   a minor non-substantive issue; 5 fully supported, complete, precise, and exemplary.
@@ -440,6 +459,8 @@ and issues, and rejection of every unsupported claim or lost qualification.
                         "preserves_qualifications",
                         "authority_correct",
                         "reasoning_valid",
+                        "task_correct",
+                        "persona_correct",
                     )
                 )
                 and decision["score"] >= int(QUALITY.get("minimum_judge_score", 4)),
@@ -459,6 +480,8 @@ def _judge_rows(records: list[dict[str, Any]], batch_size: int) -> Dataset:
                 "answer": record["answer"],
                 "answerable": record["answerable"],
                 "task_type": record["task_type"],
+                "task": record["task"],
+                "persona": record["persona"],
                 "reasoning_steps": record["reasoning_steps"],
                 "issuer": record["issuing_organization"],
                 "policy_scope": record["policy_scope"],

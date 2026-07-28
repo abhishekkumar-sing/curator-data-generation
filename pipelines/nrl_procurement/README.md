@@ -260,3 +260,16 @@ After installing the project environment:
 ```bash
 .curator/bin/python -m pytest -q --confcutdir=tests/nrl_procurement tests/nrl_procurement
 ```
+## Dataset label axes
+
+Every QA record keeps three independent labels:
+
+- `task`: the procurement work requested, such as `drafting`, `nit_filling`,
+  `evaluation_and_award`, or `contract_management`.
+- `task_type`: the training-response format: `qa`, `qa_cot`,
+  `cross_document_qa`, or `cross_document_qa_cot`.
+- `persona`: the procurement actor represented by the user request.
+
+The seed-provided `task` is authoritative. Drafting an NIT is `drafting`;
+populating structured NIT fields in an e-procurement workflow is `nit_filling`.
+Adding a rationale changes `task_type`, not `task`.

@@ -87,6 +87,9 @@ def export_records(
         provenance = {
             "record_id": row["record_id"],
             "split": row["split"],
+            "task": row["task"],
+            "persona": row["persona"],
+            "task_type": row["task_type"],
             "manual_ids": manual_ids,
             "source_chunk_ids": row["source_chunk_ids"],
         }
@@ -146,6 +149,8 @@ def export_records(
                 "reference_answer": row["answer"],
                 "evidence": row["evidence"],
                 "question_type": row["question_type"],
+                "task": row["task"],
+                "persona": row["persona"],
             }
         )
     _write(output_dir / "qa_sft.jsonl", qa)
@@ -160,6 +165,8 @@ def export_records(
     for row in records:
         counts[f"split_{row['split']}"] += 1
         counts[f"task_{row['task_type']}"] += 1
+        counts[f"procurement_task_{row['task']}"] += 1
+        counts[f"persona_{row['persona']}"] += 1
         counts[f"answerable_{str(bool(row['answerable'])).lower()}"] += 1
         for manual_id in [document["manual_id"] for document in row.get("source_documents", [])] or [row["manual_id"]]:
             counts[f"manual_{manual_id}"] += 1

@@ -32,6 +32,8 @@ class ReasoningStepDraft(BaseModel):
 
 class Candidate(BaseModel):
     task_type: Literal["qa", "qa_cot"]
+    task: str = Field(min_length=2)
+    persona: str = Field(min_length=2)
     question_type: QuestionType
     question: str = Field(min_length=12)
     answer: str = Field(min_length=1)
@@ -50,6 +52,8 @@ class JudgeDecision(BaseModel):
     preserves_qualifications: bool
     authority_correct: bool
     reasoning_valid: bool
+    task_correct: bool
+    persona_correct: bool
     score: int = Field(ge=1, le=5)
     issues: list[str] = Field(default_factory=list)
 
@@ -68,7 +72,7 @@ class DraftingSeed(BaseModel):
 
     id: str = Field(min_length=1)
     tender_id: str = Field(min_length=1)
-    task: Literal["drafting"]
+    task: str = Field(min_length=2)
     instruction: str = Field(min_length=12)
     tender_context: list[str] = Field(min_length=1)
     manual_chunk_ids: list[str] = Field(min_length=1)
@@ -141,6 +145,8 @@ class CrossReasoningStepDraft(BaseModel):
 
 class CrossCandidate(BaseModel):
     task_type: Literal["cross_document_qa", "cross_document_qa_cot"]
+    task: str = Field(min_length=2)
+    persona: str = Field(min_length=2)
     question_type: Literal[
         "comparison",
         "temporal",

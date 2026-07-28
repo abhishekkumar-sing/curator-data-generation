@@ -9,6 +9,7 @@ from typing import Any
 
 from pydantic import ValidationError
 from schemas import DraftingJudgeDecision, DraftingResult, DraftingSeed
+from settings import CONFIG
 
 from bespokelabs import curator
 
@@ -40,6 +41,11 @@ def read_drafting_seeds(path: Path) -> list[DraftingSeed]:
             seed = DraftingSeed.model_validate_json(raw_line)
         except (ValueError, ValidationError) as exc:
             raise ValueError(f"Invalid drafting seed at {path}:{line_number}") from exc
+        allowed_tasks = set(CONFIG.get("taxonomy", {}).get("tasks", []))
+        if seed.task not in allowed_tasks:
+            raise ValueError(
+                f"Unknown procurement task at {path}:{line_number}: {seed.task}"
+            )
         if seed.id in seen:
             raise ValueError(f"Duplicate drafting seed id at {path}:{line_number}: {seed.id}")
         seen.add(seed.id)

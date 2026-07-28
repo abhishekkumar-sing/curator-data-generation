@@ -1095,3 +1095,43 @@ both-source rate and very low A-only and B-only full-answer rates.
   generation, question merging, multiple sampling, and verification.
 - [HopWeaver](https://aclanthology.org/2026.acl-long.1295/) — complementary
   document discovery and authentic cross-document reasoning paths.
+## Task, QA format, and user-role taxonomy clarification (2026-07-28)
+
+Research conclusion before implementation:
+
+- `task` describes the underlying procurement capability requested by the user.
+  It is not the serialization or reasoning format. For example, a request to
+  produce tender language is `drafting`; a request to populate NIT form fields is
+  `nit_filling`.
+- `task_type` describes the supervision format and reasoning shape: `qa`,
+  `qa_cot`, `cross_document_qa`, or `cross_document_qa_cot`. Therefore both a
+  drafting question and an NIT-filling question may independently be emitted as
+  QA or QA-with-CoT without changing their capability label.
+- `persona` describes the actor whose work or information need the example
+  represents. It is independent of both `task` and `task_type`.
+- Seed-authored `task` values are authoritative for examples derived from that
+  seed and must be copied, not reclassified from surface words. Corpus-derived
+  examples must select a supported task and persona from committed taxonomies,
+  and the independent judge must verify both.
+- Do not infer `nit_filling` merely because “NIT” appears. Drafting an NIT is
+  `drafting`; entering structured NIT fields in an e-procurement system is
+  `nit_filling`.
+
+Primary references:
+
+- [Government of India GeM overview](https://assets-bg.gem.gov.in/resources/upload/shared_doc/gem-overview-ppt-12-august-2024_1724322936.pdf),
+  “Buyer User Roles Based on Segregation of Duties”: Primary User, Buyer,
+  Consignee, Indentor, DDO, PAO, and Technical Evaluator.
+- [Government eProcurement role guidance](https://www.gepnic.gov.in/admin/WriteReadData/File/1663216819.pdf):
+  Tender Creator is responsible for filling tender details, which supports a
+  distinct `nit_filling` capability.
+- [Government of India Manual for Procurement of Works, 2025](https://doe.gov.in/files/manuals_documents/Works_Manual_SE_2025.pdf):
+  an NIT is a tender-process artifact with legal importance, supporting
+  separation of tender drafting from portal field-entry work.
+- [Google Research FLAN Collection](https://research.google/pubs/the-flan-collection-designing-data-and-methods-for-effective-instruction-tuning/):
+  balancing diverse tasks and mixing ordinary and chain-of-thought prompt
+  settings improves instruction tuning; task identity and prompt/reasoning
+  setting are separate experimental axes.
+- [Hugging Face dataset-card metadata](https://huggingface.co/docs/huggingface_hub/en/package_reference/cards):
+  `task_categories` and `task_ids` are explicit metadata, reinforcing documented
+  task identity.
