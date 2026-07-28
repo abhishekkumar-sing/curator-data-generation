@@ -78,7 +78,7 @@ Research-gate acceptance criteria:
 
 ## P1 — Unified `nrl-curate` command-line interface
 
-- [ ] Complete and record the mandatory research-first gate for CLI design,
+- [x] Complete and record the mandatory research-first gate for CLI design,
   saturation stopping, resumability, configuration precedence, and packaging.
   Compare the reference application's CLI with the current pipeline, current
   Curator APIs, Python packaging guidance, and established CLI conventions
@@ -134,6 +134,147 @@ Research-gate acceptance criteria:
   resume behavior, local-only paths, exit codes, and secret redaction.
 - [ ] Validate with a user-run bounded pilot before approving the CLI for a
   full `--limit 200` execution. Codex must not run model-backed pilots.
+
+### Unified CLI research record (2026-07-28)
+
+Status: research gate complete; implementation has not started. Each unchecked
+CLI item above remains a separate implementation task and must be committed
+after its own verification.
+
+Questions researched:
+
+- How should `nrl-curate` be packaged in this Poetry-based Curator repository?
+- How can it preserve the existing direct Python command while calling shared
+  pipeline logic rather than duplicating it?
+- What precedence should apply among CLI flags, environment variables, and
+  YAML configuration, including model profiles and secrets?
+- What does Curator itself resume, and what additional state must a
+  saturation controller persist?
+- What evidence supports a convergence rule for synthetic-data novelty?
+- Which parts of the reference CLI/saturation implementation are reusable,
+  and which are coupled to its different pipeline?
+
+Verified local findings:
+
+- `pyproject.toml` uses Poetry and currently packages only
+  `src/bespokelabs`. The NRL pipeline under `pipelines/nrl_procurement` is not
+  an installed Python package. Adding a console-script string alone would
+  therefore be unreliable in a built wheel.
+- `generate.py` owns argument parsing and orchestration inside `main()`, while
+  `settings.py` loads `.env`, `config.yaml`, and Curator privacy settings at
+  import time. A CLI must first expose a callable orchestration boundary and
+  explicit profile/config resolution; copying the current orchestration into a
+  second file would create divergent behavior.
+- The existing command already provides safe dynamic/explicit run IDs,
+  project-local cache/output paths, private-endpoint enforcement, independent
+  judge enforcement, and direct Python compatibility. These are invariants,
+  not features to reimplement differently.
+- Curator cache identity includes the input dataset, prompt function,
+  response schema, model, batch mode, and generation parameters. A stable
+  per-run/per-stage/per-pass `working_dir` enables request recovery, but
+  Curator does not persist the procurement pipeline's accepted-novel set,
+  judged outcome, pass counters, source exhaustion, or saturation reason.
+- The reference CLI is an `argparse` wrapper around a shared `run()` function.
+  Its saturation module atomically persists accepted rows, normalized novelty,
+  empty counts, completed/quarantined parents, next pass, and stage
+  statistics. It correctly distinguishes missing/invalid generations from
+  genuine empty novelty. However, its stages and parent semantics differ from
+  this pipeline, and its fuzzy text novelty alone is insufficient for
+  procurement evidence/path saturation.
+
+Research-supported conclusions and design:
+
+- Use a standard installed console entry point and `argparse` subcommands. The
+  `all` subcommand should produce an immutable invocation/options object and
+  call the same orchestration function used by the legacy direct entry point.
+- Make packaging real before registering the script: the CLI target and its
+  imported pipeline modules must be included in both editable installs and
+  wheels. Preserve `python pipelines/nrl_procurement/generate.py ...` during
+  migration with a thin compatibility `main()`.
+- Use explicit precedence `CLI flag > environment override > YAML profile >
+  documented default`. API keys remain environment-only. A profile flag
+  selects a named configuration block; it never accepts or prints a key.
+- Treat generation and judge profiles as separate options. Reject identical
+  resolved model/endpoint pairs when independent judging is required.
+- Define `max_passes=0` as no numeric cap, never as one pass. A positive value
+  caps total passes represented by persisted state, including resumed runs.
+- Count novelty only after deterministic validation, near-duplicate removal,
+  and independent judging. Require a configured number of consecutive
+  zero/low-novelty observations per eligible planning unit. Missing,
+  malformed, invalid-only, or judge-missing outputs are failures/quarantine,
+  not saturation evidence.
+- Persist state atomically after every pass with schema/code/config/source
+  fingerprints, accepted IDs and novelty keys, planned/terminal request IDs,
+  completed/exhausted/quarantined units, next pass, per-stage Curator
+  statistics, and the exact stop reason. Resume must reject incompatible state
+  rather than silently reset it.
+- Source/planning-space exhaustion and statistical low yield are distinct stop
+  reasons. The convergence thresholds remain provisional until a bounded
+  user-run pilot measures yield and false saturation.
+
+Alternatives rejected:
+
+- Registering `pipelines.nrl_procurement.cli` without packaging the pipeline:
+  may work from a checkout but is not a reliable console script in a wheel.
+- Calling `generate.py` through a subprocess: preserves the old command but
+  prevents clean typed configuration, status propagation, and shared
+  orchestration tests.
+- Copying the reference package wholesale: it contains valuable patterns but
+  different stages, schemas, parent identities, and validity assumptions.
+- Treating one empty or low-yield pass as saturation: model failure and strict
+  filtering are observationally confounded with true exhaustion.
+- Using Curator cache presence as pipeline completion: cached provider
+  responses do not prove deterministic validation, judging, export, or
+  terminal lineage completed.
+- Allowing CLI-supplied endpoints/API keys: increases accidental disclosure
+  through process listings, shell history, logs, and manifests.
+
+Known risks and empirical questions:
+
+- Packaging the current bare intra-pipeline imports requires a compatibility
+  migration with tests for both module import and direct-script execution.
+- A stable state fingerprint must be broad enough to prevent unsafe resume but
+  narrow enough to preserve valid Curator cache reuse after unrelated changes.
+- Similarity thresholds can collapse legitimate questions about different
+  conditions; novelty should include source/path identity and not text alone.
+- No paper or official Curator feature establishes the correct NRL saturation
+  threshold. It must remain configurable and provisional until human-reviewed
+  pilot evidence exists.
+
+Planned validation:
+
+- Build/install metadata inspection plus console-entry smoke tests without
+  invoking a model.
+- Unit tests for subcommands, precedence, profile resolution, secret
+  redaction, independent-judge rejection, run IDs, pass bounds, atomic state,
+  compatible/incompatible resume, failure exit codes, and legacy entry-point
+  equivalence.
+- Deterministic saturation-state tests covering new yield, duplicates,
+  invalid-only output, missing output, consecutive zero novelty, source
+  exhaustion, interruption, and resume.
+- Only the user runs the bounded model-backed pilot.
+
+Primary and official sources:
+
+- [Poetry `pyproject.toml` scripts](https://python-poetry.org/docs/pyproject/#scripts)
+  documents installed console scripts and requires reinstalling after script
+  changes.
+- [PyPA entry-point specification](https://packaging.python.org/en/latest/specifications/entry-points/)
+  defines the ecosystem console-script object reference.
+- [Python `argparse` documentation](https://docs.python.org/3/library/argparse.html#sub-commands)
+  defines subparser-based command dispatch and parser exit behavior.
+- [Curator automatic recovery and caching](https://docs.bespokelabs.ai/bespoke-curator/getting-started/automatic-recovery-and-caching)
+  documents custom `working_dir`, partial recovery, and cache fingerprint
+  inputs.
+- [Curator API reference](https://docs.bespokelabs.ai/bespoke-curator/api-reference)
+  defines the `CuratorResponse` dataset/statistics interface available to
+  orchestration.
+- [Self-Instruct](https://aclanthology.org/2023.acl-long.754/) uses iterative
+  generation with invalid/similarity filtering, supporting novelty filtering
+  but not a one-pass saturation claim.
+- Reference code inspected:
+  `/home/abhishek/nrl_curator_native_glm52/src/nrl_curator_native/cli.py` and
+  `saturation.py`; both remain untrusted implementation inputs.
 
 ## Capability research — switch independent judge to Gemma 4
 
