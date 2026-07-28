@@ -44,6 +44,9 @@ models:
     default_profile: glm
     private_endpoint_only: true
     request_timeout: 1800
+    # One retry for transient/schema failures; ten identical structured-output
+    # retries created pilot-003's long tail.
+    max_retries: 1
     max_concurrent_requests: 128
     # Explicit private-provider limits avoid Curator's public-provider fallback.
     max_requests_per_minute: 10000
@@ -64,6 +67,7 @@ models:
     default_profile: nemotron
     private_endpoint_only: true
     request_timeout: 1800
+    max_retries: 1
     max_concurrent_requests: 64
     # Keep judge throttling independent when it uses a separate local endpoint.
     max_requests_per_minute: 10000
@@ -89,7 +93,9 @@ quality:
   examples_per_chunk: 3
   qa_cot_fraction: 0.25
   cross_qa_cot_fraction: 0.25
-  unanswerable_fraction: 0.1
+  # Disabled until a dedicated adversarial construction and independent
+  # answerability-verification stage is implemented.
+  unanswerable_fraction: 0.0
   minimum_judge_score: 4
   judge_batch_size: 8
   dedupe_threshold: 94
@@ -191,7 +197,7 @@ drafting:
 # only proposes passages within these pairs; it never establishes legal equivalence.
 cross_document:
   enabled: true
-  examples_per_bundle: 2
+  examples_per_bundle: 1
   minimum_similarity: 12
   minimum_shared_terms: 5
   max_bundles_per_pair: 25

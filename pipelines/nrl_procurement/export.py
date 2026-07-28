@@ -92,6 +92,7 @@ def export_records(
             "task_type": row["task_type"],
             "manual_ids": manual_ids,
             "source_chunk_ids": row["source_chunk_ids"],
+            "citations": row["citations"],
         }
         qa_row = {
             **provenance,

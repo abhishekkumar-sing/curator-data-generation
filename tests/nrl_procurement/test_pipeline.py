@@ -3,6 +3,7 @@
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 PIPELINE = Path(__file__).resolve().parents[2] / "pipelines" / "nrl_procurement"
 sys.path.insert(0, str(PIPELINE))
@@ -33,7 +34,7 @@ from generate import (  # noqa: E402
     plan_single_document_requests,
     request_coverage,
 )
-from schemas import DraftingResult  # noqa: E402
+from schemas import DraftingBlock, DraftingResult, JudgeBatch  # noqa: E402
 from validation import deduplicate, validate_cross_record, validate_record  # noqa: E402
 
 
@@ -181,7 +182,10 @@ def test_drafting_seed_resolution_validation_and_compact_output(tmp_path: Path) 
     ]
     inputs = build_drafting_inputs(read_drafting_seeds(seed_path), corpus)
     result = DraftingResult(
-        response=("Delayed Delivery & Liquidated Damages\n" "LD is 0.5% per week and capped at 5% of delayed goods."),
+        document_blocks=[
+            DraftingBlock(text="Delayed Delivery & Liquidated Damages"),
+            DraftingBlock(text="LD is 0.5% per week and capped at 5% of delayed goods."),
+        ],
         manual_evidence_quotes=["LD is 0.5% per week and capped at 5% of delayed goods."],
         tender_facts_used=["Tender mode: Limited."],
     )
@@ -190,7 +194,22 @@ def test_drafting_seed_resolution_validation_and_compact_output(tmp_path: Path) 
         {
             **inputs[0],
             "context": [*inputs[0]["tender_context"], *result.manual_evidence_quotes],
-            "response": result.response,
+            "response": "\n\n".join(block.text for block in result.document_blocks),
+            "citation_details": [
+                {
+                    "citation_id": "chunk-1",
+                    "source_type": "manual",
+                    "page": 4,
+                    "section": "Liquidated damages",
+                    "chunk_id": "chunk-1",
+                    "quote": "LD is 0.5% per week and capped at 5% of delayed goods.",
+                },
+                {
+                    "citation_id": "tender-1",
+                    "source_type": "tender_seed",
+                    "tender_id": "tender-1",
+                },
+            ],
         }
     )
     assert list(compact) == [
@@ -201,6 +220,7 @@ def test_drafting_seed_resolution_validation_and_compact_output(tmp_path: Path) 
         "context",
         "response",
         "citations",
+        "citation_details",
     ]
     assert compact["citations"] == ["chunk-1", "tender-1"]
 
@@ -228,7 +248,10 @@ def test_drafting_rejects_unknown_chunks_and_unsupported_values(tmp_path: Path) 
         "tender_context": ["Tender mode: Limited."],
     }
     result = DraftingResult(
-        response="The cap is 10%. Contact invented@example.com.",
+        document_blocks=[
+            DraftingBlock(text="Delayed Delivery"),
+            DraftingBlock(text="The cap is 10%. Contact invented@example.com."),
+        ],
         manual_evidence_quotes=["The cap is 5%."],
         tender_facts_used=["Tender mode: Limited."],
     )
@@ -372,7 +395,7 @@ def test_drafting_prompts_preserve_specification_contract() -> None:
     for required in (
         "complete, ready-to-use",
         "not a title alone, outline, summary",
-        "newline characters",
+        "document_blocks",
         "organization identity",
         "bidding structure",
         "[NOT PROVIDED]",
@@ -447,7 +470,6 @@ def test_generation_text_and_representative_pilot_selection() -> None:
 
 def test_explicit_task_planning_and_request_coverage(monkeypatch) -> None:
     monkeypatch.setitem(generation_pipeline.QUALITY, "qa_cot_fraction", 0.4)
-    monkeypatch.setitem(generation_pipeline.QUALITY, "unanswerable_fraction", 0.2)
     rows = [
         {
             "chunk_id": f"chunk-{index}",
@@ -457,7 +479,7 @@ def test_explicit_task_planning_and_request_coverage(monkeypatch) -> None:
     ]
     planned = plan_single_document_requests(rows, "seed")
     assert sum(row["planned_task_type"] == "qa_cot" for row in planned) == 2
-    assert sum(not row["planned_answerable"] for row in planned) == 1
+    assert all(row["planned_answerable"] for row in planned)
     materialized = [
         {"parent_request_id": planned[0]["planned_request_id"]},
         {"parent_request_id": planned[1]["planned_request_id"]},
@@ -475,6 +497,48 @@ def test_explicit_task_planning_and_request_coverage(monkeypatch) -> None:
     }
 
 
+def test_judge_rejects_false_abstention_and_taxonomy_acquiescence() -> None:
+    source = "Retail and Wholesale traders may register for Priority Sector Lending only."
+    record = {
+        "record_id": "record-1",
+        "task": "preference_policy_application",
+        "persona": "bidder",
+        "answerable": False,
+        "_source_passage": source,
+    }
+    row = {"judge_items": [{"record_id": "record-1", "record": record}]}
+    response = JudgeBatch.model_validate(
+        {
+            "judgments": [
+                {
+                    "record_id": "record-1",
+                    "decision": {
+                        "supported": True,
+                        "relevant": True,
+                        "preserves_qualifications": True,
+                        "authority_correct": True,
+                        "reasoning_valid": True,
+                        "recommended_task": "nit_filling",
+                        "recommended_persona": "bidder",
+                        "answer_found_in_source": True,
+                        "answer_quote": source,
+                        "score": 5,
+                        "issues": [],
+                    },
+                }
+            ]
+        }
+    )
+    judged = ProcurementJudge.parse(
+        SimpleNamespace(model_name="judge-model"),
+        row,
+        response,
+    )[0]["judge"]
+    assert judged["task_correct"] is False
+    assert judged["answerability_correct"] is False
+    assert judged["accepted"] is False
+
+
 def test_drafting_surface_normalization_and_semantic_validation() -> None:
     normalized, repairs = normalize_drafting_response("Heading<br>1. Scope\r\nBody")
     assert normalized == "Heading\n1. Scope\nBody"
@@ -485,12 +549,25 @@ def test_drafting_surface_normalization_and_semantic_validation() -> None:
         "tender_context": ["Tender ID: NRL-GOODS-CRANE-1009379-V2."],
     }
     valid = DraftingResult(
-        response=("1. Scope\nTender ID: NRL-GOODS-CRANE-1009379-V2.\n" "Organization: NUMALIGARH REFINERY LIMITED.\nThe cap is 5%."),
+        document_blocks=[
+            DraftingBlock(text="1. Scope"),
+            DraftingBlock(text="Tender ID: NRL-GOODS-CRANE-1009379-V2."),
+            DraftingBlock(text="Organization: NUMALIGARH REFINERY LIMITED."),
+            DraftingBlock(text="The cap is 5%."),
+        ],
         manual_evidence_quotes=["The cap is 5%."],
         tender_facts_used=["Tender ID: NRL-GOODS-CRANE-1009379-V2."],
     )
     assert drafting_validation_issues(row, valid) == []
-    invalid = valid.model_copy(update={"response": ("<b>Scope</b>\nOrganization: Invented Division.\nThe cap is 10%.")})
+    invalid = valid.model_copy(
+        update={
+            "document_blocks": [
+                DraftingBlock(text="<b>Scope</b>"),
+                DraftingBlock(text="Organization: Invented Division."),
+                DraftingBlock(text="The cap is 10%."),
+            ]
+        }
+    )
     issues = drafting_validation_issues(row, invalid)
     assert "draft_contains_html_markup" in issues
     assert "unsupported_authority:Invented Division" in issues
@@ -508,6 +585,16 @@ def test_exports_keep_qa_and_rationale_task_files_disjoint(tmp_path: Path) -> No
                 "manual_id": "manual",
                 "source_documents": ([{"manual_id": "manual"}, {"manual_id": "other"}] if cross else []),
                 "source_chunk_ids": [f"chunk-{index}"],
+                "citations": [
+                    {
+                        "citation_id": f"chunk-{index}",
+                        "manual_id": "manual",
+                        "chunk_id": f"chunk-{index}",
+                        "page": 1,
+                        "section": "Policy",
+                        "quote": "The stated action is required.",
+                    }
+                ],
                 "task_type": task_type,
                 "task": "general_reference",
                 "persona": "general_user",

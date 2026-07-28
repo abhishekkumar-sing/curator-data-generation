@@ -134,8 +134,16 @@ class JudgeDecision(BaseModel):
     preserves_qualifications: bool
     authority_correct: bool
     reasoning_valid: bool
-    task_correct: bool
-    persona_correct: bool
+    recommended_task: ProcurementTask
+    recommended_persona: ProcurementPersona
+    answer_found_in_source: bool
+    answer_quote: str = Field(
+        default="",
+        description=(
+            "For an unanswerable record, copy one exact source quote that answers "
+            "the question when an answer is found; otherwise return an empty string."
+        ),
+    )
     score: int = Field(ge=1, le=5)
     issues: list[str] = Field(default_factory=list)
 
@@ -160,14 +168,22 @@ class DraftingSeed(BaseModel):
     manual_chunk_ids: list[str] = Field(min_length=1)
 
 
-class DraftingResult(BaseModel):
-    response: str = Field(
-        min_length=40,
+class DraftingBlock(BaseModel):
+    text: str = Field(
+        min_length=1,
         description=(
-            "Complete ready-to-use text requested by the instruction, not a title, "
-            "outline, summary, or explanation of what should be drafted. Preserve "
-            "document formatting with newline characters between headings, fields, "
-            "paragraphs, contacts, and footers."
+            "One ready-to-use document line or paragraph. Do not combine unrelated "
+            "headings, fields, contacts, clauses, or footer lines in one block."
+        ),
+    )
+
+
+class DraftingResult(BaseModel):
+    document_blocks: list[DraftingBlock] = Field(
+        min_length=2,
+        description=(
+            "Ordered ready-to-use document blocks. The caller renders one blank line "
+            "between blocks; do not return an outline or drafting commentary."
         ),
     )
     manual_evidence_quotes: list[str] = Field(

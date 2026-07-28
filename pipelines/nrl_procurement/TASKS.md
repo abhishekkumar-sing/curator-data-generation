@@ -76,6 +76,124 @@ Research-gate acceptance criteria:
 - No large generation run begins solely on the basis of schema validation or
   passing unit tests.
 
+## Capability research — pilot-003 quality recovery
+
+Status: researched and approved for implementation on 2026-07-28. Conclusions
+about generated-data quality remain provisional until pilot-004 is manually
+reviewed. No production-scale run is approved.
+
+Research questions:
+
+- How should false-unanswerable examples be prevented?
+- How should task/persona judgments avoid acquiescing to generator labels?
+- How should cross-document records prove that both documents are necessary?
+- How should ready-to-use drafting layout survive model and serving changes?
+- How should every exported answer remain traceable to its source?
+
+Sources consulted:
+
+- [SQuAD 2.0 paper](https://arxiv.org/abs/1806.03822) (accessed
+  2026-07-28): plausible unanswerable questions were created adversarially and
+  systems must distinguish supported answers from abstention. Merely assigning
+  an arbitrary paragraph an `answerable=false` target does not establish that
+  the resulting question is unanswerable.
+- [Challenges in Information-Seeking QA](https://arxiv.org/abs/2010.11915)
+  (accessed 2026-07-28): paragraph selection and answerability prediction are
+  separate sources of error; answerability remains difficult even with strong
+  readers.
+- [HotpotQA paper and official dataset site](https://hotpotqa.github.io/)
+  (accessed 2026-07-28): genuine multi-hop questions are written from two
+  related documents and carry sentence-level supporting facts. Both answer and
+  supporting-fact quality are evaluated.
+- [Pydantic JSON Schema documentation](https://docs.pydantic.dev/latest/concepts/json_schema/)
+  (accessed 2026-07-28): nested typed lists are represented as JSON Schema
+  arrays with model-defined items.
+- [vLLM structured-output documentation](https://docs.vllm.ai/en/v0.15.0/features/structured_outputs/)
+  (accessed 2026-07-28): the OpenAI-compatible server supports schema-guided
+  JSON generation. A list of document blocks is therefore a portable structured
+  contract; relying on a model to embed newline escapes inside one string is not.
+- [Curator official repository](https://github.com/bespokelabsai/curator)
+  (accessed 2026-07-28): `response_format` is the supported typed-output
+  mechanism, and `parse` is responsible for converting that response into
+  dataset rows.
+- [W3C PROV-O Recommendation](https://www.w3.org/TR/prov-o/) (accessed
+  2026-07-28): derivation and quotation provenance should link a derived entity
+  to the entity it used or quoted.
+- [HotpotQA official JSON format](https://github.com/hotpotqa/hotpot)
+  (accessed 2026-07-28): supporting facts retain both a document identifier and
+  a within-document sentence location rather than only an answer string.
+
+Code and pilot verification:
+
+- Pilot-003 assigned one randomly selected answer-bearing chunk an
+  unanswerable contract. It produced two false abstentions. The exact source
+  explicitly answers both questions at lines 8795–8801 of the 2025 consultancy
+  manual, yet the judge marked both `supported=true` with score 5.
+- The same judge accepted `task=nit_filling` for a comparison of negotiated
+  offer validity and EMD forfeiture. A boolean `task_correct` lets the judge
+  echo the proposed label instead of demonstrating classification.
+- Four of five cross-document requests returned no parsed examples; the only
+  accepted record used both exact source passages but had the wrong task. The
+  existing source-ablation fields are model assertions, not independent
+  executions.
+- Both drafting generations contained the required facts but placed the entire
+  document in a single string line and failed
+  `draft_has_no_document_line_structure`.
+- The reference project contains a separate `TaskClassificationJudge`, but it
+  is treated only as an untrusted design input. Its useful principle is making
+  the reviewer emit a label; its extra stage and rescue complexity are not
+  copied.
+
+Decision:
+
+- [x] Stop forcing unanswerable generation from arbitrary source chunks.
+  Disable unanswerable records until a dedicated adversarial construction and
+  answerability-verification stage exists. This prefers missing coverage over
+  mislabeled supervision.
+- [x] Make each judge emit `recommended_task` and `recommended_persona` from
+  the full canonical taxonomies. Acceptance requires exact agreement with the
+  record, rather than trusting self-reported `task_correct` or
+  `persona_correct`.
+- [x] For unanswerable candidates, require the judge to return
+  `answer_found_in_source` and an exact `answer_quote` when it finds one.
+  Reject every abstention unless the judge explicitly finds no answer. This is
+  defense in depth for imported or future adversarial records, not proof that
+  absence has been exhaustively established.
+- [x] Preserve exact evidence per material cross-document claim and require
+  both source IDs. Generate exactly one record per bundle to reduce output
+  ambiguity and prompt cost. Do not rescue an unrelated pair into a fake
+  multi-hop item; zero output remains a tracked coverage failure.
+- [x] Replace drafting's monolithic response string with typed non-empty
+  `document_blocks`, then render blocks with deterministic newlines in `parse`.
+  Keep evidence and tender-fact fields unchanged.
+- [x] Add deterministic consistency checks for judge-selected taxonomy labels,
+  answerability findings, exact found-answer quotes, block structure, and
+  one-record cross-document cardinality.
+- [x] Preserve existing seed citation IDs and add a stable structured
+  `citations` array to every canonical and training-facing record. Each source
+  citation must include manual/document identity, source file, page, section,
+  chunk ID, and exact supporting quote where applicable. Tender-instance
+  citations retain their tender ID and are distinguishable from manual-source
+  citations.
+- [x] Add regression tests reproducing pilot-003 failures.
+
+Rejected alternatives and risks:
+
+- Lexical overlap alone for answerability was rejected: paraphrases, negation,
+  tables, and numeric equivalence make it unsafe.
+- Keeping forced unanswerables and strengthening only the prompt was rejected:
+  pilot-003 demonstrates that both generator and judge can agree on the same
+  false label.
+- Silently converting a false-unanswerable record to answerable was rejected:
+  the abstention contains no supported answer and must be regenerated.
+- Post-processing punctuation into drafting newlines was rejected: sentence
+  boundaries do not reliably identify headings, fields, clauses, or signatures.
+- A dedicated extra task-classification model stage is deferred because the
+  same independent judge can emit an explicit selection in one call. Pilot-004
+  must test whether this is sufficient.
+- Source-removal judgments remain model-based and can overstate necessity.
+  Exact two-source claim evidence and human pilot review remain mandatory.
+
 ## Capability research — prompt specification refactor
 
 Status: researched and approved for implementation on 2026-07-28; output
@@ -794,6 +912,36 @@ Decision:
 - [ ] Separately investigate the GLM server's long generation latency and the
   two cross-document responses that were not materialized; do not mislabel
   these as Curator throttling.
+
+Pilot-003 correction and retry-tail finding:
+
+- Pilot-003 proves that the earlier inference about the cross-document delay
+  was incomplete. All five calls were dispatched, but only one produced a
+  terminal response record (106 seconds). Four original requests were written
+  to `failed_requests.jsonl`; Curator then kept the stage active for about
+  11.5 minutes.
+- Curator 0.1.29's official `RequestProcessorConfig` defaults
+  `max_retries=10`. This pipeline passed explicit RPM, TPM, concurrency, and
+  `require_all_responses=false`, but did not pass `max_retries`; structured
+  output/schema failures therefore incurred the default retry tail.
+- The reference project independently documents and configures
+  `max_retries: 1` because repeating deterministic truncation or structured
+  output failures consumes time without changing the contract.
+- PR #734's work-conserving retry implementation is already merged into this
+  checkout as commit `f956b921` and is imported from the editable environment.
+  It prevents deferred low-concurrency retries, but intentionally still honors
+  the configured retry count. Reapplying its old monkey patch cannot solve an
+  excessive retry count.
+
+Additional decision:
+
+- [x] Set an explicit, model-profile-configurable `max_retries: 1` for both
+  generation and judge roles and pass it through `backend_params`.
+- [x] Keep `require_all_responses=false`; missing requests remain visible in
+  coverage and fail the run's quality requirements instead of aborting before
+  audit artifacts are written.
+- [ ] Pilot-004 must confirm that a structured-output failure incurs at most
+  one retry and that stage duration no longer contains the ten-retry tail.
 
 Primary references:
 

@@ -45,9 +45,9 @@ class CrossDocumentGenerator(curator.LLM):
 
     def prompt(self, row: dict) -> str:
         """Render two explicitly related source passages."""
-        count = CONFIG.get("cross_document", {}).get("examples_per_bundle", 2)
         return f"""TASK
-Generate zero to {count} genuinely cross-document procurement training records.
+Generate exactly one genuinely cross-document procurement training record when the
+pair supports one; otherwise return zero records.
 Every answerable record must require a connected synthesis of both source_a and
 source_b. Return zero records if the pair cannot support that requirement.
 
@@ -161,6 +161,27 @@ preserved authority and qualifications, and task_type-consistent rationale struc
                     }
                 )
             draft["reasoning_steps"] = steps
+            documents = {
+                document["source_id"]: document for document in row["source_documents"]
+            }
+            citations = []
+            for item in flat_evidence.values():
+                document = documents[item["source_id"]]
+                citations.append(
+                    {
+                        "citation_id": f"{item['source_id']}:{item['chunk_id']}",
+                        "source_id": item["source_id"],
+                        "manual_id": item["manual_id"],
+                        "manual_title": document["title"],
+                        "source_file": document["source_file"],
+                        "page": item["page"],
+                        "section": item["section"],
+                        "chunk_id": item["chunk_id"],
+                        "quote": item["quote"],
+                        "start_char": item["start_char"],
+                        "end_char": item["end_char"],
+                    }
+                )
             identity = f"{row['source_bundle_id']}:{draft['task_type']}:{draft['question']}"
             record_id = "nrlxd-" + hashlib.sha256(identity.encode()).hexdigest()[:20]
             results.append(
@@ -176,6 +197,7 @@ preserved authority and qualifications, and task_type-consistent rationale struc
                     "required_source_ids": ["source_a", "source_b"],
                     "source_documents": row["source_documents"],
                     "source_chunk_ids": [document["chunk_id"] for document in row["source_documents"]],
+                    "citations": citations,
                     "parent_request_id": row["planned_request_id"],
                     "generation_model": self.model_name,
                     "deterministic_checks": {"passed": True, "issues": []},
@@ -229,9 +251,16 @@ EVALUATION CONTRACT
 - relationship_correct=true only when the question and answer respect the declared
   relationship_type without inventing equivalence, adoption, precedence, or temporal
   status.
-- task_correct=true only when task names the underlying procurement work rather
-  than the QA/CoT format. persona_correct=true only when the selected actor is
-  supported by the supplied sources.
+- Independently select recommended_task from
+  {json.dumps(TAXONOMY.get("tasks", []))}; it must name the underlying procurement
+  work rather than the proposed label or QA/CoT format.
+- Independently select recommended_persona from
+  {json.dumps(TAXONOMY.get("personas", []))}; use general_user unless a specialized
+  actor's information need is supported by the supplied sources.
+- For answerable records, set answer_found_in_source=true and copy one exact
+  answer-supporting quote into answer_quote. For unanswerable records, actively
+  search both complete sources: report an exact answering quote when one exists;
+  otherwise set answer_found_in_source=false and answer_quote="".
 - score is 1 to 5: 1 unusable or fabricated; 2 major grounding or cross-document failure;
   3 partially useful but requiring material correction; 4 fully usable with at most a
   minor non-substantive issue; 5 fully supported, necessary, precise, and exemplary.
@@ -264,6 +293,17 @@ and consistency among booleans, ablation list, score, and issues.
                 continue
             decision = judgment.decision.model_dump()
             ablation_passed = set(decision["unsupported_without_source_ids"]) == {"source_a", "source_b"} if record["answerable"] else True
+            task_correct = decision["recommended_task"] == record["task"]
+            persona_correct = decision["recommended_persona"] == record["persona"]
+            source_text = "\n\n".join(
+                document["passage"] for document in record["source_documents"]
+            )
+            quote = decision["answer_quote"]
+            answerability_correct = (
+                decision["answer_found_in_source"] and bool(quote) and quote in source_text
+                if record["answerable"]
+                else not decision["answer_found_in_source"] and not quote
+            )
             required = (
                 "supported",
                 "relevant",
@@ -273,14 +313,20 @@ and consistency among booleans, ablation list, score, and issues.
                 "full_context_supported",
                 "connected_reasoning",
                 "relationship_correct",
-                "task_correct",
-                "persona_correct",
             )
             record["judge"] = {
                 **decision,
                 "source_ablation_passed": ablation_passed,
+                "task_correct": task_correct,
+                "persona_correct": persona_correct,
+                "answerability_correct": answerability_correct,
                 "model": self.model_name,
-                "accepted": all(decision[field] for field in required) and ablation_passed and decision["score"] >= int(QUALITY.get("minimum_judge_score", 4)),
+                "accepted": all(decision[field] for field in required)
+                and ablation_passed
+                and task_correct
+                and persona_correct
+                and answerability_correct
+                and decision["score"] >= int(QUALITY.get("minimum_judge_score", 4)),
             }
             results.append(record)
         return results

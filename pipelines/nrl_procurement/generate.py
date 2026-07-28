@@ -101,6 +101,7 @@ def _llm_kwargs(profile: dict[str, Any]) -> dict[str, Any]:
             "base_url": base_url,
             "api_key": api_key,
             "request_timeout": profile["request_timeout"],
+            "max_retries": profile["max_retries"],
             "max_concurrent_requests": profile["max_concurrent_requests"],
             "max_requests_per_minute": profile["max_requests_per_minute"],
             "max_tokens_per_minute": profile["max_tokens_per_minute"],
@@ -135,31 +136,18 @@ def plan_single_document_requests(rows: list[dict[str, Any]], seed: str) -> list
     if not rows:
         return []
     cot_fraction = float(QUALITY.get("qa_cot_fraction", 0.25))
-    unanswerable_fraction = float(QUALITY.get("unanswerable_fraction", 0.1))
     cot_count = min(
         len(rows),
         max(1 if len(rows) >= 2 and cot_fraction > 0 else 0, round(len(rows) * cot_fraction)),
     )
     cot_ids = {row["chunk_id"] for row in sorted(rows, key=_reasoning_suitability, reverse=True)[:cot_count]}
-    qa_rows = [row for row in rows if row["chunk_id"] not in cot_ids]
-    unanswerable_count = min(
-        len(qa_rows),
-        max(
-            1 if len(rows) >= 5 and unanswerable_fraction > 0 else 0,
-            round(len(rows) * unanswerable_fraction),
-        ),
-    )
-    unanswerable_ids = {
-        row["chunk_id"]
-        for row in sorted(
-            qa_rows,
-            key=lambda row: hashlib.sha256(f"{seed}:unanswerable:{row['chunk_id']}".encode()).hexdigest(),
-        )[:unanswerable_count]
-    }
     planned = []
     for row in rows:
         task_type = "qa_cot" if row["chunk_id"] in cot_ids else "qa"
-        answerable = row["chunk_id"] not in unanswerable_ids
+        # Arbitrary answer-bearing chunks cannot safely be assigned a negative
+        # answerability label. A future adversarial stage must construct and
+        # independently verify such examples.
+        answerable = True
         request_id = hashlib.sha256(f"{seed}:single:{row['chunk_id']}:{task_type}:{answerable}".encode()).hexdigest()[:20]
         planned.append(
             {
@@ -236,6 +224,7 @@ def _non_secret_model_manifest(profile: dict[str, Any]) -> dict[str, Any]:
         "structured_output_mode": profile.get("structured_output_mode", "auto"),
         "generation_params": profile["generation_params"],
         "max_concurrent_requests": profile["max_concurrent_requests"],
+        "max_retries": profile["max_retries"],
         "max_requests_per_minute": profile["max_requests_per_minute"],
         "max_tokens_per_minute": profile["max_tokens_per_minute"],
     }
@@ -373,6 +362,21 @@ rationale shape, and every unanswerable record uses the required exact answer.
                     "source_file": row["source_file"],
                     "source_sha256": row["source_sha256"],
                     "source_chunk_ids": [row["chunk_id"]],
+                    "citations": [
+                        {
+                            "citation_id": row["chunk_id"],
+                            "manual_id": row["manual_id"],
+                            "manual_title": row["title"],
+                            "source_file": row["source_file"],
+                            "page": item["page"],
+                            "section": item["section"],
+                            "chunk_id": item["chunk_id"],
+                            "quote": item["quote"],
+                            "start_char": item["start_char"],
+                            "end_char": item["end_char"],
+                        }
+                        for item in evidence
+                    ],
                     "parent_request_id": row["planned_request_id"],
                     "_source_passage": row["passage"],
                     "generation_model": self.model_name,
@@ -413,12 +417,19 @@ EVALUATION CONTRACT
   step must be necessary or useful, concise, logically connected, and supported by
   its exact evidence quotes; it must be an auditable teaching rationale rather than
   unsupported hidden reasoning.
-- task_correct=true only when task names the user's underlying procurement work,
-  independently of QA/CoT format. Drafting NIT text is drafting; nit_filling is
-  reserved for populating structured NIT fields.
-- persona_correct=true only when the selected actor's duties or information need
-  are supported by the source. Do not accept a platform role without platform
-  context or a specialized role based only on plausible outside knowledge.
+- Independently select recommended_task from {json.dumps(TAXONOMY.get("tasks", []))}.
+  Select the underlying procurement work, not the proposed label or QA/CoT format.
+  Drafting NIT text is drafting; nit_filling is reserved for populating structured
+  NIT fields.
+- Independently select recommended_persona from
+  {json.dumps(TAXONOMY.get("personas", []))}. Select the actor whose authentic work
+  or information need best matches the question and source. Use general_user when a
+  specialized role is not supported.
+- For answerable records, set answer_found_in_source=true and copy one exact
+  answer-supporting source quote into answer_quote. For unanswerable records, actively
+  search the entire supplied passage: set answer_found_in_source=true with an exact
+  answering quote if any direct answer exists; otherwise set it false and return an
+  empty answer_quote.
 - score is 1 to 5: 1 unusable or fabricated; 2 major unsupported or task failures;
   3 partially useful but requiring material correction; 4 fully usable with at most
   a minor non-substantive issue; 5 fully supported, complete, precise, and exemplary.
@@ -449,8 +460,24 @@ and issues, and rejection of every unsupported claim or lost qualification.
             if record is None:
                 continue
             decision = judgment.decision.model_dump()
+            task_correct = decision["recommended_task"] == record["task"]
+            persona_correct = decision["recommended_persona"] == record["persona"]
+            quote = decision["answer_quote"]
+            quote_consistent = (
+                decision["answer_found_in_source"]
+                and bool(quote)
+                and quote in record["_source_passage"]
+                if record["answerable"]
+                else (
+                    not decision["answer_found_in_source"]
+                    and not quote
+                )
+            )
             record["judge"] = {
                 **decision,
+                "task_correct": task_correct,
+                "persona_correct": persona_correct,
+                "answerability_correct": quote_consistent,
                 "model": self.model_name,
                 "accepted": all(
                     decision[field]
@@ -460,10 +487,11 @@ and issues, and rejection of every unsupported claim or lost qualification.
                         "preserves_qualifications",
                         "authority_correct",
                         "reasoning_valid",
-                        "task_correct",
-                        "persona_correct",
                     )
                 )
+                and task_correct
+                and persona_correct
+                and quote_consistent
                 and decision["score"] >= int(QUALITY.get("minimum_judge_score", 4)),
             }
             results.append(record)

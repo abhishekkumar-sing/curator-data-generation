@@ -76,6 +76,7 @@ def build_drafting_inputs(seeds: list[DraftingSeed], corpus_rows: list[dict[str,
                 **seed.model_dump(),
                 "manual_context": manual_context,
                 "manual_passages": [chunk["passage"] for chunk in selected],
+                "manual_sources": selected,
                 "combined_source_text": "\n".join(tender_context) + "\n\n" + manual_context,
                 "citations": [*seed.manual_chunk_ids, seed.tender_id],
             }
@@ -102,9 +103,10 @@ def drafting_validation_issues(row: dict[str, Any], result: DraftingResult) -> l
     issues: list[str] = []
     manual_text = "\n\n".join(row["manual_passages"])
     combined = row["combined_source_text"]
-    if "\n" not in result.response:
-        issues.append("draft_has_no_document_line_structure")
-    if HTML_TAG.search(result.response):
+    response = "\n\n".join(block.text.strip() for block in result.document_blocks)
+    if len(result.document_blocks) < 2 or any(not block.text.strip() for block in result.document_blocks):
+        issues.append("draft_has_no_document_block_structure")
+    if HTML_TAG.search(response):
         issues.append("draft_contains_html_markup")
     for quote in result.manual_evidence_quotes:
         if quote not in manual_text:
@@ -113,15 +115,15 @@ def drafting_validation_issues(row: dict[str, Any], result: DraftingResult) -> l
     for fact in result.tender_facts_used:
         if fact not in tender_facts:
             issues.append("unknown_tender_fact")
-    response_literals = LIST_ORDINAL.sub("", result.response)
+    response_literals = LIST_ORDINAL.sub("", response)
     response_literals = INLINE_SECTION_ORDINAL.sub(r"\1", response_literals)
     for value in NUMBER.findall(response_literals):
         if value.strip() and value.strip().casefold() not in combined.casefold():
             issues.append(f"unsupported_number:{value.strip()}")
-    for value in EMAIL.findall(result.response):
+    for value in EMAIL.findall(response):
         if value.casefold() not in combined.casefold():
             issues.append(f"unsupported_email:{value}")
-    for value in AUTHORITY_FIELD.findall(result.response):
+    for value in AUTHORITY_FIELD.findall(response):
         authority = value.strip(" \t:-")
         if authority and authority.casefold() not in combined.casefold():
             issues.append(f"unsupported_authority:{authority}")
@@ -155,10 +157,9 @@ CONSTRAINTS
 - Satisfy every requirement in the instruction and include every applicable supplied
   fact needed for a complete document. Do not silently omit required fields,
   organization identity, references, bidding structure, contacts, or footer.
-- Preserve usable document layout with newline characters between the heading, every
-  labelled field, body paragraph, contact block, signature block, and footer. Never
-  join adjacent labels, values, sentences, reference numbers, or email addresses
-  without whitespace.
+- Return ordered document_blocks. Use a separate block for each heading, labelled
+  field, body paragraph, contact line, signature line, and footer line. The caller
+  inserts a blank line between blocks. Never join unrelated document elements.
 - Return plain text only. Never use HTML tags, HTML entities, Markdown tables, or
   literal <br> tags to represent document layout.
 - Do not add an issuing authority, department, division, signatory, approval block,
@@ -172,7 +173,7 @@ CONSTRAINTS
 
 OUTPUT CONTRACT
 Return DraftingResult under the enforced response schema:
-- response: the complete, formatted, ready-to-use document text.
+- document_blocks: ordered ready-to-use document lines or paragraphs; at least two.
 - manual_evidence_quotes: one or more exact quotations from MANUAL CONTEXT.
 - tender_facts_used: one or more complete verbatim items from TENDER FACTS.
 
@@ -198,10 +199,46 @@ and tender-fact lists, and absence of unsupported content.
 
     def parse(self, row: dict[str, Any], response: DraftingResult) -> list[dict[str, Any]]:
         """Retain full lineage while marking deterministic acceptance."""
-        normalized_response, repairs = normalize_drafting_response(response.response)
-        normalized = response.model_copy(update={"response": normalized_response})
+        blocks = []
+        repairs: list[str] = []
+        for block in response.document_blocks:
+            normalized_text, block_repairs = normalize_drafting_response(block.text)
+            blocks.append(block.model_copy(update={"text": normalized_text}))
+            repairs.extend(block_repairs)
+        normalized = response.model_copy(update={"document_blocks": blocks})
         issues = drafting_validation_issues(row, normalized)
         context = [*row["tender_context"], *normalized.manual_evidence_quotes]
+        rendered_response = "\n\n".join(block.text for block in normalized.document_blocks)
+        citation_details: list[dict[str, Any]] = []
+        for quote in normalized.manual_evidence_quotes:
+            for source in row["manual_sources"]:
+                start = source["passage"].find(quote)
+                if start >= 0:
+                    citation_details.append(
+                        {
+                            "citation_id": source["chunk_id"],
+                            "source_type": "manual",
+                            "manual_id": source.get("manual_id"),
+                            "manual_title": source.get("title"),
+                            "source_file": source.get("source_file"),
+                            "page": source["page"],
+                            "section": source.get("section"),
+                            "chunk_id": source["chunk_id"],
+                            "quote": quote,
+                            "start_char": start,
+                            "end_char": start + len(quote),
+                        }
+                    )
+                    break
+        citation_details.append(
+            {
+                "citation_id": row["tender_id"],
+                "source_type": "tender_seed",
+                "tender_id": row["tender_id"],
+                "seed_id": row["id"],
+                "facts": normalized.tender_facts_used,
+            }
+        )
         return [
             {
                 "id": row["id"],
@@ -209,8 +246,9 @@ and tender-fact lists, and absence of unsupported content.
                 "task": row["task"],
                 "instruction": row["instruction"],
                 "context": context,
-                "response": normalized.response,
+                "response": rendered_response,
                 "citations": row["citations"],
+                "citation_details": citation_details,
                 "evidence_quotes": normalized.manual_evidence_quotes,
                 "tender_facts_used": normalized.tender_facts_used,
                 "manual_chunk_ids": row["manual_chunk_ids"],
@@ -314,6 +352,7 @@ def compact_drafting(row: dict[str, Any]) -> dict[str, Any]:
         "context": row["context"],
         "response": row["response"],
         "citations": row["citations"],
+        "citation_details": row["citation_details"],
     }
 
 
