@@ -8,6 +8,8 @@ import argparse
 import hashlib
 import json
 import os
+import re
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -35,6 +37,40 @@ from bespokelabs import curator
 PATHS = CONFIG["paths"]
 QUALITY = CONFIG.get("quality", {})
 SPLITS = CONFIG.get("splits", {})
+RUN_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
+CACHE_ROOT = (PROJECT_ROOT / CONFIG["curator"]["cache_dir"]).resolve()
+OUTPUT_ROOT = (PROJECT_ROOT / PATHS["output_root"]).resolve()
+
+
+def _run_layout(
+    requested_run_id: str | None, now: datetime | None = None
+) -> tuple[str, Path]:
+    """Create one safe, immutable outputs/<run-id>/files directory."""
+    if OUTPUT_ROOT != PROJECT_ROOT / "outputs":
+        raise SystemExit("paths.output_root must resolve to the project outputs directory")
+    current = now or datetime.now(timezone.utc)
+    run_id = requested_run_id or current.strftime("run-%Y%m%dT%H%M%S-%fZ")
+    if not RUN_ID_PATTERN.fullmatch(run_id):
+        raise SystemExit(
+            "--run-id must be 1-128 letters, digits, dots, underscores, or hyphens "
+            "and must start with a letter or digit"
+        )
+    files_dir = OUTPUT_ROOT / run_id / "files"
+    if files_dir.exists() and any(files_dir.iterdir()):
+        raise SystemExit(f"Run output already exists and is not empty: {files_dir}")
+    files_dir.mkdir(parents=True, exist_ok=True)
+    return run_id, files_dir
+
+
+def _working_dir(run_id: str, stage: str) -> str:
+    """Return a run- and stage-isolated cache below .curator_working."""
+    if CACHE_ROOT != PROJECT_ROOT / ".curator_working":
+        raise SystemExit("Curator cache root must resolve to .curator_working")
+    if not RUN_ID_PATTERN.fullmatch(run_id):
+        raise SystemExit("Invalid run ID for Curator working directory")
+    path = CACHE_ROOT / run_id / stage
+    path.mkdir(parents=True, exist_ok=True)
+    return str(path)
 
 
 def _role_profile(role: str) -> dict[str, Any]:
@@ -314,7 +350,13 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--source-dir", type=Path, default=PROJECT_ROOT / PATHS["source_dir"])
     parser.add_argument("--ocr-dir", type=Path, default=PROJECT_ROOT / PATHS["ocr_dir"])
-    parser.add_argument("--output-dir", type=Path, default=PROJECT_ROOT / PATHS["output_dir"])
+    parser.add_argument(
+        "--run-id",
+        help=(
+            "Safe output run ID; defaults to a unique UTC ID. Files are always written "
+            "to outputs/<run-id>/files."
+        ),
+    )
     parser.add_argument("--limit", type=int, help="Limit corpus chunks for a pilot")
     parser.add_argument(
         "--cross-document-limit",
@@ -328,6 +370,7 @@ def main() -> None:
     parser.add_argument("--skip-drafting", action="store_true")
     parser.add_argument("--skip-judge", action="store_true", help="Development only")
     args = parser.parse_args()
+    run_id, files_dir = _run_layout(args.run_id)
 
     all_rows, manuals = load_corpus(args.source_dir.resolve(), args.ocr_dir.resolve())
     rows = all_rows
@@ -335,7 +378,7 @@ def main() -> None:
         rows = rows[: args.limit]
     os.environ["HOSTED_VLLM_API_KEY"] = _model_settings(GENERATION)[2]
     generated = ProcurementGenerator(**_llm_kwargs(GENERATION))(
-        Dataset.from_list(rows), working_dir=str(args.output_dir / ".cache" / "generation")
+        Dataset.from_list(rows), working_dir=_working_dir(run_id, "generation")
     ).dataset.to_list()
     generated, duplicates = deduplicate(
         generated, float(QUALITY.get("dedupe_threshold", 94))
@@ -355,7 +398,7 @@ def main() -> None:
         os.environ["HOSTED_VLLM_API_KEY"] = _model_settings(judge_profile)[2]
         judged = ProcurementJudge(**_llm_kwargs(judge_profile))(
             _judge_rows(generated, int(QUALITY.get("judge_batch_size", 8))),
-            working_dir=str(args.output_dir / ".cache" / "judge"),
+            working_dir=_working_dir(run_id, "judge"),
         ).dataset.to_list()
         accepted = [row for row in judged if row["judge"]["accepted"]]
 
@@ -375,7 +418,7 @@ def main() -> None:
             os.environ["HOSTED_VLLM_API_KEY"] = _model_settings(GENERATION)[2]
             cross_generated = CrossDocumentGenerator(**_llm_kwargs(GENERATION))(
                 Dataset.from_list(bundles),
-                working_dir=str(args.output_dir / ".cache" / "cross_generation"),
+                working_dir=_working_dir(run_id, "cross_generation"),
             ).dataset.to_list()
             cross_generated, cross_duplicates = deduplicate(
                 cross_generated, float(QUALITY.get("dedupe_threshold", 94))
@@ -391,7 +434,7 @@ def main() -> None:
                             cross_generated, int(QUALITY.get("judge_batch_size", 8))
                         )
                     ),
-                    working_dir=str(args.output_dir / ".cache" / "cross_judge"),
+                    working_dir=_working_dir(run_id, "cross_judge"),
                 ).dataset.to_list()
                 cross_accepted = [
                     row for row in cross_judged if row["judge"]["accepted"]
@@ -414,7 +457,7 @@ def main() -> None:
         validation_fraction,
         str(SPLITS.get("seed", "nrl-procurement-v1")),
     )
-    stats = export_records(accepted, manuals, args.output_dir.resolve())
+    stats = export_records(accepted, manuals, files_dir, run_id)
 
     drafting_accepted: list[dict[str, Any]] = []
     drafting_config = CONFIG.get("drafting", {})
@@ -427,10 +470,10 @@ def main() -> None:
         os.environ["HOSTED_VLLM_API_KEY"] = _model_settings(GENERATION)[2]
         drafting_generated = TenderDraftingGenerator(**_llm_kwargs(GENERATION))(
             Dataset.from_list(drafting_inputs),
-            working_dir=str(args.output_dir / ".cache" / "drafting_generation"),
+            working_dir=_working_dir(run_id, "drafting_generation"),
         ).dataset.to_list()
         write_jsonl(
-            args.output_dir / "drafting_generated_audit.jsonl", drafting_generated
+            files_dir / "drafting_generated_audit.jsonl", drafting_generated
         )
         deterministic_drafting = [
             row
@@ -445,7 +488,7 @@ def main() -> None:
         if args.skip_judge:
             drafting_accepted = deterministic_drafting
             write_jsonl(
-                args.output_dir / "drafting_rejected.jsonl",
+                files_dir / "drafting_rejected.jsonl",
                 deterministic_rejected,
             )
         elif deterministic_drafting:
@@ -457,13 +500,13 @@ def main() -> None:
             os.environ["HOSTED_VLLM_API_KEY"] = _model_settings(judge_profile)[2]
             drafting_judged = TenderDraftingJudge(**_llm_kwargs(judge_profile))(
                 Dataset.from_list(deterministic_drafting),
-                working_dir=str(args.output_dir / ".cache" / "drafting_judge"),
+                working_dir=_working_dir(run_id, "drafting_judge"),
             ).dataset.to_list()
             drafting_accepted = [
                 row for row in drafting_judged if row["judge"]["accepted"]
             ]
             write_jsonl(
-                args.output_dir / "drafting_rejected.jsonl",
+                files_dir / "drafting_rejected.jsonl",
                 [
                     *deterministic_rejected,
                     *[
@@ -474,22 +517,22 @@ def main() -> None:
                 ],
             )
             write_jsonl(
-                args.output_dir / "drafting_canonical.jsonl", drafting_accepted
+                files_dir / "drafting_canonical.jsonl", drafting_accepted
             )
         else:
             write_jsonl(
-                args.output_dir / "drafting_rejected.jsonl",
+                files_dir / "drafting_rejected.jsonl",
                 deterministic_rejected,
             )
         if not drafting_accepted:
             raise SystemExit("No drafting records passed generation and quality checks")
         write_jsonl(
-            args.output_dir / "drafting.jsonl",
+            files_dir / "drafting.jsonl",
             [compact_drafting(row) for row in drafting_accepted],
         )
 
     print(
-        f"Exported {stats['records']} accepted records to {args.output_dir.resolve()} "
+        f"Run {run_id}: exported {stats['records']} accepted records to {files_dir} "
         f"({duplicates + cross_duplicates} near-duplicates removed; "
         f"{len(cross_accepted)} cross-document records; "
         f"{len(drafting_accepted)} drafting records)"

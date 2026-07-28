@@ -1,6 +1,8 @@
 .venv
 .env
 .curator/
+.curator_working/
+outputs/
 .DS_Store
 __pycache__
 .vscode

@@ -1,6 +1,7 @@
 """Focused tests for the local procurement pipeline."""
 
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 PIPELINE = Path(__file__).resolve().parents[2] / "pipelines" / "nrl_procurement"
@@ -19,6 +20,7 @@ from drafting import (  # noqa: E402
 )
 from export import assign_splits  # noqa: E402
 from generate import ProcurementGenerator, ProcurementJudge  # noqa: E402
+import generate as generation_pipeline  # noqa: E402
 from schemas import DraftingResult  # noqa: E402
 from validation import deduplicate, validate_cross_record, validate_record  # noqa: E402
 
@@ -390,3 +392,47 @@ def test_drafting_prompts_preserve_specification_contract() -> None:
         "FINAL CHECK",
     ):
         assert required in judge_prompt
+
+
+def test_run_layout_and_curator_cache_are_project_local(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr(generation_pipeline, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(generation_pipeline, "OUTPUT_ROOT", tmp_path / "outputs")
+    monkeypatch.setattr(
+        generation_pipeline, "CACHE_ROOT", tmp_path / ".curator_working"
+    )
+    fixed_time = datetime(2026, 7, 28, 15, 30, 12, 123456, tzinfo=timezone.utc)
+
+    run_id, files_dir = generation_pipeline._run_layout(None, fixed_time)
+
+    assert run_id == "run-20260728T153012-123456Z"
+    assert files_dir == tmp_path / "outputs" / run_id / "files"
+    assert files_dir.is_dir()
+    assert generation_pipeline._working_dir(run_id, "generation") == str(
+        tmp_path / ".curator_working" / run_id / "generation"
+    )
+
+
+def test_run_layout_rejects_unsafe_or_existing_run(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr(generation_pipeline, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(generation_pipeline, "OUTPUT_ROOT", tmp_path / "outputs")
+
+    for unsafe in ("../escape", "/absolute", "has spaces"):
+        try:
+            generation_pipeline._run_layout(unsafe)
+        except SystemExit:
+            pass
+        else:
+            raise AssertionError(f"unsafe run ID should fail: {unsafe}")
+
+    _, files_dir = generation_pipeline._run_layout("pilot-001")
+    (files_dir / "existing.jsonl").write_text("{}\n", encoding="utf-8")
+    try:
+        generation_pipeline._run_layout("pilot-001")
+    except SystemExit as exc:
+        assert "already exists and is not empty" in str(exc)
+    else:
+        raise AssertionError("non-empty run output should not be overwritten")

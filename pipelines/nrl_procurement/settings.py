@@ -43,6 +43,15 @@ def _as_env_bool(value: Any) -> str:
 def configure_curator(config: dict[str, Any]) -> None:
     """Apply configurable Curator privacy settings before Curator is imported."""
     curator_config = config.get("curator", {})
+    cache_dir = (
+        PROJECT_ROOT / str(curator_config.get("cache_dir", ".curator_working"))
+    ).resolve()
+    try:
+        cache_dir.relative_to(PROJECT_ROOT)
+    except ValueError as exc:
+        raise RuntimeError("curator.cache_dir must stay inside the project") from exc
+    if cache_dir != PROJECT_ROOT / ".curator_working":
+        raise RuntimeError("curator.cache_dir must resolve to .curator_working")
     defaults = {
         "CURATOR_LOCAL_ONLY": curator_config.get("local_only", True),
         "CURATOR_VIEWER": curator_config.get("viewer_enabled", False),
@@ -50,6 +59,8 @@ def configure_curator(config: dict[str, Any]) -> None:
     }
     for name, value in defaults.items():
         os.environ.setdefault(name, _as_env_bool(value))
+    # This pipeline owns its cache location; do not inherit a user-global cache.
+    os.environ["CURATOR_CACHE_DIR"] = str(cache_dir)
 
     if os.environ["CURATOR_LOCAL_ONLY"].lower() in _TRUE_VALUES:
         if os.environ["CURATOR_VIEWER"].lower() in _TRUE_VALUES:

@@ -163,6 +163,67 @@ Rejected alternatives:
   schema validation, judge review, and human pilot review cover different
   failure modes.
 
+## Capability research — Curator cache and per-run artifact layout
+
+Status: researched and approved for implementation on 2026-07-28.
+
+Research question:
+
+- How should Curator recovery/cache files and generated artifacts be separated
+  so cache state always remains under the repository while every execution has
+  an auditable `outputs/<run-id>/files` directory?
+
+Sources consulted:
+
+- [Curator automatic recovery and caching](https://docs.bespokelabs.ai/bespoke-curator/getting-started/automatic-recovery-and-caching)
+  (accessed 2026-07-28): Curator defaults to `~/.cache/curator`; callers can
+  select a cache root through `CURATOR_CACHE_DIR` or pass `working_dir` when
+  applying an LLM. The root contains `metadata.db` and fingerprinted run
+  directories.
+- [Curator upstream repository](https://github.com/bespokelabsai/curator)
+  (accessed 2026-07-28): `CURATOR_CACHE_DIR` is the documented environment
+  control; cache fingerprints cover the input dataset, prompt function, batch
+  mode, response format, model, and generation parameters.
+
+Code verification:
+
+- `curator.LLM.__call__` accepts `working_dir`; Curator creates a fingerprinted
+  child directory below it and stores request, response, metadata, and Arrow
+  recovery files there.
+- The pipeline currently passes
+  `<output-dir>/.cache/{generation,judge,cross_generation,cross_judge,drafting_generation,drafting_judge}`.
+  Therefore cache state is mixed with exported artifacts and changes location
+  whenever the output directory changes.
+- The current CLI writes directly to one `--output-dir` and has no run ID,
+  allowing later runs to overwrite files from earlier runs.
+
+Decision:
+
+- [x] Configure the repository-relative cache root as `.curator_working`
+  without embedding an absolute checkout path.
+- [x] Give each run and pipeline stage an isolated child working directory,
+  matching the cautious structure used by the reference project while leaving
+  Curator's own fingerprinting intact below it.
+- [x] Write every run only to `outputs/<run-id>/files`.
+- [x] Accept an explicit safe `--run-id` and otherwise create a UTC run ID.
+- [x] Reject path traversal, absolute run IDs, and reuse of a non-empty artifact
+  directory.
+- [x] Ignore both local cache state and generated run artifacts in Git.
+- [ ] Add retention/cleanup policy only after storage requirements are known;
+  never delete caches or outputs implicitly.
+
+Rejected alternatives:
+
+- Keeping cache below each output run: rejected because it duplicates recovery
+  state, prevents stable reuse, and violates the requested separation.
+- Using only `CURATOR_CACHE_DIR` while continuing to pass output-local
+  `working_dir` values: rejected because the explicit argument takes precedence.
+- Writing directly to `outputs/` without a run directory: rejected because files
+  can be overwritten and provenance between executions becomes ambiguous.
+- Putting cache inside the virtual environment `.curator`: rejected because
+  environment replacement would destroy recovery state and the requested cache
+  name is `.curator_working`.
+
 ## Capability research — seed-driven grounded drafting
 
 Status: researched and approved for implementation on 2026-07-28; generated

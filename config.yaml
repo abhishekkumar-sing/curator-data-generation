@@ -6,11 +6,12 @@ curator:
   local_only: true
   viewer_enabled: false
   telemetry_enabled: false
+  cache_dir: .curator_working
 
 paths:
   source_dir: data/source
   ocr_dir: data/interim/ocr
-  output_dir: data/synthetic
+  output_root: outputs
   drafting_seeds: data/seeds/drafting_requests.jsonl
 
 model_profiles:

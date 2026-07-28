@@ -106,7 +106,9 @@ number, source hash, revision, issuer, and policy scope.
 Start with a small pilot:
 
 ```bash
-.curator/bin/python pipelines/nrl_procurement/generate.py --limit 5
+.curator/bin/python pipelines/nrl_procurement/generate.py \
+  --run-id pilot-001 \
+  --limit 5
 ```
 
 Remove `--limit` to process all Markdown pages:
@@ -115,15 +117,28 @@ Remove `--limit` to process all Markdown pages:
 .curator/bin/python pipelines/nrl_procurement/generate.py
 ```
 
-Curator request and response caches are written under
-`data/synthetic/.cache`. Accepted records are written to:
+When `--run-id` is omitted, the command creates a unique UTC run ID such as
+`run-20260728T153012-123456Z`. Explicit run IDs may contain only letters,
+digits, dots, underscores, and hyphens. A non-empty existing run is rejected
+instead of overwritten.
+
+All Curator request, response, metadata, Arrow, and recovery caches are kept
+under `.curator_working/<run-id>/<stage>/`, followed by Curator's own
+fingerprinted directory. They are never mixed with exported datasets. All artifacts
+from one execution are written under:
+
+```text
+outputs/<run-id>/files/
+```
+
+That `files/` directory contains:
 
 - `canonical.jsonl`: lossless records, provenance, checks, and judge output
 - `qa_sft.jsonl`: concise QA chat training data
 - `qa_cot_sft.jsonl`: QA with short evidence-based teaching rationales
 - `rag.jsonl`: questions, contexts, and answerability labels
 - `eval.jsonl`: reference answers and evidence for evaluation
-- `manifest.json`: source hashes, metadata, and output statistics
+- `manifest.json`: run ID, source metadata, and output statistics
 
 Only files registered in `data/source/manuals.yaml` are consumed. Records are
 rejected for non-verbatim evidence, unsupported answer numbers, lost
@@ -216,7 +231,8 @@ evidence and declare which complete tender facts it used. Deterministic checks
 reject non-verbatim evidence and unsupported numbers or email addresses before
 the configured judge runs.
 
-Accepted compact rows are written to `data/synthetic/drafting.jsonl` with
+Accepted compact rows are written to
+`outputs/<run-id>/files/drafting.jsonl` with
 `id`, `tender_id`, `task`, `instruction`, `context`, `response`, and
 `citations`. `drafting_generated_audit.jsonl`, `drafting_canonical.jsonl`, and
 `drafting_rejected.jsonl` preserve quality and lineage details. Drafting stays

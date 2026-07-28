@@ -73,7 +73,10 @@ def _write(path: Path, rows: list[dict[str, Any]]) -> None:
 
 
 def export_records(
-    records: list[dict[str, Any]], manuals: list[dict[str, Any]], output_dir: Path
+    records: list[dict[str, Any]],
+    manuals: list[dict[str, Any]],
+    output_dir: Path,
+    run_id: str,
 ) -> dict[str, int]:
     """Write canonical and task-specific datasets plus their manifest."""
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -161,6 +164,9 @@ def export_records(
         counts[f"task_{row['task_type']}"] += 1
     stats = {"records": len(records), **dict(sorted(counts.items()))}
     (output_dir / "manifest.json").write_text(
-        json.dumps({"statistics": stats, "manuals": manuals}, indent=2), encoding="utf-8"
+        json.dumps(
+            {"run_id": run_id, "statistics": stats, "manuals": manuals}, indent=2
+        ),
+        encoding="utf-8",
     )
     return stats
