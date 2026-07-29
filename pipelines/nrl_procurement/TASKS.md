@@ -841,7 +841,7 @@ Known limitations:
 
 ### 1. Extract grounded atomic propositions
 
-- [ ] Add a proposition schema containing:
+- [x] Add a proposition schema containing:
   - proposition ID;
   - subject;
   - authority;
@@ -853,10 +853,10 @@ Known limitations:
   - threshold/value/unit;
   - temporal scope;
   - exact evidence reference.
-- [ ] Extract propositions independently for each source window.
-- [ ] Reject propositions whose complete factual content is not supported by
+- [x] Extract propositions independently for each source window.
+- [x] Reject propositions whose complete factual content is not supported by
   exact evidence.
-- [ ] Cache propositions by source hash, chunk ID, model profile, and schema
+- [x] Cache propositions by source hash, chunk ID, model profile, and schema
   version.
 
 Acceptance criteria:
@@ -993,6 +993,39 @@ Primary and official sources:
 - [Pydantic validators](https://docs.pydantic.dev/latest/concepts/validators/)
   support typed boundary validation; semantic source support remains an
   application responsibility.
+
+Implementation result:
+
+- [x] Added a typed, model-portable `PropositionBatch` schema with atomic
+  subject/action/object fields and separate modality, polarity, conditions,
+  exceptions, threshold, temporal scope, and exact evidence.
+- [x] Added a source-isolated Curator extraction stage. Models emit semantic
+  drafts only; stable proposition IDs, authority, source identity, citations,
+  and offsets are derived by the application.
+- [x] Added fail-closed deterministic checks for non-verbatim semantic fields,
+  unsupported or lost modality/polarity, unsupported condition/exception
+  markers, missing evidence, and ambiguous duplicate evidence occurrences.
+- [x] Resolve evidence offsets against the original registered chunk, even
+  when image markup was removed from the generation passage.
+- [x] Added a reusable cache under `.curator_working/proposition_cache` keyed
+  by source and passage hashes, chunk ID, secret-free model/endpoint and
+  decoding configuration, prompt hash, response-schema hash/version, and
+  validator version. Explicit empty extractions are cached as terminal results.
+- [x] Added per-run `propositions.jsonl`,
+  `propositions_generated_audit.jsonl`, and
+  `propositions_rejected.jsonl`, plus cache/yield statistics in the run
+  manifest. Existing QA and cross-document selection do not consume the new
+  propositions yet; P0.2 introduces that dependency after verified paths
+  exist.
+- [x] Added deterministic tests covering authority isolation, exact offsets,
+  cleaned-vs-original source text, modality drift, ambiguous repeated evidence,
+  cache invalidation, cache reuse, and empty-result caching.
+- [x] Passed 27 local procurement tests, Ruff checks, Python compilation, and
+  YAML configuration validation. The existing Pydantic class-config
+  deprecation warning is outside this task and remains recorded.
+- [ ] Validate extraction completeness, proposition atomicity, cache reuse, and
+  latency through a bounded user-run pilot before allowing propositions to
+  drive question/path planning.
 
 ### 2. Construct connected reasoning paths before questions
 

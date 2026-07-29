@@ -124,8 +124,11 @@ instead of overwritten.
 
 All Curator request, response, metadata, Arrow, and recovery caches are kept
 under `.curator_working/<run-id>/<stage>/`, followed by Curator's own
-fingerprinted directory. They are never mixed with exported datasets. All artifacts
-from one execution are written under:
+fingerprinted directory. The reusable, source-keyed proposition cache is kept
+under `.curator_working/proposition_cache/`; its key covers source/chunk
+content, model configuration, prompt, schema, and validator versions. Caches
+are never mixed with exported datasets. All artifacts from one execution are
+written under:
 
 ```text
 outputs/<run-id>/files/
@@ -134,6 +137,10 @@ outputs/<run-id>/files/
 That `files/` directory contains:
 
 - `canonical.jsonl`: lossless records, provenance, checks, and judge output
+- `propositions.jsonl`: accepted source-isolated atomic procurement propositions
+- `propositions_generated_audit.jsonl`: all proposition extractions, including
+  deterministic rejections and explicit empty results
+- `propositions_rejected.jsonl`: proposition records that failed exact grounding
 - `qa_sft.jsonl`: concise QA chat training data
 - `qa_cot_sft.jsonl`: QA with short evidence-based teaching rationales
 - `rag.jsonl`: questions, contexts, and answerability labels

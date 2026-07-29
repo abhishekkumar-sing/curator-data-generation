@@ -35,6 +35,13 @@ from generate import (  # noqa: E402
     plan_single_document_requests,
     request_coverage,
 )
+from propositions import (  # noqa: E402
+    materialize_proposition,
+    proposition_cache_fingerprint,
+    proposition_validation_issues,
+    read_cached_propositions,
+    write_proposition_cache,
+)
 from schemas import (  # noqa: E402
     CandidateBatch,
     CrossCandidateBatch,
@@ -87,6 +94,124 @@ def test_validation_rejects_unsupported_number() -> None:
         "reasoning_steps": [],
     }
     assert "unsupported_number:10 years" in validate_record(record, "The buyer shall retain it for 5 years.")
+
+
+def _proposition_source_row() -> dict:
+    passage = "If delivery is delayed, the buyer shall recover liquidated damages " "at 0.5% per week, except where force majeure applies."
+    return {
+        "manual_id": "nrl_goods_rev1",
+        "title": "NRL Manual for Procurement of Goods, Rev1",
+        "issuing_organization": "Numaligarh Refinery Limited",
+        "policy_scope": "company_policy",
+        "revision_date": "16.03.2023",
+        "as_of_date": "16.03.2023",
+        "source_file": "manual.md",
+        "source_sha256": "a" * 64,
+        "chunk_id": "chunk-1",
+        "page": 7,
+        "section": "Liquidated damages",
+        "passage": passage,
+    }
+
+
+def _proposition_draft() -> dict:
+    return {
+        "subject": "the buyer",
+        "action": "shall recover",
+        "object": "liquidated damages",
+        "modality": "mandatory",
+        "polarity": "positive",
+        "conditions": ["If delivery is delayed"],
+        "exceptions": ["except where force majeure applies"],
+        "threshold_value": "0.5%",
+        "threshold_unit": "per week",
+        "temporal_scope": "",
+        "evidence_quote": ("If delivery is delayed, the buyer shall recover liquidated damages " "at 0.5% per week, except where force majeure applies."),
+    }
+
+
+def test_proposition_materialization_preserves_authority_and_offsets() -> None:
+    row = _proposition_source_row()
+    draft = _proposition_draft()
+    assert proposition_validation_issues(draft, row) == []
+    result = materialize_proposition(draft, row, "fingerprint")
+    assert result["proposition_id"].startswith("prop-")
+    assert result["authority"]["issuing_organization"] == "Numaligarh Refinery Limited"
+    assert result["authority"]["policy_scope"] == "company_policy"
+    assert result["evidence"]["quote"] == row["passage"]
+    assert result["evidence"]["start_char"] == 0
+    assert result["evidence"]["end_char"] == len(row["passage"])
+    assert result["deterministic_checks"]["passed"] is True
+
+
+def test_proposition_offsets_resolve_against_original_source_chunk() -> None:
+    row = _proposition_source_row()
+    row["source_passage"] = f"![page image](image.png)\n\n{row['passage']}"
+    result = materialize_proposition(_proposition_draft(), row, "fingerprint")
+    assert result["deterministic_checks"]["passed"] is True
+    assert result["evidence"]["start_char"] == len("![page image](image.png)\n\n")
+    assert row["source_passage"][result["evidence"]["start_char"] : result["evidence"]["end_char"]] == result["evidence"]["quote"]
+
+
+def test_proposition_validation_rejects_semantic_and_location_drift() -> None:
+    row = _proposition_source_row()
+    unsupported = {
+        **_proposition_draft(),
+        "action": "may recover",
+        "modality": "permitted",
+    }
+    issues = proposition_validation_issues(unsupported, row)
+    assert "non_verbatim_action" in issues
+    assert "unsupported_modality" in issues
+
+    duplicate_row = {**row, "passage": f"{row['passage']} {row['passage']}"}
+    assert "ambiguous_evidence_occurrence" in proposition_validation_issues(
+        _proposition_draft(),
+        duplicate_row,
+    )
+
+
+def test_proposition_cache_fingerprint_and_round_trip(tmp_path: Path) -> None:
+    row = _proposition_source_row()
+    model = {
+        "profile": "glm",
+        "model": "local-model",
+        "base_url": "http://private/v1",
+        "generation_params": {"temperature": 1.0},
+    }
+    first = proposition_cache_fingerprint(row, model)
+    assert first == proposition_cache_fingerprint(dict(row), dict(model))
+    assert first != proposition_cache_fingerprint(
+        {**row, "passage": row["passage"] + " Changed."},
+        model,
+    )
+    assert first != proposition_cache_fingerprint(
+        row,
+        {**model, "model": "another-model"},
+    )
+
+    record = materialize_proposition(_proposition_draft(), row, first)
+    write_proposition_cache(tmp_path, [record])
+    cached, hits = read_cached_propositions(tmp_path, {first, "missing"})
+    assert hits == {first}
+    assert cached == [record]
+
+    empty_fingerprint = "e" * 64
+    empty = {
+        "proposition_id": "",
+        "cache_fingerprint": empty_fingerprint,
+        "empty_extraction": True,
+        "source_chunk_id": "chunk-empty",
+        "schema_version": "1",
+        "deterministic_checks": {"passed": True, "issues": []},
+    }
+    write_proposition_cache(tmp_path, [empty])
+    cached_empty, empty_hits = read_cached_propositions(
+        tmp_path,
+        {empty_fingerprint},
+    )
+    assert empty_hits == {empty_fingerprint}
+    assert cached_empty == [empty]
 
 
 def test_validation_uses_qualifier_tokens_and_modality_equivalence() -> None:

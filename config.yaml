@@ -118,6 +118,10 @@ quality:
     - cross_document_qa
     - cross_document_qa_cot
 
+propositions:
+  enabled: true
+  max_per_window: 8
+
 # Orthogonal dataset axes:
 # - task: underlying procurement work
 # - persona: actor represented by the user request

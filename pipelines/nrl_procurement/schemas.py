@@ -128,6 +128,32 @@ class CandidateBatch(BaseModel):
     examples: list[Candidate]
 
 
+class PropositionDraft(BaseModel):
+    """One source-language procurement proposition and its complete witness."""
+
+    subject: str = Field(min_length=1)
+    action: str = Field(min_length=1)
+    object: str = Field(min_length=1)
+    modality: Literal[
+        "mandatory",
+        "recommended",
+        "permitted",
+        "prohibited",
+        "declarative",
+    ]
+    polarity: Literal["positive", "negative"]
+    conditions: list[str] = Field(default_factory=list)
+    exceptions: list[str] = Field(default_factory=list)
+    threshold_value: str = ""
+    threshold_unit: str = ""
+    temporal_scope: str = ""
+    evidence_quote: str = Field(min_length=8)
+
+
+class PropositionBatch(BaseModel):
+    propositions: list[PropositionDraft]
+
+
 class JudgeDecision(BaseModel):
     supported: bool
     relevant: bool
@@ -141,8 +167,7 @@ class JudgeDecision(BaseModel):
         default_factory=list,
         max_length=3,
         description=(
-            "Zero to three independent verbatim source spans supporting an answer. "
-            "Never concatenate separate spans or insert ellipses inside a span."
+            "Zero to three independent verbatim source spans supporting an answer. " "Never concatenate separate spans or insert ellipses inside a span."
         ),
     )
     score: int = Field(ge=1, le=5)
@@ -173,8 +198,7 @@ class DraftingBlock(BaseModel):
     text: str = Field(
         min_length=1,
         description=(
-            "One ready-to-use document line or paragraph. Do not combine unrelated "
-            "headings, fields, contacts, clauses, or footer lines in one block."
+            "One ready-to-use document line or paragraph. Do not combine unrelated " "headings, fields, contacts, clauses, or footer lines in one block."
         ),
     )
 
@@ -183,8 +207,7 @@ class DraftingResult(BaseModel):
     document_blocks: list[DraftingBlock] = Field(
         min_length=2,
         description=(
-            "Ordered ready-to-use document blocks. The caller renders one blank line "
-            "between blocks; do not return an outline or drafting commentary."
+            "Ordered ready-to-use document blocks. The caller renders one blank line " "between blocks; do not return an outline or drafting commentary."
         ),
     )
     manual_evidence_quotes: list[str] = Field(
@@ -193,10 +216,7 @@ class DraftingResult(BaseModel):
     )
     tender_facts_used: list[str] = Field(
         min_length=1,
-        description=(
-            "Every applicable tender fact used in the response, copied as complete "
-            "verbatim items from TENDER FACTS."
-        ),
+        description=("Every applicable tender fact used in the response, copied as complete " "verbatim items from TENDER FACTS."),
     )
 
 

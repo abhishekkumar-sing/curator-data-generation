@@ -29,6 +29,12 @@ from drafting import (
 )
 from export import assign_splits, export_records, write_manifest
 from jsonl_io import write_jsonl_rows
+from propositions import (
+    PropositionExtractor,
+    proposition_cache_fingerprint,
+    read_cached_propositions,
+    write_proposition_cache,
+)
 from schemas import CandidateBatch, JudgeBatch
 from validation import deduplicate, judge_quotes_are_grounded, validate_record
 
@@ -153,6 +159,7 @@ def plan_single_document_requests(rows: list[dict[str, Any]], seed: str) -> list
         planned.append(
             {
                 **row,
+                "source_passage": row.get("passage", row["generation_passage"]),
                 "passage": row["generation_passage"],
                 "planned_request_id": f"single-{request_id}",
                 "planned_task_type": task_type,
@@ -568,6 +575,7 @@ def _final_manifest(
     cross_coverage: dict[str, Any],
     drafting_stats: dict[str, Any],
     duplicates: int,
+    proposition_stats: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return {
         "run_id": run_id,
@@ -588,6 +596,7 @@ def _final_manifest(
             "cross_document": cross_coverage,
         },
         "drafting": drafting_stats,
+        "propositions": proposition_stats or {"enabled": False},
         "near_duplicates_removed": duplicates,
         "manuals": manuals,
     }
@@ -637,6 +646,62 @@ def main() -> None:
         raise SystemExit("No eligible corpus chunks were selected")
     if not args.skip_judge:
         _assert_independent_judge()
+
+    proposition_stats: dict[str, Any] = {"enabled": False}
+    proposition_config = CONFIG.get("propositions", {})
+    if proposition_config.get("enabled", False):
+        model_manifest = _non_secret_model_manifest(GENERATION)
+        proposition_inputs = []
+        for row in planned_single:
+            item = dict(row)
+            item["max_propositions"] = int(proposition_config.get("max_per_window", 8))
+            item["proposition_cache_fingerprint"] = proposition_cache_fingerprint(
+                item,
+                model_manifest,
+            )
+            proposition_inputs.append(item)
+        fingerprints = {row["proposition_cache_fingerprint"] for row in proposition_inputs}
+        proposition_cache_root = CACHE_ROOT / "proposition_cache"
+        cached_propositions, cache_hits = read_cached_propositions(
+            proposition_cache_root,
+            fingerprints,
+        )
+        uncached_inputs = [row for row in proposition_inputs if row["proposition_cache_fingerprint"] not in cache_hits]
+        generated_propositions: list[dict[str, Any]] = []
+        if uncached_inputs:
+            os.environ["HOSTED_VLLM_API_KEY"] = _model_settings(GENERATION)[2]
+            generated_propositions = PropositionExtractor(**_llm_kwargs(GENERATION))(
+                Dataset.from_list(uncached_inputs),
+                working_dir=_working_dir(run_id, "propositions"),
+            ).dataset.to_list()
+            write_proposition_cache(
+                proposition_cache_root,
+                generated_propositions,
+            )
+        proposition_audit = cached_propositions + generated_propositions
+        accepted_propositions = [row for row in proposition_audit if row.get("proposition_id") and row.get("deterministic_checks", {}).get("passed", False)]
+        rejected_propositions = [row for row in proposition_audit if row.get("proposition_id") and not row.get("deterministic_checks", {}).get("passed", False)]
+        empty_extractions = sum(bool(row.get("empty_extraction")) for row in proposition_audit)
+        _write_audit(
+            files_dir / "propositions_generated_audit.jsonl",
+            proposition_audit,
+        )
+        _write_audit(files_dir / "propositions.jsonl", accepted_propositions)
+        _write_audit(
+            files_dir / "propositions_rejected.jsonl",
+            rejected_propositions,
+        )
+        proposition_stats = {
+            "enabled": True,
+            "planned_windows": len(proposition_inputs),
+            "cache_hit_windows": len(cache_hits),
+            "generated_windows": len(uncached_inputs),
+            "accepted": len(accepted_propositions),
+            "rejected": len(rejected_propositions),
+            "empty_extractions": empty_extractions,
+            "schema_version": (accepted_propositions[0]["schema_version"] if accepted_propositions else None),
+        }
+
     os.environ["HOSTED_VLLM_API_KEY"] = _model_settings(GENERATION)[2]
     generated_audit = ProcurementGenerator(**_llm_kwargs(GENERATION))(
         Dataset.from_list(planned_single),
@@ -661,6 +726,7 @@ def main() -> None:
                 cross_coverage={},
                 drafting_stats={},
                 duplicates=duplicates,
+                proposition_stats=proposition_stats,
             ),
         )
         raise SystemExit("No records passed deterministic validation")
@@ -754,6 +820,7 @@ def main() -> None:
                 cross_coverage=cross_coverage,
                 drafting_stats={},
                 duplicates=duplicates + cross_duplicates,
+                proposition_stats=proposition_stats,
             ),
         )
         raise SystemExit("No records passed the quality judge")
@@ -843,6 +910,7 @@ def main() -> None:
                     cross_coverage=cross_coverage,
                     drafting_stats=drafting_stats,
                     duplicates=duplicates + cross_duplicates,
+                    proposition_stats=proposition_stats,
                 ),
             )
             raise SystemExit("No drafting records passed generation and quality checks")
@@ -874,6 +942,7 @@ def main() -> None:
         cross_coverage=cross_coverage,
         drafting_stats=drafting_stats,
         duplicates=duplicates + cross_duplicates,
+        proposition_stats=proposition_stats,
     )
     final_manifest["required_task_type_counts"] = task_counts
     final_manifest["missing_required_task_types"] = required_missing
