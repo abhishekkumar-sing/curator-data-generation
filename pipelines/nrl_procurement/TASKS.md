@@ -812,7 +812,7 @@ Rejected alternatives:
 
 ### Drafting citation/detail integrity research addendum (2026-07-29)
 
-Status: research complete after pilot-009; implementation pending.
+Status: implemented and locally verified; next user-run pilot pending.
 
 Observed failure and verified cause:
 
@@ -874,6 +874,25 @@ Validation plan:
   unique stable citation ordering, missing tender detail, and dangling IDs.
 - Re-audit pilot-009 locally and confirm its compact drafting rows would no
   longer expose unresolvable citation IDs.
+
+Implementation result:
+
+- [x] Renamed seed-derived citation lineage to
+  `candidate_citation_ids`; it remains available in generation/canonical audit
+  rows but is not automatically exported as claimed evidence.
+- [x] Derive exported citation IDs from resolved manual evidence details in
+  first-use order, followed by the tender-seed provenance detail.
+- [x] Added bidirectional integrity checks for dangling flat IDs, unlisted
+  details, duplicate flat IDs, unresolved evidence quotations, and missing or
+  duplicate tender-seed provenance.
+- [x] Preserve repeated quotation details from one chunk while deduplicating
+  only the flat citation ID list.
+- [x] Re-audited pilot-009 locally: the page-72 NIT citation and page-149 LD
+  citation are correctly identified as candidate-only dangling citations and
+  would not be exported after this fix.
+- [x] Passed 50 focused procurement tests and Ruff checks.
+- [ ] Validate regenerated drafting outputs and citation/detail completeness in
+  the next bounded user-run pilot.
 
 ## Current baseline
 

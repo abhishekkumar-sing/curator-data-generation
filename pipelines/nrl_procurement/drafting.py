@@ -80,7 +80,7 @@ def build_drafting_inputs(seeds: list[DraftingSeed], corpus_rows: list[dict[str,
                 "manual_passages": [chunk["passage"] for chunk in selected],
                 "manual_sources": selected,
                 "combined_source_text": "\n".join(tender_context) + "\n\n" + manual_context,
-                "citations": [*seed.manual_chunk_ids, seed.tender_id],
+                "candidate_citation_ids": [*seed.manual_chunk_ids, seed.tender_id],
             }
         )
     return inputs
@@ -133,6 +133,47 @@ def drafting_validation_issues(row: dict[str, Any], result: DraftingResult) -> l
         [*result.manual_evidence_quotes, *result.tender_facts_used]
     )
     issues.extend(semantic_support_issues(response, declared_support))
+    return sorted(set(issues))
+
+
+def drafting_citation_integrity_issues(
+    citations: list[str],
+    citation_details: list[dict[str, Any]],
+    *,
+    tender_id: str,
+    evidence_quote_count: int,
+) -> list[str]:
+    """Require complete, bidirectional drafting citation traceability."""
+    issues: list[str] = []
+    citation_ids = [str(value) for value in citations]
+    detail_ids = [str(detail.get("citation_id", "")) for detail in citation_details]
+    if len(citation_ids) != len(set(citation_ids)):
+        issues.append("duplicate_drafting_citation_id")
+    dangling = sorted(set(citation_ids) - set(detail_ids))
+    if dangling:
+        issues.append(f"dangling_drafting_citations:{','.join(dangling)}")
+    unlisted = sorted(set(detail_ids) - set(citation_ids))
+    if unlisted:
+        issues.append(f"unlisted_drafting_citation_details:{','.join(unlisted)}")
+    manual_details = [
+        detail for detail in citation_details if detail.get("source_type") == "manual"
+    ]
+    if len(manual_details) != evidence_quote_count:
+        issues.append(
+            "unresolved_drafting_evidence:"
+            f"expected={evidence_quote_count},resolved={len(manual_details)}"
+        )
+    tender_details = [
+        detail
+        for detail in citation_details
+        if detail.get("source_type") == "tender_seed"
+        and str(detail.get("citation_id", "")) == tender_id
+        and str(detail.get("tender_id", "")) == tender_id
+    ]
+    if len(tender_details) != 1:
+        issues.append(
+            f"invalid_tender_seed_provenance:expected=1,resolved={len(tender_details)}"
+        )
     return sorted(set(issues))
 
 
@@ -245,6 +286,19 @@ and tender-fact lists, and absence of unsupported content.
                 "facts": normalized.tender_facts_used,
             }
         )
+        citations = list(
+            dict.fromkeys(
+                str(detail["citation_id"]) for detail in citation_details
+            )
+        )
+        issues.extend(
+            drafting_citation_integrity_issues(
+                citations,
+                citation_details,
+                tender_id=row["tender_id"],
+                evidence_quote_count=len(normalized.manual_evidence_quotes),
+            )
+        )
         return [
             {
                 "id": row["id"],
@@ -253,7 +307,7 @@ and tender-fact lists, and absence of unsupported content.
                 "instruction": row["instruction"],
                 "context": context,
                 "response": rendered_response,
-                "citations": row["citations"],
+                "citations": citations,
                 "citation_details": citation_details,
                 "evidence_quotes": normalized.manual_evidence_quotes,
                 "tender_facts_used": normalized.tender_facts_used,

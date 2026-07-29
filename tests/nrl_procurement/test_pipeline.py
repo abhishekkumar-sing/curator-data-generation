@@ -23,6 +23,7 @@ from drafting import (  # noqa: E402
     TenderDraftingJudge,
     build_drafting_inputs,
     compact_drafting,
+    drafting_citation_integrity_issues,
     drafting_validation_issues,
     normalize_drafting_response,
     read_drafting_seeds,
@@ -1352,6 +1353,7 @@ def test_drafting_seed_resolution_validation_and_compact_output(tmp_path: Path) 
     compact = compact_drafting(
         {
             **inputs[0],
+            "citations": ["chunk-1", "tender-1"],
             "context": [*inputs[0]["tender_context"], *result.manual_evidence_quotes],
             "response": "\n\n".join(block.text for block in result.document_blocks),
             "citation_details": [
@@ -1382,6 +1384,7 @@ def test_drafting_seed_resolution_validation_and_compact_output(tmp_path: Path) 
         "citations",
     ]
     assert compact["citations"] == ["chunk-1", "tender-1"]
+    assert inputs[0]["candidate_citation_ids"] == ["chunk-1", "tender-1"]
 
 
 def test_drafting_rejects_unknown_chunks_and_unsupported_values(tmp_path: Path) -> None:
@@ -1417,6 +1420,44 @@ def test_drafting_rejects_unknown_chunks_and_unsupported_values(tmp_path: Path) 
     issues = drafting_validation_issues(row, result)
     assert "unsupported_number:10%" in issues
     assert "unsupported_email:invented@example.com" in issues
+
+
+def test_drafting_citation_integrity_is_bidirectional_and_allows_repeated_details() -> None:
+    details = [
+        {
+            "citation_id": "chunk-used",
+            "source_type": "manual",
+            "quote": "First supporting quotation.",
+        },
+        {
+            "citation_id": "chunk-used",
+            "source_type": "manual",
+            "quote": "Second supporting quotation.",
+        },
+        {
+            "citation_id": "tender-1",
+            "source_type": "tender_seed",
+            "tender_id": "tender-1",
+        },
+    ]
+    assert (
+        drafting_citation_integrity_issues(
+            ["chunk-used", "tender-1"],
+            details,
+            tender_id="tender-1",
+            evidence_quote_count=2,
+        )
+        == []
+    )
+    issues = drafting_citation_integrity_issues(
+        ["chunk-used", "chunk-unused"],
+        details[:-1],
+        tender_id="tender-1",
+        evidence_quote_count=3,
+    )
+    assert "dangling_drafting_citations:chunk-unused" in issues
+    assert "unresolved_drafting_evidence:expected=3,resolved=2" in issues
+    assert "invalid_tender_seed_provenance:expected=1,resolved=0" in issues
 
 
 def test_single_document_prompts_preserve_specification_contract() -> None:
