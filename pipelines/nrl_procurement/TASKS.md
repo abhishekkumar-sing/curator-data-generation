@@ -3856,3 +3856,63 @@ Follow-up:
   limit, including reserved output tokens.
 - [ ] Decide how to guarantee useful validation/test representation while
   preserving connected-component leakage isolation.
+
+### Pilot 011 remediation research (2026-07-29)
+
+Status: official-source research completed before implementation.
+
+Questions:
+
+- How should the pipeline prevent judge requests from exceeding a served
+  model's real context limit?
+- How can small pilots retain leakage-safe connected groups while avoiding an
+  accidentally empty validation split?
+- Should a redundant drafting aggregate be trusted over block-local
+  attribution when the two disagree?
+
+Official-source findings:
+
+- vLLM defines `max_model_len` as the combined prompt and generated-output
+  context length. Its renderer validates the prompt against the model limit
+  after reserving requested output tokens:
+  https://docs.vllm.ai/en/stable/api/vllm/config/
+  https://docs.vllm.ai/en/stable/api/vllm/renderers/
+- scikit-learn's official group-splitting documentation confirms that split
+  proportions operate on whole groups rather than individual samples. Group
+  isolation therefore has priority over exact record-level proportions:
+  https://scikit-learn.org/stable/modules/generated/sklearn.model_selection.GroupShuffleSplit.html
+- PyPA specifies `[project.scripts]` as the standard mapping from an installed
+  command name to a callable object, relevant to the still-open unified CLI:
+  https://packaging.python.org/en/latest/specifications/pyproject-toml/
+
+Local evidence:
+
+- Pilot 011's rejected cross-judge request contained at least 6,145 input
+  tokens while reserving 2,048 output tokens against an 8,192-token endpoint.
+- Pilot 011 has eight populated leakage components containing
+  26, 16, 6, 3, 3, 3, 2, and 1 accepted records. The current independent hash
+  assignment happened to place 57 records in train, none in validation, and
+  three in test even though a materially better whole-component allocation
+  exists.
+- Drafting block attribution already validates every block-local fact against
+  the tender seed. The top-level `tender_facts_used` field is a redundant
+  model-produced aggregate; both Pilot 011 drafts failed solely because it did
+  not exactly reproduce the stable block union.
+
+Design decision:
+
+- Apply rendered-request budgeting to judge inputs using the selected judge
+  profile's context window and reserved completion budget. Quarantine
+  over-budget rows with an auditable reason before an API request.
+- Reduce the Gemma judge completion reservation to 1,024 tokens, which is
+  ample for the bounded decision schemas and leaves capacity for source
+  context. Keep a safety margin.
+- Derive top-level drafting evidence and tender-fact aggregates as stable
+  first-use unions of block-local attribution before deterministic validation
+  and export. Continue rejecting unknown or unsupported block-local support.
+- Replace independent component hashing with deterministic whole-component
+  allocation that minimizes deviation from configured record targets and,
+  when enough populated components exist, assigns at least one component to
+  every positive split.
+- Do not claim that Pilot 011 validates these changes; validation requiring
+  model calls remains a user-run Pilot 012 gate.
