@@ -894,6 +894,73 @@ Implementation result:
 - [ ] Validate regenerated drafting outputs and citation/detail completeness in
   the next bounded user-run pilot.
 
+### Atomic drafting block attribution research addendum (2026-07-29)
+
+Status: research complete; implementation pending.
+
+Research and local findings:
+
+- ALCE evaluates citation quality separately from correctness and includes
+  citation completeness/recall: answer content must be attributable, not merely
+  accompanied by a document-level citation:
+  https://github.com/princeton-nlp/ALCE and
+  https://aclanthology.org/2023.emnlp-main.398/
+- MultiAttr represents multi-source attribution with citations associated with
+  individual answer sentences and supports multiple citations per sentence:
+  https://aclanthology.org/2024.naacl-long.216/
+- Atomic claim generation is useful because complex sentences can mix
+  supported and unsupported content that a document-level decision masks:
+  https://aclanthology.org/2022.acl-long.175/
+- The current drafting schema has ordered text blocks but only document-level
+  evidence/fact lists. Pilot-009 demonstrates the masking failure: an unrelated
+  `shall` in one supporting quotation can hide a `may`→`shall` change in a
+  different block when all evidence is concatenated.
+- The reference project likewise has document-level citations/evidence and
+  offers no block-to-source binding to reuse.
+
+Decision:
+
+- Extend every `DraftingBlock` with exact, per-block
+  `manual_evidence_quotes`, `tender_facts_used`, and
+  `instruction_evidence_quotes`. Preserve the existing document-level lists as
+  backward-compatible aggregates and require exact equality with the stable
+  first-use union of block bindings.
+- Every block must cite at least one exact support item. Layout/headings may
+  cite an exact instruction substring; policy paragraphs must cite their
+  governing manual quotation; instance fields/contacts must cite complete
+  tender facts. A source type may be empty only when another type supports the
+  whole block.
+- Run number, email, authority, absence, and deontic-modality checks at block
+  scope against that block's bound support. Retain document-level checks as a
+  defense in depth.
+- Resolve citation details from the aggregated exact manual quotes and tender
+  facts after block validation. Do not expose instruction substrings as source
+  citations: they establish task/layout intent, not external factual
+  provenance.
+- Bump the drafting structured-output contract through its schema change so
+  Curator does not reuse incompatible parsed responses.
+
+Rejected alternatives and risks:
+
+- Lexical post-hoc matching cannot reliably map paraphrased legal text to the
+  correct quotation and can recreate the masking bug.
+- Sentence splitting after generation loses authored block structure and is
+  brittle for numbered clauses and labelled fields.
+- Removing the document-level lists would break existing audit consumers; keep
+  them as validated aggregates during migration.
+- Model-authored support bindings can still be wrong. Exact membership,
+  aggregate equality, deterministic semantic checks, independent judging, and
+  human pilot review remain required.
+
+Validation plan:
+
+- Add regressions for aggregate mismatch, unsupported blocks, wrong source
+  type, block-local modality drift, exact instruction support, stable first-use
+  aggregation, and preservation of the compact output contract.
+- Do not accept the capability until a user-run bounded pilot shows that both
+  drafting seeds produce complete block bindings without material quality
+  regression.
+
 ## Current baseline
 
 Implemented:
