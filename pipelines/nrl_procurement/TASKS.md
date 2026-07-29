@@ -3674,7 +3674,7 @@ Implementation result:
 
 ## Nemotron path-answer structured-output failures (2026-07-29)
 
-Status: researched; implementation pending.
+Status: researched and implemented on 2026-07-29.
 
 Problem:
 
@@ -3750,3 +3750,17 @@ Validation plan:
 - Confirm the private Nemotron deployment accepts forced tool calls in the next
   user-run pilot. If it rejects them, its serving flags must be aligned with
   NVIDIA's official launch command before production generation.
+
+Implementation result:
+
+- [x] Changed only the configurable Nemotron profile from prompt-parsed
+  `md_json` to schema-constrained `tools`.
+- [x] Kept the official Nemotron sampling values and context configuration.
+- [x] Left GLM and Gemma on their independently configured native
+  `json_schema` modes.
+- [x] Added configuration regression assertions preventing an accidental
+  return to prompt-only Nemotron JSON.
+- [x] Retained strict Pydantic and deterministic validation without malformed
+  JSON coercion.
+- [ ] Confirm forced-tool compatibility and path-answer yield in the next
+  user-run pilot.

@@ -24,7 +24,10 @@ model_profiles:
     served_model_env: NEMOTRON_MODEL
     base_url_env: NEMOTRON_BASE_URL
     api_key_env: NEMOTRON_API_KEY
-    structured_output_mode: md_json
+    # NVIDIA's official vLLM recipe serves Nemotron with qwen3_coder tool
+    # parsing; forced tools give schema-constrained arguments instead of
+    # relying on post-generation Markdown JSON repair.
+    structured_output_mode: tools
     # Operational limit of the private deployment; independently configurable
     # from the model's advertised maximum and source-window construction size.
     context_window: 131072

@@ -563,6 +563,19 @@ def test_model_context_window_is_explicit_and_profile_local() -> None:
     source_windows = generation_pipeline.CONFIG["source_windows"]
 
     assert configured_context_window(nemotron) == 131072
+    assert nemotron["structured_output_mode"] == "tools"
+    assert (
+        generation_pipeline.CONFIG["model_profiles"]["glm"][
+            "structured_output_mode"
+        ]
+        == "json_schema"
+    )
+    assert (
+        generation_pipeline.CONFIG["model_profiles"]["gemma"][
+            "structured_output_mode"
+        ]
+        == "json_schema"
+    )
     assert source_windows["max_input_tokens"] == 8192
     for invalid in ({}, {"context_window": 0}, {"context_window": True}):
         try:
