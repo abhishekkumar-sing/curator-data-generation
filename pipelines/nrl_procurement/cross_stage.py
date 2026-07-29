@@ -9,7 +9,7 @@ import json
 from typing import Any
 
 from cross_document import evidence_location
-from schemas import CrossCandidateBatch, CrossJudgeBatch
+from schemas import CrossCandidateBatch, CrossJudgeBatch, CrossJudgedCandidate
 from settings import CONFIG
 from validation import (
     judge_quotes_are_grounded,
@@ -215,9 +215,24 @@ class CrossDocumentJudge(curator.LLM):
     """Judge support and test necessity by removing each required source."""
 
     response_format = CrossJudgeBatch
+    singular_response = False
 
     def prompt(self, row: dict) -> str:
         """Request full-context and counterfactual source-ablation judgments."""
+        if getattr(self, "singular_response", False):
+            output_contract = (
+                "Return one CrossJudgedCandidate object under the enforced "
+                "response schema and preserve its record_id exactly."
+            )
+            review_payload: Any = row["judge_items"][0]["review"]
+        else:
+            output_contract = (
+                "Return CrossJudgeBatch.judgments under the enforced schema. "
+                "Preserve each record_id exactly and return it once. "
+                "unsupported_without_source_ids may contain only source_a and/or "
+                "source_b, with no duplicates."
+            )
+            review_payload = [item["review"] for item in row["judge_items"]]
         return f"""TASK
 Evaluate every supplied cross-document record and return exactly one judgment per
 record_id. Do not rewrite records.
@@ -276,12 +291,10 @@ EVALUATION CONTRACT
 - Record concrete failures in issues; use an empty list only when no issue exists.
 
 OUTPUT CONTRACT
-Return CrossJudgeBatch.judgments under the enforced schema. Preserve each record_id
-exactly and return it once. unsupported_without_source_ids may contain only source_a
-and/or source_b, with no duplicates.
+{output_contract}
 
 ---BEGIN UNTRUSTED REVIEW BATCH---
-{json.dumps([item["review"] for item in row["judge_items"]], ensure_ascii=False)}
+{json.dumps(review_payload, ensure_ascii=False)}
 ---END UNTRUSTED REVIEW BATCH---
 
 FINAL CHECK
@@ -290,8 +303,14 @@ source_a and source_b ablations, connected synthesis, correct authority/relation
 and consistency among booleans, ablation list, score, and issues.
 """
 
-    def parse(self, row: dict, response: CrossJudgeBatch) -> list[dict]:
+    def parse(
+        self,
+        row: dict,
+        response: CrossJudgeBatch | CrossJudgedCandidate,
+    ) -> list[dict]:
         """Accept only records that require every declared source."""
+        if isinstance(response, CrossJudgedCandidate):
+            response = CrossJudgeBatch(judgments=[response])
         quarantined = quarantine_invalid_judge_batch(
             row["judge_items"],
             [judgment.record_id for judgment in response.judgments],
@@ -343,6 +362,13 @@ and consistency among booleans, ablation list, score, and issues.
             }
             results.append(record)
         return results
+
+
+class SingularCrossDocumentJudge(CrossDocumentJudge):
+    """Judge exactly one cross-document record as a direct object."""
+
+    response_format = CrossJudgedCandidate
+    singular_response = True
 
 
 def cross_judge_rows(records: list[dict[str, Any]], batch_size: int) -> list[dict[str, Any]]:

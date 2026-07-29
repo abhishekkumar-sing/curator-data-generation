@@ -3355,7 +3355,7 @@ Implementation status:
 
 ### Pilot-009 singular judge response research (2026-07-29)
 
-Status: research complete; implementation pending.
+Status: implemented and locally verified; user-run pilot validation pending.
 
 Observed behavior:
 
@@ -3404,6 +3404,23 @@ Risks and validation:
 - Unit-test direct schema shape, singular parser wrapping, wrong-ID
   quarantine, and fail-fast rejection of batch sizes other than one. Validate
   yield only in a user-run pilot.
+
+Implementation result:
+
+- [x] Added direct-object single-document and cross-document judge classes
+  using the existing `JudgedCandidate` and `CrossJudgedCandidate` schemas.
+- [x] Singular prompts now contain one review object and explicitly request one
+  preserved record ID without a `judgments` array.
+- [x] Singular responses are wrapped internally and reuse the existing exact
+  ID/cardinality parser, witness grounding, rubric, and quarantine behavior.
+- [x] Orchestration uses singular judges and fails closed unless
+  `quality.judge_batch_size` is exactly one.
+- [x] Kept batch judge classes and duplicate/missing/unexpected-ID regressions
+  for future deliberately enabled batch support.
+- [x] Passed 52 focused procurement tests, Ruff, and compilation, including
+  direct-schema and wrong-ID singular-response regressions.
+- [ ] Confirm duplicate-cardinality quarantine drops and judge yield improves
+  in the next bounded user-run pilot.
 
 Research basis:
 

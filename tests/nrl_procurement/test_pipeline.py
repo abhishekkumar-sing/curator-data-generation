@@ -17,7 +17,11 @@ from corpus import (  # noqa: E402
     representative_rows,
 )
 from cross_document import build_bundles  # noqa: E402
-from cross_stage import CrossDocumentGenerator, CrossDocumentJudge  # noqa: E402
+from cross_stage import (  # noqa: E402
+    CrossDocumentGenerator,
+    CrossDocumentJudge,
+    SingularCrossDocumentJudge,
+)
 from drafting import (  # noqa: E402
     TenderDraftingGenerator,
     TenderDraftingJudge,
@@ -32,6 +36,8 @@ from export import assert_unique_record_ids, assign_splits, export_records  # no
 from generate import (  # noqa: E402
     ProcurementGenerator,
     ProcurementJudge,
+    SingularProcurementJudge,
+    _singular_judge_batch_size,
     plan_cross_document_requests,
     plan_single_document_requests,
     request_coverage,
@@ -63,9 +69,11 @@ from schemas import (  # noqa: E402
     CandidateBatch,
     CrossCandidateBatch,
     CrossJudgeBatch,
+    CrossJudgedCandidate,
     DraftingBlock,
     DraftingResult,
     JudgeBatch,
+    JudgedCandidate,
     PropositionBatch,
 )
 from source_windows import (  # noqa: E402
@@ -109,6 +117,75 @@ def test_judge_batch_identity_reports_duplicate_missing_and_unexpected_ids() -> 
     assert "missing_judge_record_ids:record-b" in issues
     assert "unexpected_judge_record_ids:record-c" in issues
     assert "judge_cardinality_mismatch:expected=2,returned=3" in issues
+
+
+def test_singular_judge_contracts_are_direct_objects_and_batch_size_fails_closed() -> None:
+    assert (
+        "judgments"
+        not in SingularProcurementJudge.response_format.model_json_schema()[
+            "properties"
+        ]
+    )
+    assert (
+        "judgments"
+        not in SingularCrossDocumentJudge.response_format.model_json_schema()[
+            "properties"
+        ]
+    )
+    assert _singular_judge_batch_size() == 1
+    original = generation_pipeline.QUALITY["judge_batch_size"]
+    generation_pipeline.QUALITY["judge_batch_size"] = 2
+    try:
+        try:
+            _singular_judge_batch_size()
+        except SystemExit as exc:
+            assert "must be 1" in str(exc)
+        else:
+            raise AssertionError("unsupported judge batching must fail closed")
+    finally:
+        generation_pipeline.QUALITY["judge_batch_size"] = original
+
+
+def test_singular_judge_wrong_id_reuses_fail_closed_quarantine() -> None:
+    row = {
+        "judge_items": [
+            {
+                "record_id": "expected-id",
+                "record": {"record_id": "expected-id"},
+            }
+        ]
+    }
+    response = JudgedCandidate.model_validate(
+        {
+            "record_id": "wrong-id",
+            "decision": _judge_decision(),
+        }
+    )
+    judged = SingularProcurementJudge.parse(
+        SimpleNamespace(model_name="judge-model"),
+        row,
+        response,
+    )
+    assert judged[0]["judge"]["accepted"] is False
+    assert "missing_judge_record_ids:expected-id" in judged[0]["judge"]["issues"]
+
+    cross_response = CrossJudgedCandidate.model_validate(
+        {
+            "record_id": "wrong-id",
+            "decision": _judge_decision(
+                full_context_supported=True,
+                unsupported_without_source_ids=["source_a", "source_b"],
+                connected_reasoning=True,
+                relationship_correct=True,
+            ),
+        }
+    )
+    cross_judged = SingularCrossDocumentJudge.parse(
+        SimpleNamespace(model_name="judge-model"),
+        row,
+        cross_response,
+    )
+    assert cross_judged[0]["judge"]["accepted"] is False
 
 
 def test_cross_judge_quarantines_entire_batch_when_model_duplicates_an_id() -> None:

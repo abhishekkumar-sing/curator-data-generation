@@ -18,7 +18,11 @@ from datasets import Dataset
 from settings import CONFIG, PROJECT_ROOT, require_private_endpoint, require_setting
 from corpus import corpus_quality_report, load_corpus, representative_rows
 from cross_document import build_bundles
-from cross_stage import CrossDocumentGenerator, CrossDocumentJudge, cross_judge_rows
+from cross_stage import (
+    CrossDocumentGenerator,
+    SingularCrossDocumentJudge,
+    cross_judge_rows,
+)
 from drafting import (
     TenderDraftingGenerator,
     TenderDraftingJudge,
@@ -47,7 +51,7 @@ from path_qa import (
 )
 from prompt_budget import configured_context_window, measure_rendered_request
 from schemas import AblationTrialDraft, PathAnswerDraft, PathQuestionBatch
-from schemas import CandidateBatch, JudgeBatch
+from schemas import CandidateBatch, JudgeBatch, JudgedCandidate
 from validation import (
     deduplicate,
     judge_quotes_are_grounded,
@@ -416,9 +420,24 @@ class ProcurementJudge(curator.LLM):
     """Apply a separate rubric after deterministic validation."""
 
     response_format = JudgeBatch
+    singular_response = False
 
     def prompt(self, row: dict) -> str:
         """Render the deterministic-survivor quality review batch."""
+        if getattr(self, "singular_response", False):
+            output_contract = (
+                "Return one JudgedCandidate object under the enforced response "
+                "schema and preserve its record_id exactly."
+            )
+            review_payload: Any = row["judge_items"][0]["review"]
+        else:
+            output_contract = (
+                "Return JudgeBatch.judgments under the enforced response schema. "
+                "Return exactly one JudgedCandidate per input record_id, preserve "
+                "each record_id exactly, and do not add, omit, merge, or duplicate "
+                "records."
+            )
+            review_payload = [item["review"] for item in row["judge_items"]]
         return f"""TASK
 Evaluate every supplied procurement training record against its included source
 passage and return exactly one judgment for each record_id. Do not rewrite records.
@@ -465,12 +484,10 @@ EVALUATION CONTRACT
   only when no issue is found.
 
 OUTPUT CONTRACT
-Return JudgeBatch.judgments under the enforced response schema. Return exactly one
-JudgedCandidate per input record_id, preserve each record_id exactly, and do not add,
-omit, merge, or duplicate records.
+{output_contract}
 
 ---BEGIN UNTRUSTED REVIEW BATCH---
-{json.dumps([item["review"] for item in row["judge_items"]], ensure_ascii=False)}
+{json.dumps(review_payload, ensure_ascii=False)}
 ---END UNTRUSTED REVIEW BATCH---
 
 FINAL CHECK
@@ -478,8 +495,14 @@ Confirm one-to-one record_id coverage, internal consistency between booleans, sc
 and issues, and rejection of every unsupported claim or lost qualification.
 """
 
-    def parse(self, row: dict, response: JudgeBatch) -> list[dict]:
+    def parse(
+        self,
+        row: dict,
+        response: JudgeBatch | JudgedCandidate,
+    ) -> list[dict]:
         """Attach judge decisions and enforce the configured threshold."""
+        if isinstance(response, JudgedCandidate):
+            response = JudgeBatch(judgments=[response])
         quarantined = quarantine_invalid_judge_batch(
             row["judge_items"],
             [judgment.record_id for judgment in response.judgments],
@@ -532,6 +555,13 @@ and issues, and rejection of every unsupported claim or lost qualification.
         return results
 
 
+class SingularProcurementJudge(ProcurementJudge):
+    """Judge exactly one record with a direct-object response contract."""
+
+    response_format = JudgedCandidate
+    singular_response = True
+
+
 def _judge_rows(records: list[dict[str, Any]], batch_size: int) -> Dataset:
     rows = []
     for start in range(0, len(records), batch_size):
@@ -555,6 +585,17 @@ def _judge_rows(records: list[dict[str, Any]], batch_size: int) -> Dataset:
             items.append({"record_id": record["record_id"], "record": record, "review": compact})
         rows.append({"judge_items": items})
     return Dataset.from_list(rows)
+
+
+def _singular_judge_batch_size() -> int:
+    """Require the researched one-record judge transport contract."""
+    batch_size = int(QUALITY.get("judge_batch_size", 1))
+    if batch_size != 1:
+        raise SystemExit(
+            "quality.judge_batch_size must be 1 for the singular judge "
+            "response contract"
+        )
+    return batch_size
 
 
 def _assert_independent_judge() -> None:
@@ -1018,8 +1059,9 @@ def main() -> None:
     else:
         judge_profile = JUDGE
         os.environ["HOSTED_VLLM_API_KEY"] = _model_settings(judge_profile)[2]
-        judged = ProcurementJudge(**_llm_kwargs(judge_profile))(
-            _judge_rows(generated, int(QUALITY.get("judge_batch_size", 8))),
+        judge_batch_size = _singular_judge_batch_size()
+        judged = SingularProcurementJudge(**_llm_kwargs(judge_profile))(
+            _judge_rows(generated, judge_batch_size),
             working_dir=_working_dir(run_id, "judge"),
         ).dataset.to_list()
         accepted = [row for row in judged if row["judge"]["accepted"]]
@@ -1068,8 +1110,13 @@ def main() -> None:
             elif cross_generated:
                 judge_profile = JUDGE
                 os.environ["HOSTED_VLLM_API_KEY"] = _model_settings(judge_profile)[2]
-                cross_judged = CrossDocumentJudge(**_llm_kwargs(judge_profile))(
-                    Dataset.from_list(cross_judge_rows(cross_generated, int(QUALITY.get("judge_batch_size", 8)))),
+                judge_batch_size = _singular_judge_batch_size()
+                cross_judged = SingularCrossDocumentJudge(
+                    **_llm_kwargs(judge_profile)
+                )(
+                    Dataset.from_list(
+                        cross_judge_rows(cross_generated, judge_batch_size)
+                    ),
                     working_dir=_working_dir(run_id, "cross_judge"),
                 ).dataset.to_list()
                 cross_accepted = [row for row in cross_judged if row["judge"]["accepted"]]
