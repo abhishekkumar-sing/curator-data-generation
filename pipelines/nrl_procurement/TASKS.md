@@ -1579,7 +1579,7 @@ Implementation result:
 
 ##### Pilot-009 model-context budgeting correction (2026-07-29)
 
-Status: research complete; implementation pending.
+Status: implemented and locally verified; next user-run pilot pending.
 
 Observed behavior and root cause:
 
@@ -1641,6 +1641,23 @@ Validation plan:
 - Re-evaluate the 12 saved pilot-009 path prompts locally and confirm they pass
   under 131,072 while preserving the same token estimates and reserves.
 - The user performs the next model-backed pilot; Codex does not run it.
+
+Implementation result:
+
+- [x] Added the private Nemotron deployment's confirmed
+  `context_window: 131072` to its model profile.
+- [x] Added fail-closed model-context resolution and removed all three
+  path-question/path-answer/ablation fallbacks to the unrelated
+  `source_windows.max_input_tokens`.
+- [x] Preserved the 8,192-token source-window bound and Gemma judge context as
+  separate profile/configuration values.
+- [x] Confirmed locally that all 12 saved pilot-009 path-question requests pass
+  with the corrected 131,072-token deployment limit without changing their
+  estimated prompt size, completion reserve, or safety margin.
+- [x] Passed 47 focused procurement tests, Ruff, and YAML configuration
+  validation.
+- [ ] Validate path-question, answer, and ablation yields in the next bounded
+  user-run pilot.
 
 Acceptance criteria:
 

@@ -45,7 +45,7 @@ from path_qa import (
     build_missing_hop_contrasts,
     false_premise_quarantine,
 )
-from prompt_budget import measure_rendered_request
+from prompt_budget import configured_context_window, measure_rendered_request
 from schemas import AblationTrialDraft, PathAnswerDraft, PathQuestionBatch
 from schemas import CandidateBatch, JudgeBatch
 from validation import (
@@ -802,12 +802,7 @@ def main() -> None:
             budget = measure_rendered_request(
                 [{"role": "user", "content": question_generator.prompt(row)}],
                 PathQuestionBatch.model_json_schema(),
-                context_window=int(
-                    GENERATION.get(
-                        "context_window",
-                        source_window_config.get("max_input_tokens", 8192),
-                    )
-                ),
+                context_window=configured_context_window(GENERATION),
                 reserved_completion_tokens=int(generation_params.get("max_tokens", 4096)),
                 safety_margin_tokens=int(source_window_config.get("safety_margin_tokens", 256)),
                 conservative_chars_per_token=float(
@@ -863,12 +858,7 @@ def main() -> None:
             budget = measure_rendered_request(
                 [{"role": "user", "content": answer_generator.prompt(row)}],
                 PathAnswerDraft.model_json_schema(),
-                context_window=int(
-                    GENERATION.get(
-                        "context_window",
-                        source_window_config.get("max_input_tokens", 8192),
-                    )
-                ),
+                context_window=configured_context_window(GENERATION),
                 reserved_completion_tokens=int(generation_params.get("max_tokens", 4096)),
                 safety_margin_tokens=int(source_window_config.get("safety_margin_tokens", 256)),
                 conservative_chars_per_token=float(
@@ -915,12 +905,7 @@ def main() -> None:
             budget = measure_rendered_request(
                 [{"role": "user", "content": ablation_generator.prompt(row)}],
                 AblationTrialDraft.model_json_schema(),
-                context_window=int(
-                    GENERATION.get(
-                        "context_window",
-                        source_window_config.get("max_input_tokens", 8192),
-                    )
-                ),
+                context_window=configured_context_window(GENERATION),
                 reserved_completion_tokens=int(generation_params.get("max_tokens", 4096)),
                 safety_margin_tokens=int(source_window_config.get("safety_margin_tokens", 256)),
                 conservative_chars_per_token=float(

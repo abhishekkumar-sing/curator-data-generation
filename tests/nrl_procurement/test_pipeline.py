@@ -44,7 +44,10 @@ from path_qa import (  # noqa: E402
     false_premise_quarantine,
     question_validation_issues,
 )
-from prompt_budget import measure_rendered_request  # noqa: E402
+from prompt_budget import (  # noqa: E402
+    configured_context_window,
+    measure_rendered_request,
+)
 from propositions import (  # noqa: E402
     PropositionExtractor,
     materialize_empty_extraction,
@@ -474,6 +477,21 @@ def test_prompt_budget_fallback_is_labeled_and_exact_mode_fails() -> None:
         assert "local tokenizer" in str(exc)
     else:
         raise AssertionError("exact prompt counting must fail without tokenizer")
+
+
+def test_model_context_window_is_explicit_and_profile_local() -> None:
+    nemotron = generation_pipeline.CONFIG["model_profiles"]["nemotron"]
+    source_windows = generation_pipeline.CONFIG["source_windows"]
+
+    assert configured_context_window(nemotron) == 131072
+    assert source_windows["max_input_tokens"] == 8192
+    for invalid in ({}, {"context_window": 0}, {"context_window": True}):
+        try:
+            configured_context_window(invalid)
+        except ValueError as exc:
+            assert "positive context_window" in str(exc)
+        else:
+            raise AssertionError("missing or invalid model context must fail closed")
 
 
 def test_validation_rejects_unsupported_number() -> None:

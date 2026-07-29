@@ -7,6 +7,22 @@ import json
 from typing import Any
 
 
+def configured_context_window(model_profile: dict[str, Any]) -> int:
+    """Return an explicit positive serving-context limit for one model profile."""
+    value = model_profile.get("context_window")
+    if isinstance(value, bool):
+        raise ValueError("Selected model profile must define a positive context_window")
+    try:
+        context_window = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "Selected model profile must define a positive context_window"
+        ) from exc
+    if context_window <= 0:
+        raise ValueError("Selected model profile must define a positive context_window")
+    return context_window
+
+
 def measure_rendered_request(
     messages: list[dict[str, str]],
     response_schema: dict[str, Any],
