@@ -4,6 +4,9 @@ import asyncio
 import json
 from types import SimpleNamespace
 
+from pydantic import BaseModel
+
+from bespokelabs.curator.llm.prompt_formatter import PromptFormatter
 from bespokelabs.curator.request_processor.base_request_processor import (
     BaseRequestProcessor,
 )
@@ -233,6 +236,85 @@ def test_filtered_parse_response_is_still_persisted(monkeypatch) -> None:
     persisted = json.loads(writes[0])
     assert persisted["response_message"] == {"answer": "provider output"}
     assert persisted["parsed_response_message"] is None
+    assert status.num_parsed_responses == 0
+
+
+def test_structured_terminal_failure_is_persisted_without_parsing(
+    monkeypatch,
+) -> None:
+    """A failed request with no payload must not enter Pydantic or parse()."""
+
+    class _StructuredResponse(BaseModel):
+        answer: str
+
+    parse_calls = []
+
+    def parse_response(row, response):
+        parse_calls.append((row, response))
+        return [{"answer": response.answer}]
+
+    formatter = PromptFormatter(
+        model_name="test-model",
+        prompt_func=lambda row: "test",
+        parse_func=parse_response,
+        response_format=_StructuredResponse,
+    )
+    request = _request(attempts_left=0)
+    response = GenericResponse(
+        response_message=None,
+        response_errors=["structured output validation failed"],
+        raw_response=None,
+        raw_request={"model": "test-model"},
+        generic_request=request.generic_request,
+        created_at=request.created_at,
+        finished_at=request.created_at,
+    )
+
+    async def stream_response(*args, **kwargs) -> None:
+        pass
+
+    processor = SimpleNamespace(
+        prompt_formatter=formatter,
+        viewer_client=SimpleNamespace(stream_response=stream_response),
+    )
+    processor._process_response = lambda data: BaseRequestProcessor._process_response(
+        processor,
+        data,
+    )
+    status = SimpleNamespace(num_parsed_responses=0)
+    writes = []
+
+    class _AsyncFile:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        async def write(self, value):
+            writes.append(value)
+
+    monkeypatch.setattr(
+        "bespokelabs.curator.request_processor.online.base_online_request_processor.aiofiles.open",
+        lambda *args, **kwargs: _AsyncFile(),
+    )
+
+    asyncio.run(
+        BaseOnlineRequestProcessor.append_generic_response(
+            processor,
+            status,
+            response,
+            "responses_0.jsonl",
+        )
+    )
+
+    persisted = json.loads(writes[0])
+    assert persisted["response_message"] is None
+    assert persisted["parsed_response_message"] is None
+    assert persisted["response_errors"] == [
+        "structured output validation failed"
+    ]
+    assert parse_calls == []
     assert status.num_parsed_responses == 0
 
 

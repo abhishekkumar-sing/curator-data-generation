@@ -405,6 +405,12 @@ class BaseRequestProcessor(ABC):
                 )
 
     def _process_response(self, data: GenericResponse) -> List | None:
+        # Terminal provider/model failures intentionally carry no response
+        # payload. Persist them for audit and retry bookkeeping, but never pass
+        # None into a structured Pydantic response model or application parser.
+        if data.response_errors is not None or data.response_message is None:
+            return
+
         try:
             data.response_message = self.prompt_formatter.response_to_response_format(data.response_message)
         except (json.JSONDecodeError, ValidationError):

@@ -3606,7 +3606,7 @@ Implementation result:
 
 ## Curator structured failure persistence (2026-07-29)
 
-Status: researched; implementation pending.
+Status: researched and implemented on 2026-07-29.
 
 Problem:
 
@@ -3659,3 +3659,15 @@ Validation plan:
 - Verify the application parser is not called for the failed response.
 - Retain existing retry, successful persistence, and all-filtered dataset tests.
 - Run focused unit tests, Ruff, and compilation without model calls.
+
+Implementation result:
+
+- [x] Short-circuited common response parsing for terminal responses carrying
+  `response_errors` or a null `response_message`.
+- [x] Preserved the full failed `GenericResponse` in the responses JSONL with
+  request identity and error details.
+- [x] Prevented both Pydantic structured parsing and application `parse()` from
+  receiving a failed response.
+- [x] Left PR 734's work-conserving retry scheduling unchanged.
+- [x] Added a regression test using a real Pydantic response format and parser.
+- [ ] Confirm partial-success finalization in the next user-run pilot.
