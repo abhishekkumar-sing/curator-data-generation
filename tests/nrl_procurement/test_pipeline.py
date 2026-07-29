@@ -1212,10 +1212,124 @@ def test_quantity_validation_does_not_swallow_following_prose() -> None:
         "answer": "The 2025 Manual applies.",
         "answerable": True,
         "evidence": [{"quote": "The 2025 edition applies."}],
+        "claims": [
+            {
+                "statement": "The 2025 Manual applies.",
+                "evidence": [{"quote": "The 2025 edition applies."}],
+            }
+        ],
         "reasoning_steps": [],
     }
 
     assert validate_record(record, "The 2025 edition applies.") == []
+
+
+def test_validation_rejects_truncated_answers_but_allows_concise_facts() -> None:
+    support = "Bid security is five percent of the estimated value."
+    base = {
+        "task_type": "qa",
+        "question": "What is the bid-security threshold?",
+        "answer": "Five percent.",
+        "answerable": True,
+        "claims": [
+            {
+                "statement": "The threshold is five percent.",
+                "evidence": [{"quote": support}],
+            }
+        ],
+        "evidence": [{"quote": support}],
+        "reasoning_steps": [],
+    }
+    assert validate_record(base, support) == []
+
+    truncated = {**base, "answer": "The bid-security threshold is"}
+    assert "incomplete_answer_dangling_word" in validate_record(truncated, support)
+
+    punctuation_fragment = {**base, "answer": "The following threshold:"}
+    assert "incomplete_answer_terminal_fragment" in validate_record(
+        punctuation_fragment,
+        support,
+    )
+
+
+def test_validation_requires_atomic_claim_evidence_without_cross_claim_leakage() -> None:
+    permissive = "NRL may cancel the order."
+    mandatory = "The supplier shall replace rejected goods."
+    record = {
+        "task_type": "qa",
+        "question": "What remedies apply?",
+        "answer": (
+            "NRL may cancel the order, and the supplier shall replace rejected "
+            "goods."
+        ),
+        "answerable": True,
+        "claims": [
+            {
+                "statement": "NRL shall cancel the order.",
+                "evidence": [{"quote": permissive}],
+            },
+            {
+                "statement": "The supplier shall replace rejected goods.",
+                "evidence": [{"quote": mandatory}],
+            },
+        ],
+        "evidence": [{"quote": permissive}, {"quote": mandatory}],
+        "reasoning_steps": [],
+    }
+    issues = validate_record(record, f"{permissive}\n{mandatory}")
+    assert "claim_strengthened_modality:permission_to_obligation" in issues
+
+    record["claims"][0]["statement"] = "NRL may cancel the order."
+    record["evidence"].append({"quote": "An unused supporting quotation."})
+    issues = validate_record(
+        record,
+        f"{permissive}\n{mandatory}\nAn unused supporting quotation.",
+    )
+    assert "claim_evidence_mismatch" in issues
+
+
+def test_cross_validation_checks_each_claim_against_its_own_evidence() -> None:
+    documents = [
+        {"source_id": "source_a", "passage": "The buyer may cancel the bid."},
+        {
+            "source_id": "source_b",
+            "passage": "The supplier shall replace rejected goods.",
+        },
+    ]
+    record = {
+        "task_type": "cross_document_qa",
+        "question": "What remedies do the two sources provide?",
+        "answer": (
+            "The buyer may cancel the bid, and the supplier shall replace "
+            "rejected goods."
+        ),
+        "answerable": True,
+        "claims": [
+            {
+                "statement": "The buyer shall cancel the bid.",
+                "evidence": [
+                    {
+                        "source_id": "source_a",
+                        "quote": "The buyer may cancel the bid.",
+                    }
+                ],
+            },
+            {
+                "statement": "The supplier shall replace rejected goods.",
+                "evidence": [
+                    {
+                        "source_id": "source_b",
+                        "quote": "The supplier shall replace rejected goods.",
+                    }
+                ],
+            },
+        ],
+        "reasoning_steps": [],
+    }
+    assert (
+        "claim_strengthened_modality:permission_to_obligation"
+        in validate_cross_record(record, documents)
+    )
 
 
 def test_validation_rejects_dangling_evidence_without_requiring_punctuation() -> None:

@@ -296,8 +296,10 @@ CONSTRAINTS
 - Allowed question_type values are direct_fact, definition, procedure, sequence,
   threshold, exception, negative_rule, role_responsibility, comparison,
   compliance_check, drafting_knowledge, and currentness.
-- For an answerable record, set answerable=true and support every material answer
-  claim with one or more evidence quotes copied verbatim from the passage.
+- For an answerable record, set answerable=true and break the answer into material
+  claims. Every claim must contain one or more evidence quotes copied verbatim from
+  the passage. The top-level evidence list must contain exactly the union of the
+  claim evidence, with no unused or missing quote.
 - For planned task_type=qa, use a direct answer and return reasoning_steps=[].
 - For planned task_type=qa_cot, answer only when it genuinely requires two to four
   evidence-linked operations for a scenario, temporal rule, condition, exception,
@@ -318,9 +320,10 @@ CONSTRAINTS
 OUTPUT CONTRACT
 Return CandidateBatch.examples under the enforced response schema. Every example
 must contain task_type, task, persona, question_type, question, answer, answerable,
-evidence, and reasoning_steps. Evidence entries contain a verbatim quote. Rationale
-steps contain a concise statement and the verbatim evidence_quotes supporting that
-statement.
+claims, evidence, and reasoning_steps. Each claim contains one material statement
+and its exact evidence. Top-level evidence repeats the exact union of claim evidence
+for backward-compatible export. Rationale steps contain a concise statement and the
+verbatim evidence_quotes supporting that statement.
 
 UNTRUSTED SOURCE METADATA
 manual_id: {row["manual_id"]}
@@ -347,6 +350,16 @@ rationale shape, and every unanswerable record uses the required exact answer.
         records = []
         for candidate in response.examples:
             draft = candidate.model_dump()
+            claim_quotes = []
+            for claim in draft["claims"]:
+                claim_quotes.extend(item["quote"] for item in claim["evidence"])
+            # Evidence remains a stable top-level output field, but provenance is
+            # derived from atomic bindings rather than trusting a separate list.
+            declared_quotes = [item["quote"] for item in draft["evidence"]]
+            if sorted(set(claim_quotes)) == sorted(set(declared_quotes)):
+                draft["evidence"] = [
+                    {"quote": quote} for quote in dict.fromkeys(claim_quotes)
+                ]
             reasons = []
             if draft["task_type"] != row["planned_task_type"]:
                 reasons.append(f"planned_task_type_mismatch:{row['planned_task_type']}")
@@ -370,6 +383,19 @@ rationale shape, and every unanswerable record uses the required exact answer.
                         "end_char": start + len(quote),
                     }
                 )
+            located_by_quote = {item["quote"]: item for item in evidence}
+            draft["claims"] = [
+                {
+                    "claim_id": f"claim-{index}",
+                    "statement": claim["statement"],
+                    "evidence": [
+                        located_by_quote[item["quote"]]
+                        for item in claim["evidence"]
+                        if item["quote"] in located_by_quote
+                    ],
+                }
+                for index, claim in enumerate(draft["claims"], 1)
+            ]
             identity = json.dumps(
                 [row["chunk_id"], draft["task_type"], draft["question"]],
                 ensure_ascii=False,
@@ -576,6 +602,7 @@ def _judge_rows(records: list[dict[str, Any]], batch_size: int) -> Dataset:
                 "task": record["task"],
                 "persona": record["persona"],
                 "reasoning_steps": record["reasoning_steps"],
+                "claims": record.get("claims", []),
                 "issuer": record["issuing_organization"],
                 "policy_scope": record["policy_scope"],
                 "as_of_date": record["as_of_date"],

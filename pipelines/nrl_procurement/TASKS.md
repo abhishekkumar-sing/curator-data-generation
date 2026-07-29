@@ -3446,7 +3446,7 @@ Pilot evidence:
 
 ## QA answer completeness and atomic attribution research (2026-07-29)
 
-Status: researched; implementation pending.
+Status: researched and implemented on 2026-07-29.
 
 Problem:
 
@@ -3508,3 +3508,24 @@ Validation plan:
 - Run focused procurement tests, Ruff, and compilation locally without calling
   any configured model endpoint.
 - Confirm yield and answer quality in the next user-run bounded pilot.
+
+Implementation result:
+
+- [x] Added ordinary-QA material claims with exact claim-level evidence while
+  retaining the existing top-level evidence field.
+- [x] Derived persisted claim evidence, flat evidence, and citations from the
+  same validated quote bindings, including stable claim IDs and source
+  locations.
+- [x] Required answerable QA records to contain material claims and rejected
+  unused or missing flat evidence through bidirectional claim/evidence matching.
+- [x] Added per-claim exact-location, numeric, modality, and unsupported-absence
+  validation for both ordinary and cross-document QA.
+- [x] Added conservative truncation checks for dangling function/auxiliary
+  words, terminal fragment punctuation or ellipses, empty answers, and
+  unbalanced brackets while preserving concise direct answers.
+- [x] Included atomic claims in the independent judge payload so holistic
+  completeness review sees the same attribution structure.
+- [x] Passed 55 focused procurement tests, Ruff, and compilation without
+  invoking a configured model endpoint.
+- [ ] Confirm accepted yield, fragment rejection, claim/citation completeness,
+  and judge behavior in the next bounded user-run pilot.

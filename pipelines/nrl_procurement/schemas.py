@@ -107,6 +107,13 @@ class EvidenceDraft(BaseModel):
     quote: str = Field(min_length=8)
 
 
+class AnswerClaimDraft(BaseModel):
+    """One material answer claim and its exact supporting source spans."""
+
+    statement: str = Field(min_length=8)
+    evidence: list[EvidenceDraft] = Field(min_length=1)
+
+
 class ReasoningStepDraft(BaseModel):
     statement: str = Field(min_length=8)
     evidence_quotes: list[str] = Field(default_factory=list)
@@ -120,6 +127,7 @@ class Candidate(BaseModel):
     question: str = Field(min_length=12)
     answer: str = Field(min_length=1)
     answerable: bool = True
+    claims: list[AnswerClaimDraft] = Field(default_factory=list)
     evidence: list[EvidenceDraft] = Field(default_factory=list)
     reasoning_steps: list[ReasoningStepDraft] = Field(default_factory=list)
 

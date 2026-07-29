@@ -126,6 +126,13 @@ DANGLING_FINAL_WORD = re.compile(
     r"\b(?:a|an|and|at|but|by|for|from|if|in|of|on|or|over|than|that|the|" r"to|under|when|which|while|whose|with)\s*$",
     re.IGNORECASE,
 )
+ANSWER_DANGLING_FINAL_WORD = re.compile(
+    r"\b(?:a|an|and|are|at|but|by|for|from|has|have|if|in|is|of|on|or|over|"
+    r"than|that|the|to|under|was|were|when|which|while|whose|with)\s*$",
+    re.IGNORECASE,
+)
+TRUNCATED_TERMINAL = re.compile(r"(?:[,;:]|\.{3}|…)\s*$")
+BRACKET_PAIRS = (("(", ")"), ("[", "]"), ("{", "}"))
 
 
 def _canonical_unit(unit: str) -> str:
@@ -162,6 +169,21 @@ def _is_incomplete_evidence_fragment(quote: str) -> bool:
     """Detect only high-confidence dangling prose without rejecting headings."""
     text = quote.strip()
     return bool(text and DANGLING_FINAL_WORD.search(text))
+
+
+def answer_completeness_issues(answer: str) -> list[str]:
+    """Detect high-confidence surface evidence that an answer was truncated."""
+    text = str(answer or "").strip()
+    if not text:
+        return ["empty_answer"]
+    issues: list[str] = []
+    if ANSWER_DANGLING_FINAL_WORD.search(text):
+        issues.append("incomplete_answer_dangling_word")
+    if TRUNCATED_TERMINAL.search(text):
+        issues.append("incomplete_answer_terminal_fragment")
+    if any(text.count(opening) != text.count(closing) for opening, closing in BRACKET_PAIRS):
+        issues.append("incomplete_answer_unbalanced_brackets")
+    return sorted(set(issues))
 
 
 _QUOTE_MARK_PAIRS = (('"', '"'), ("'", "'"), ("“", "”"), ("‘", "’"))
@@ -257,8 +279,12 @@ def validate_record(record: dict[str, Any], passage: str) -> list[str]:
     reasons: list[str] = []
     evidence = record.get("evidence", [])
     quotes = [item["quote"].strip() for item in evidence]
+    claims = record.get("claims", [])
+    reasons.extend(answer_completeness_issues(record.get("answer", "")))
     if record["answerable"] and not quotes:
         reasons.append("answerable_without_evidence")
+    if record["answerable"] and not claims:
+        reasons.append("answerable_without_claims")
     if not record["answerable"] and record["answer"].strip().lower() not in {
         "not answerable from the provided sources.",
         "the provided sources do not contain enough information to answer.",
@@ -269,6 +295,35 @@ def validate_record(record: dict[str, Any], passage: str) -> list[str]:
             reasons.append("non_verbatim_evidence")
         if _is_incomplete_evidence_fragment(quote):
             reasons.append("incomplete_evidence_fragment")
+    claim_quotes: list[str] = []
+    for claim in claims:
+        claim_evidence = [
+            item["quote"].strip() for item in claim.get("evidence", [])
+        ]
+        if not claim_evidence:
+            reasons.append("claim_without_evidence")
+            continue
+        claim_quotes.extend(claim_evidence)
+        claim_support = " ".join(claim_evidence)
+        reasons.extend(
+            f"claim_{issue}"
+            for issue in semantic_support_issues(
+                str(claim.get("statement", "")),
+                claim_support,
+            )
+        )
+        for number in _unsupported_quantities(
+            str(claim.get("statement", "")),
+            claim_support,
+        ):
+            reasons.append(f"claim_unsupported_number:{number}")
+        for quote in claim_evidence:
+            if quote not in passage:
+                reasons.append("claim_uses_non_verbatim_evidence")
+            if _is_incomplete_evidence_fragment(quote):
+                reasons.append("claim_uses_incomplete_evidence_fragment")
+    if sorted(set(claim_quotes)) != sorted(set(quotes)):
+        reasons.append("claim_evidence_mismatch")
     support = " ".join(quotes)
     reasons.extend(semantic_support_issues(record["answer"], support))
     for number in _unsupported_quantities(record["answer"], support):
@@ -312,6 +367,7 @@ def validate_cross_record(record: dict[str, Any], documents: list[dict[str, Any]
     used_reasoning_sources: set[str] = set()
     if set(known) != {"source_a", "source_b"}:
         reasons.append("invalid_source_bundle")
+    reasons.extend(answer_completeness_issues(record.get("answer", "")))
     for claim in record.get("claims", []):
         if not claim.get("evidence"):
             reasons.append("claim_without_evidence")
@@ -322,6 +378,21 @@ def validate_cross_record(record: dict[str, Any], documents: list[dict[str, Any]
             if _is_incomplete_evidence_fragment(quote):
                 reasons.append("incomplete_evidence_fragment")
             used_claim_sources.add(source_id)
+        claim_support = " ".join(
+            evidence.get("quote", "") for evidence in claim.get("evidence", [])
+        )
+        reasons.extend(
+            f"claim_{issue}"
+            for issue in semantic_support_issues(
+                str(claim.get("statement", "")),
+                claim_support,
+            )
+        )
+        for number in _unsupported_quantities(
+            str(claim.get("statement", "")),
+            claim_support,
+        ):
+            reasons.append(f"claim_unsupported_number:{number}")
     claim_support = " ".join(evidence["quote"] for claim in record.get("claims", []) for evidence in claim.get("evidence", []))
     reasons.extend(semantic_support_issues(record["answer"], claim_support))
     # Manual identity and version dates are valid support for attribution in the
