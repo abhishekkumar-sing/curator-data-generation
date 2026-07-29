@@ -1650,6 +1650,9 @@ Primary and official sources:
 
 ### 4. Generate questions from verified paths
 
+- [x] Complete and record the mandatory research-first gate for path-conditioned
+  question planning, separate answering, difficulty control, standalone
+  authority/time wording, missing-hop negatives, and false-premise negatives.
 - [ ] Generate natural-language questions only after a path passes
   deterministic checks.
 - [ ] Control the intended question type and difficulty.
@@ -1663,6 +1666,112 @@ Acceptance criteria:
 - The answer is produced from the supplied sources, not copied from a proposed
   answer embedded in the question-generation prompt.
 - Unanswerable records state only supported limitations.
+
+#### Verified-path question-generation research record (2026-07-29)
+
+Status: research gate complete; production implementation has not started.
+
+Verified local/reference findings:
+
+- The current `CrossDocumentGenerator` receives lexically paired passages and
+  emits question, answer, claims, evidence, and rationale in one model call.
+  Its prompt asks for two-source necessity, but no accepted pre-question path
+  constrains the output and the proposed answer can rationalize a weak question.
+- The new local proposition/path stages now provide immutable source IDs,
+  grounded input claims, typed operations, connection anchors, and an attributed
+  output claim before question wording exists. Legacy QA does not consume them.
+- The reference project separates topic discovery, question blueprints, and
+  later generation for some tracks, which is a useful staged pattern. Its
+  cross-document stage still generates question and response jointly from
+  bundles, and its blueprints are not backed by the independently validated
+  path DAG now available here.
+- MuSiQue builds questions from connected single-hop components and includes
+  unanswerable constructions formed by disconnecting the reasoning chain. This
+  supports missing-hop negatives derived from a valid path rather than arbitrary
+  “unanswerable” prompting.
+- 2WikiMultiHopQA preserves evidence/reasoning paths and uses controlled
+  generation procedures. HotpotQA supplies comparison questions and supporting
+  facts, but later shortcut analyses show that multiple documents/citations do
+  not alone prove necessity.
+- False-premise questions differ from missing-context questions: the premise is
+  wrong, not merely unsupported by the visible context. They require explicit
+  premise verification and must not be answered as if true.
+
+Research-supported design:
+
+- Stage A generates a typed question proposal from one accepted path. It sees
+  path type, operations, input propositions, exact source metadata/evidence,
+  intended question type, difficulty, persona, and task. It does not receive a
+  model-authored answer. The derived output claim may be used as a private
+  planning constraint but must be excluded from the user-facing question and
+  checked for answer leakage.
+- Deterministically reject unknown path/claim/source IDs, failed path checks,
+  unsupported taxonomy, answer text leakage, questions answerable from one
+  proposition, and missing authority/domain/date wording where ambiguity
+  exists. Difficulty is structural metadata (operation/path form and required
+  qualifications), not a request for obscure wording.
+- Enforce the complete rendered prompt budget immediately before each Curator
+  call using the P0.3 counter, selected local tokenizer when configured, schema,
+  completion reservation, and safety margin. Over-budget requests are
+  quarantined before provider submission.
+- Stage B answers only an accepted question using its immutable path and source
+  evidence. It emits material claims/evidence and an optional concise,
+  auditable teaching rationale. It cannot modify the question, path, taxonomy,
+  or required sources.
+- Construct missing-hop negatives deterministically by withholding one required
+  source/path input from an otherwise valid question. Label the withheld source
+  and expected limitation; do not expose the hidden answer in visible context.
+- Construct false-premise candidates only through an explicit, typed mutation
+  of one supported premise (authority, date, modality, threshold, condition,
+  or entity). Preserve the original and mutation audit, then require a
+  verifier to confirm the mutated premise is contradicted—not merely absent.
+  Until that verifier exists and passes, keep false-premise candidates out of
+  accepted training exports.
+- Keep answerable, missing-hop, and verified-false-premise records as distinct
+  classes and report their yields separately.
+
+Rejected alternatives/risks:
+
+- Joint question-answer generation permits circular self-consistency without
+  source necessity.
+- Showing a polished target answer to the question writer encourages lexical
+  leakage and answer-shaped questions.
+- Treating any withheld source as proof of unanswerability ignores parametric
+  knowledge and one-hop shortcuts; P0.5 must execute actual answer ablations.
+- Randomly changing a number/name can create a different valid rule or an
+  merely unsupported premise. False-premise acceptance requires contradiction.
+- “Hard” prompts based on verbosity or obscure phrasing damage naturalness and
+  do not measure reasoning depth.
+
+Planned validation:
+
+- Unit tests for path-only eligibility, prompt leakage, standalone
+  authority/time wording, stable IDs, profile-independent schemas, prompt
+  budgets, immutable question handoff, missing-hop lineage, and quarantined
+  unverified false premises.
+- P0.5 later validates genuine necessity through full/A-only/B-only answer
+  trials. Only the user runs model-backed pilots.
+
+Primary sources:
+
+- Trivedi et al.,
+  [MuSiQue](https://aclanthology.org/2022.tacl-1.31/), constructs connected,
+  compositional multi-hop questions and disconnected unanswerable variants.
+- Ho et al.,
+  [2WikiMultiHopQA](https://aclanthology.org/2020.coling-main.580/), includes
+  evidence information containing complete reasoning paths.
+- Yang et al.,
+  [HotpotQA](https://aclanthology.org/D18-1259/), defines multi-document
+  comparison questions with supporting-fact supervision.
+- Min et al.,
+  [Compositional Questions Do Not Necessitate Multi-hop
+  Reasoning](https://aclanthology.org/P19-1416/), demonstrates shortcut risks
+  in apparently compositional questions.
+- Yu et al.,
+  [Won't Get Fooled Again: Answering Questions with False
+  Premises](https://aclanthology.org/2023.acl-long.309/), distinguishes false
+  premises from missing-context unanswerability and evaluates premise
+  verification.
 
 ### 5. Execute real source-ablation trials
 
