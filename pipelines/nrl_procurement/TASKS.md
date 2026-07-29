@@ -4007,3 +4007,76 @@ Next research gates:
   separately.
 - [ ] Separate manifest terminal-request completeness from accepted-record
   yield and required-task coverage.
+
+### Strict auto-tool schema research (2026-07-29)
+
+Status: research complete before implementation.
+
+Question:
+
+- Can `tools_auto` enable vLLM strict schema guidance safely, and how should
+  Pydantic response models be converted to the required tool schema?
+
+Official and upstream findings:
+
+- Current vLLM documentation states that `tool_choice: "auto"` is
+  schema-constrained only when at least one tool declares `strict: true`.
+  Strict schemas require `additionalProperties: false` on every object, every
+  property in `required`, and nullable types for optional values:
+  https://docs.vllm.ai/en/latest/features/tool_calling/
+- vLLM documents that auto choice still permits no call. Strict mode constrains
+  arguments when a call is selected; it does not replace the existing
+  exactly-one-call application check.
+- The official OpenAI Python SDK exposes `pydantic_function_tool()` and its
+  source recursively converts Pydantic schemas to the strict contract,
+  including nested definitions, arrays, unions, object closure, and required
+  properties:
+  https://github.com/openai/openai-python/blob/main/src/openai/lib/_tools.py
+  https://github.com/openai/openai-python/blob/main/src/openai/lib/_pydantic.py
+- NVIDIA's Nemotron 3 Super model card continues to prescribe vLLM
+  `--enable-auto-tool-choice --tool-call-parser qwen3_coder`, temperature 1.0,
+  and top-p 0.95:
+  https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8
+- Upstream vLLM reports show that MTP and reasoning/tool parsing can still
+  affect tool-call extraction. Strict arguments do not prove that forced calls
+  or MTP are reliable:
+  https://github.com/vllm-project/vllm/issues/38106
+
+Local and reference-code evidence:
+
+- Pilot 012 completed every path-stage request after retry, but initial or
+  permanent attempts included stringified arrays, invalid enum values, empty
+  objects, and absent calls.
+- Curator's current `_auto_tool_request()` passes raw
+  `model_json_schema()` and does not set strict mode.
+- `PropositionBatch` and `CandidateBatch` contain nested objects and defaulted
+  fields. Their raw Pydantic schemas do not mark every property required and
+  do not close every object with `additionalProperties: false`; merely adding
+  the boolean flag would violate the documented strict-schema contract.
+- Installed OpenAI SDK 2.30.0 exposes the public
+  `openai.pydantic_function_tool` converter. Curator already has this SDK in
+  its LiteLLM runtime dependency graph.
+- The reference project contains no stricter auto-tool implementation; its
+  bundled upstream Curator code does not solve this capability.
+
+Alternatives:
+
+- Add only `strict: true`: rejected because the raw schema is not strict.
+- Maintain a Curator-specific recursive schema converter: rejected because it
+  duplicates protocol logic already maintained by the official SDK.
+- Switch immediately to named/required tools: deferred because the current
+  private server returned HTTP 500 for both forced modes.
+- Use `openai.pydantic_function_tool()`: selected because it produces the
+  official strict function shape while preserving Pydantic as the final
+  application validator.
+
+Decision and validation:
+
+- Build the single auto tool with the official SDK converter.
+- Preserve `tool_choice: "auto"`, the exactly-one expected-name check, JSON
+  argument parsing, and final Pydantic validation.
+- Add unit assertions for `strict: true`, recursively closed objects, and
+  required defaulted properties, plus the existing tool-name/argument failure
+  tests.
+- Treat improved model yield as provisional until the next user-run pilot; do
+  not infer it from schema inspection or unit tests.
