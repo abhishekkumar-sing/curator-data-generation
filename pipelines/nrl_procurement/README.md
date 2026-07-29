@@ -34,7 +34,7 @@ models for production when possible. `.env` is gitignored; `.env.example` is
 the safe template that can be committed.
 
 Each profile declares one of Curator's structured-output transports:
-`auto`, `tools`, `json_schema`, `json`, or `md_json`. The choice belongs to the
+`auto`, `tools`, `tools_auto`, `json_schema`, `json`, or `md_json`. The choice belongs to the
 specific model-and-server deployment, not just the model family. Run a small
 structure probe after changing an endpoint. Native `json_schema` is preferred
 when verified; `md_json` provides prompt-based JSON plus Pydantic validation

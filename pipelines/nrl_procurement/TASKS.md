@@ -3795,3 +3795,17 @@ Revised design:
   partial-success machinery.
 - Select `tools_auto` only in the Nemotron profile. Preserve native
   `json_schema` for endpoints that support it.
+
+Implementation result:
+
+- [x] Added `tools_auto` as an explicit online backend configuration value.
+- [x] Built a transport-level single-tool request with `tool_choice: "auto"`
+  and a system instruction requiring exactly one call.
+- [x] Required exactly one expected tool name and Pydantic-validated its JSON
+  arguments before Curator parsing.
+- [x] Kept malformed, missing, multiple, or wrongly named calls in Curator's
+  normal retry/failure path.
+- [x] Selected `tools_auto` only for the verified Nemotron profile.
+- [x] Documented the new model-portable mode and added focused regression
+  coverage.
+- [ ] Confirm path-answer yield in the next user-run pilot.

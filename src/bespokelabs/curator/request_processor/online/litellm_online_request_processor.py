@@ -1,4 +1,5 @@
 import datetime
+import json
 import time
 from collections import defaultdict
 
@@ -85,6 +86,63 @@ class LiteLLMOnlineRequestProcessor(BaseOnlineRequestProcessor):
         if self.token_limit_strategy == TokenLimitStrategy.combined:
             assert config.max_input_tokens_per_minute is None, "`max_input_tokens_per_minute` cannot be used with `combined` token strategy"
             assert config.max_output_tokens_per_minute is None, "`max_output_tokens_per_minute` cannot be used with `combined` token strategy"
+
+    @staticmethod
+    def _auto_tool_request(
+        api_request: dict,
+        response_model,
+    ) -> dict:
+        """Build a single-tool request for servers that support auto only."""
+        tool_name = response_model.__name__
+        request = {
+            **api_request,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        f"You must call the {tool_name} tool exactly once. "
+                        "Return all requested fields as tool arguments and do "
+                        "not answer with ordinary assistant text."
+                    ),
+                },
+                *api_request["messages"],
+            ],
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": tool_name,
+                        "description": (
+                            f"Return one validated {tool_name} structured response."
+                        ),
+                        "parameters": response_model.model_json_schema(),
+                    },
+                }
+            ],
+            "tool_choice": "auto",
+        }
+        return request
+
+    @staticmethod
+    def _parse_auto_tool_completion(completion_obj, response_model):
+        """Validate exactly one expected tool call and its JSON arguments."""
+        message = completion_obj.choices[0].message
+        tool_calls = message.tool_calls or []
+        if len(tool_calls) != 1:
+            raise ValueError(
+                f"Expected exactly one {response_model.__name__} tool call, "
+                f"received {len(tool_calls)}"
+            )
+        function = tool_calls[0].function
+        if function.name != response_model.__name__:
+            raise ValueError(
+                f"Expected tool {response_model.__name__}, received "
+                f"{function.name!r}"
+            )
+        arguments = function.arguments
+        if not isinstance(arguments, str):
+            arguments = json.dumps(arguments)
+        return response_model.model_validate_json(arguments)
 
     def _ensure_rate_limits(self):
         """Lazily initialize rate limits from API headers on first access."""
@@ -423,14 +481,29 @@ class LiteLLMOnlineRequestProcessor(BaseOnlineRequestProcessor):
         # Get response directly without extra logging
         try:
             if request.generic_request.response_format:
-                (
-                    response,
-                    completion_obj,
-                ) = await self.client.chat.completions.create_with_completion(
-                    **request.api_specific_request,
-                    response_model=request.prompt_formatter.response_format,
-                    timeout=self.config.request_timeout,
-                )
+                response_model = request.prompt_formatter.response_format
+                if self.config.structured_output_mode == "tools_auto":
+                    auto_tool_request = self._auto_tool_request(
+                        request.api_specific_request,
+                        response_model,
+                    )
+                    completion_obj = await litellm.acompletion(
+                        **auto_tool_request,
+                        timeout=self.config.request_timeout,
+                    )
+                    response = self._parse_auto_tool_completion(
+                        completion_obj,
+                        response_model,
+                    )
+                else:
+                    (
+                        response,
+                        completion_obj,
+                    ) = await self.client.chat.completions.create_with_completion(
+                        **request.api_specific_request,
+                        response_model=response_model,
+                        timeout=self.config.request_timeout,
+                    )
                 response_message = response.model_dump() if hasattr(response, "model_dump") else response
             else:
                 completion_obj = await litellm.acompletion(**request.api_specific_request, timeout=self.config.request_timeout)

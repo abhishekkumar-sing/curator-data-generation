@@ -563,7 +563,7 @@ def test_model_context_window_is_explicit_and_profile_local() -> None:
     source_windows = generation_pipeline.CONFIG["source_windows"]
 
     assert configured_context_window(nemotron) == 131072
-    assert nemotron["structured_output_mode"] == "tools"
+    assert nemotron["structured_output_mode"] == "tools_auto"
     assert (
         generation_pipeline.CONFIG["model_profiles"]["glm"][
             "structured_output_mode"

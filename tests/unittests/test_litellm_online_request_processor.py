@@ -1,9 +1,11 @@
 import litellm
+import pytest
+from pydantic import BaseModel
 
+from bespokelabs.curator.request_processor.config import OnlineRequestProcessorConfig
 from bespokelabs.curator.request_processor.online import (
     litellm_online_request_processor,
 )
-from bespokelabs.curator.request_processor.config import OnlineRequestProcessorConfig
 from bespokelabs.curator.request_processor.online.base_online_request_processor import TokenLimitStrategy
 from bespokelabs.curator.request_processor.online.litellm_online_request_processor import LiteLLMOnlineRequestProcessor
 from bespokelabs.curator.types.generic_request import GenericRequest
@@ -48,6 +50,83 @@ def test_auto_structured_output_mode_uses_static_lookup(monkeypatch):
 
     assert not processor.check_structured_output_support()
     assert calls == [{"model": "hosted_vllm/private-model"}]
+
+
+def test_auto_tool_mode_builds_and_validates_one_schema_tool():
+    class ProbeResponse(BaseModel):
+        value: str
+        count: int
+
+    api_request = {
+        "model": "hosted_vllm/private-model",
+        "messages": [{"role": "user", "content": "return a probe"}],
+        "temperature": 1.0,
+    }
+    request = LiteLLMOnlineRequestProcessor._auto_tool_request(
+        api_request,
+        ProbeResponse,
+    )
+
+    assert request["tool_choice"] == "auto"
+    assert request["tools"][0]["function"]["name"] == "ProbeResponse"
+    assert request["tools"][0]["function"]["parameters"] == (
+        ProbeResponse.model_json_schema()
+    )
+    assert request["messages"][0]["role"] == "system"
+    assert api_request["messages"] == [
+        {"role": "user", "content": "return a probe"}
+    ]
+
+    completion = type(
+        "Completion",
+        (),
+        {
+            "choices": [
+                type(
+                    "Choice",
+                    (),
+                    {
+                        "message": type(
+                            "Message",
+                            (),
+                            {
+                                "tool_calls": [
+                                    type(
+                                        "ToolCall",
+                                        (),
+                                        {
+                                            "function": type(
+                                                "Function",
+                                                (),
+                                                {
+                                                    "name": "ProbeResponse",
+                                                    "arguments": (
+                                                        '{"value":"alpha","count":7}'
+                                                    ),
+                                                },
+                                            )()
+                                        },
+                                    )()
+                                ]
+                            },
+                        )()
+                    },
+                )()
+            ]
+        },
+    )()
+    parsed = LiteLLMOnlineRequestProcessor._parse_auto_tool_completion(
+        completion,
+        ProbeResponse,
+    )
+    assert parsed == ProbeResponse(value="alpha", count=7)
+
+    completion.choices[0].message.tool_calls = []
+    with pytest.raises(ValueError, match="exactly one ProbeResponse"):
+        LiteLLMOnlineRequestProcessor._parse_auto_tool_completion(
+            completion,
+            ProbeResponse,
+        )
 
 
 def test_multimodal_support_falls_back_for_claude_aliases(monkeypatch):
