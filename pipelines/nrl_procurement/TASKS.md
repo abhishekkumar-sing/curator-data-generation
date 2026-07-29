@@ -3603,3 +3603,59 @@ Implementation result:
   materialization of a grounded clause without a separate object.
 - [ ] Confirm the retry failure and accepted proposition yield in the next
   user-run pilot.
+
+## Curator structured failure persistence (2026-07-29)
+
+Status: researched; implementation pending.
+
+Problem:
+
+- Pilot 010 completed 29 of 30 proposition requests, but one request exhausted
+  structured-output retries.
+- Curator correctly constructed a failed `GenericResponse` with
+  `response_message=None` and populated `response_errors`, then passed that
+  missing payload into the configured Pydantic response model.
+- `PropositionBatch(**None)` raised `TypeError`, aborting finalization and
+  preventing the 29 successful responses from becoming a dataset.
+
+Official-source findings:
+
+- Curator's own `GenericResponse` contract documents `response_message=None`
+  as the representation used when errors occur:
+  https://github.com/bespokelabsai/curator/blob/main/src/bespokelabs/curator/types/generic_response.py
+- Curator's online processor creates exactly that failed response after retry
+  exhaustion and sends it to the common persistence path:
+  https://github.com/bespokelabsai/curator/blob/main/src/bespokelabs/curator/request_processor/online/base_online_request_processor.py
+- Curator's dataset finalizer already treats non-null `response_errors` as a
+  failed request and continues processing successful records:
+  https://github.com/bespokelabsai/curator/blob/main/src/bespokelabs/curator/request_processor/base_request_processor.py
+- Curator's formatter assumes a structured response is a mapping and invokes
+  the Pydantic model with `**response_dict`; it is therefore not the correct
+  layer for parsing a failed response with no payload:
+  https://github.com/bespokelabsai/curator/blob/main/src/bespokelabs/curator/llm/prompt_formatter.py
+- Curator PR 734 is retained in this repository. Its work-conserving retry
+  scheduling correctly persists terminal failures, but the discovered
+  `None`-payload parsing edge case must be handled without removing or
+  reverting that scheduler:
+  https://github.com/bespokelabsai/curator/pull/734
+
+Design decision:
+
+- In the common response-processing boundary, return no parsed rows immediately
+  when `response_errors` is populated or `response_message` is `None`.
+- Still append the full `GenericResponse` to the responses JSONL so errors,
+  request identity, timing, and audit information survive.
+- Do not invoke the application `parse()` callback for failed provider/model
+  responses.
+- Preserve existing successful-response behavior, including successful
+  responses intentionally filtered to zero rows.
+- Add regression coverage using a real Pydantic response format, not an
+  identity mock.
+
+Validation plan:
+
+- Verify a terminal structured-output failure is persisted with its errors and
+  a null parsed payload without raising.
+- Verify the application parser is not called for the failed response.
+- Retain existing retry, successful persistence, and all-filtered dataset tests.
+- Run focused unit tests, Ruff, and compilation without model calls.
