@@ -16,8 +16,8 @@ from bespokelabs import curator
 
 from schemas import PropositionBatch
 
-PROPOSITION_SCHEMA_VERSION = "2"
-PROPOSITION_VALIDATOR_VERSION = "2"
+PROPOSITION_SCHEMA_VERSION = "3"
+PROPOSITION_VALIDATOR_VERSION = "3"
 
 MODALITY_PATTERNS: dict[str, tuple[re.Pattern[str], ...]] = {
     "mandatory": (re.compile(r"\b(?:must|shall|required|mandatory)\b", re.IGNORECASE),),
@@ -244,6 +244,9 @@ SOURCE POLICY
 
 CONSTRAINTS
 - Keep subject, action, and object atomic while retaining the complete meaning.
+  Subject and action are required. Use object "" only when the complete source
+  clause has no separate grammatical object (for example, an intransitive or
+  copular predicate); never invent an object.
 - Preserve mandatory, recommended, permitted, prohibited, declarative, or
   modality and positive or negative polarity. Conditions are a separate field
   and never replace the rule's mandatory/permitted/prohibited force.

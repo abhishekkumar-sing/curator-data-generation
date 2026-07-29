@@ -141,7 +141,7 @@ class PropositionDraft(BaseModel):
 
     subject: str = Field(min_length=1)
     action: str = Field(min_length=1)
-    object: str = Field(min_length=1)
+    object: str = ""
     modality: Literal[
         "mandatory",
         "recommended",

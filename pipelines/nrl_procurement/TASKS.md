@@ -3532,7 +3532,7 @@ Implementation result:
 
 ## Optional proposition arguments and structured-output retries (2026-07-29)
 
-Status: researched; implementation pending.
+Status: researched and implemented on 2026-07-29.
 
 Problem:
 
@@ -3588,3 +3588,18 @@ Validation plan:
   non-verbatim objects still fail deterministic validation.
 - Run focused tests, Ruff, and compilation without invoking model endpoints.
 - Confirm the retry failure disappears in the next user-run pilot.
+
+Implementation result:
+
+- [x] Allowed the established empty-string sentinel for a proposition with no
+  separate grammatical object while retaining non-empty subject and action.
+- [x] Clarified the extraction contract so models use an empty object only for
+  genuinely intransitive or copular predicates and never invent one.
+- [x] Preserved the stored string shape used by Arrow, caches, rendering, and
+  reasoning-path construction.
+- [x] Bumped proposition schema and validator versions to invalidate
+  incompatible cache entries.
+- [x] Added focused coverage for schema parsing, deterministic validation, and
+  materialization of a grounded clause without a separate object.
+- [ ] Confirm the retry failure and accepted proposition yield in the next
+  user-run pilot.

@@ -635,6 +635,34 @@ def test_proposition_materialization_preserves_authority_and_offsets() -> None:
     assert result["deterministic_checks"]["passed"] is True
 
 
+def test_proposition_allows_grounded_clause_without_separate_object() -> None:
+    passage = "Relevant format for BG should be provided in the tender document."
+    row = {
+        **_proposition_source_row(),
+        "passage": passage,
+    }
+    draft = {
+        "subject": "Relevant format for BG",
+        "action": "should be provided in the tender document",
+        "object": "",
+        "modality": "recommended",
+        "polarity": "positive",
+        "conditions": [],
+        "exceptions": [],
+        "threshold_value": "",
+        "threshold_unit": "",
+        "temporal_scope": "",
+        "evidence_quote": passage,
+    }
+
+    parsed = PropositionBatch(propositions=[draft])
+    assert parsed.propositions[0].object == ""
+    assert proposition_validation_issues(draft, row) == []
+    result = materialize_proposition(draft, row, "fingerprint")
+    assert result["object"] == ""
+    assert result["deterministic_checks"]["passed"] is True
+
+
 def test_proposition_offsets_resolve_against_original_source_chunk() -> None:
     row = _proposition_source_row()
     row["source_passage"] = f"![page image](image.png)\n\n{row['passage']}"
