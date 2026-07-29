@@ -2838,3 +2838,66 @@ Pilot artifacts:
 
 - `outputs/pilot-006/files/manifest.json`
 - `.curator_working/pilot-006/cross_generation/035c2fe81112a763/responses_0.jsonl`
+
+## Pilot-008 judge-batch cardinality and identity integrity (2026-07-29)
+
+Pilot-008 completed without transport failures, but the cross-document judge
+returned the same judgment three times for
+`nrlxd-0626e718e2f5fb3eaf5c`. The pipeline materialized every returned item,
+inflating three unique accepted cross-document records to five rows and
+propagating the duplicate into canonical, SFT, RAG, and evaluation exports.
+
+Research conclusions before implementation:
+
+- Curator intentionally lets `parse(input, response)` return multiple output
+  dictionaries. Curator validates and transports the structured response but
+  does not know the pipeline's expected record-ID set; cardinality and identity
+  correspondence therefore belong in the pipeline parse boundary.
+- JSON Schema `uniqueItems` compares complete array items, not a selected
+  property such as `record_id`. Two judgments with the same ID but different
+  decision content can still satisfy `uniqueItems`, so schema-only uniqueness
+  is insufficient.
+- Pydantic validates the declared model shape. Cross-field or collection-level
+  business invariants can be added with validators, but expected IDs come from
+  the current input batch and must still be compared during parsing.
+- A malformed judge batch must not be partially trusted. Duplicate, missing, or
+  unexpected IDs indicate that response-to-input correspondence is broken.
+  Quarantine all returned judgments from that batch with explicit audit reason
+  codes rather than silently choosing the first or last response.
+- Export-time stable-ID uniqueness is still required as defense in depth.
+  Duplicate IDs must fail the quality gate rather than being counted as
+  additional accepted examples.
+
+Required implementation:
+
+- [ ] Add a reusable exact-ID-set/cardinality validator for all batched judges.
+- [ ] Quarantine malformed judge batches with duplicate, missing, and unexpected
+  ID diagnostics; do not accept a subset from an invalid batch.
+- [ ] Enforce unique stable record IDs before canonical, SFT, RAG, evaluation,
+  and drafting export.
+- [ ] Count unique accepted records in the manifest and report duplicate
+  rejection counts explicitly.
+- [ ] Add regressions reproducing Pilot-008's triplicated judgment and covering
+  missing and unexpected IDs.
+
+Research basis:
+
+- [Curator repository and quickstart](https://github.com/bespokelabsai/curator):
+  `parse()` converts one input and structured response into a list of output
+  dictionaries, so application-specific row correspondence is deliberately
+  controlled by the pipeline.
+- [Curator API reference](https://docs.bespokelabs.ai/bespoke-curator/api-reference):
+  `response_format` enforces structured output while `parse()` defines the
+  resulting dataset rows.
+- [JSON Schema array reference](https://json-schema.org/understanding-json-schema/reference/array):
+  `minItems`, `maxItems`, and `uniqueItems` constrain array instances, but
+  `uniqueItems` applies to whole items rather than a nested identity field.
+- [Pydantic validation documentation](https://docs.pydantic.dev/2.12/errors/usage_errors/):
+  field validators validate declared values; collection business invariants
+  require explicit validation logic and raise validation errors on failure.
+
+Pilot evidence:
+
+- `outputs/pilot-008/files/manifest.json`
+- `outputs/pilot-008/files/cross_document_qa_sft.jsonl`
+- `.curator_working/pilot-008/cross_judge/d2fbb3ff6891fb63/responses_0.jsonl`
