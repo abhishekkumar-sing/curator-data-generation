@@ -1061,6 +1061,131 @@ Acceptance criteria:
 - Every operation has valid inputs and an explicit output.
 - Removing either required input breaks an answerable path.
 
+#### Connected reasoning-path research record (2026-07-29)
+
+Status: research gate complete; production implementation has not started.
+
+Questions researched:
+
+- What distinguishes a genuine two-hop path from two topically similar facts?
+- Which path representation permits deterministic connectivity and ablation
+  checks before natural-language question generation?
+- How should comparison, bridge, temporal, complementary,
+  condition/exception, and cross-domain relationships differ?
+- Which parts of the current and reference bundle/claim designs are reusable?
+
+Verified local and reference findings:
+
+- The current `build_bundles` stage ranks configured manual pairs by lexical
+  and section overlap. It correctly states that similarity does not establish a
+  legal relationship, but the bundle has no proposition IDs, bridge entity,
+  operations, or derived output claim. The generator invents those structures
+  only after it has already written the question and answer.
+- The reference project has stronger downstream claim IDs and links rationale
+  evidence to them, but it likewise begins with lexically aligned source
+  bundles and creates claims inside QA generation. It has no independent,
+  pre-question reasoning-path object.
+- HotpotQA supplies sentence-level supporting facts, but Min et al. demonstrate
+  that compositional wording and multiple annotated documents do not guarantee
+  multi-hop necessity; dataset shortcuts can make a question answerable with
+  one hop.
+- MuSiQue represents each multi-hop question with an underlying DAG composed
+  from single-hop questions and explicitly targets connected,
+  non-decomposable composition. The graph representation is a better
+  supervision contract than prose rationale alone.
+- QASC records two source facts, a bridge concept, and a composed fact. This
+  makes the otherwise hidden connection auditable and supports explicit
+  input/output claim identity.
+- 2WikiMultiHopQA includes evidence and reasoning paths, reinforcing that
+  supporting facts and their ordered relationship should be part of the data,
+  not reconstructed after question generation.
+
+Research-supported design:
+
+- Build paths only from accepted, source-grounded propositions. A path is a
+  separate versioned artifact created before questions and answers.
+- Represent paths as a small DAG containing `path_id`, relationship/path type,
+  two distinct required source IDs, ordered input proposition IDs, explicit
+  operations, bridge entities or compatibility keys, and a separate derived
+  output claim with its own stable ID.
+- Permit the following typed forms:
+  - `comparison`: compatible subjects/actions with a compare operation;
+  - `bridge`: an exact entity/object from one proposition links to the subject
+    or scope of the other, followed by combine;
+  - `temporal_transition`: compatible propositions under the same authority
+    family with distinct, ordered as-of states; it describes dated states and
+    does not assert currentness or supersession;
+  - `complementary_procedure`: one proposition's output/object is an explicit
+    prerequisite or input to the other;
+  - `exception_condition_interaction`: the same governed action/scope is linked
+    to an explicit condition or exception;
+  - `cross_domain_comparison`: compatible rule signatures across distinct
+    procurement domains without asserting adoption or equivalence.
+- Candidate retrieval may use normalized lexical/entity signatures, but path
+  acceptance requires exact proposition-field anchors. Generic procurement
+  words and headings cannot establish connectivity.
+- A model may propose a concise derived claim and select an allowed operation,
+  but it may reference only supplied proposition IDs and exact bridge strings.
+  The application derives IDs and validates graph structure, source
+  distinctness, relationship constraints, authority/time safety, and input
+  coverage.
+- Structural ablation must remove each input proposition in turn and confirm
+  that the declared operation/output no longer has all required inputs. This is
+  necessary but not sufficient; P0.5 later executes answer-level source
+  ablation after a question exists.
+
+Alternatives rejected:
+
+- Treat high lexical similarity as a path: generic policy language creates
+  unrelated or redundant pairs.
+- Generate the question first and infer its path afterward: creates circular
+  verification and lets question wording conceal a one-hop shortcut.
+- Require only two citations: evidence count does not prove compositional
+  necessity.
+- Store a free-text rationale without input/output IDs: cannot deterministically
+  validate graph connectivity or ablation.
+- Infer missing text as deletion, exception, or non-applicability: absence from
+  a bounded window is not evidence.
+- Collapse Government and NRL rules into one authority node: risks presenting
+  guidance as adopted company policy.
+
+Known risks and proposed validation:
+
+- Exact string bridges are high precision but may miss acronyms,
+  coreference, or semantically equivalent entities. Begin conservatively and
+  measure recall in a user-reviewed pilot rather than adding fuzzy semantic
+  repair.
+- Comparison paths can still be redundant when both propositions state the
+  same rule. Require the derived output to attribute both states and later
+  answer-level ablation to confirm both are needed.
+- Temporal ordering from metadata does not itself establish amendment or
+  supersession. Tests must reject those inferred relations.
+- A valid graph can still yield an unnatural or answer-leaking question.
+  Question quality is a separate P0.4 gate.
+- Codex will validate path schemas, IDs, source separation, operation typing,
+  anchors, and structural ablation without model calls. Only the user runs a
+  bounded path-planning pilot.
+
+Primary and official sources:
+
+- Yang et al.,
+  [HotpotQA](https://aclanthology.org/D18-1259/), provides document-level
+  multi-hop questions with sentence-level supporting-fact supervision.
+- Min et al.,
+  [Compositional Questions Do Not Necessitate Multi-hop Reasoning](https://aclanthology.org/P19-1416/),
+  demonstrates that multi-document/compositional form alone does not prove
+  multi-hop necessity.
+- Trivedi et al.,
+  [MuSiQue](https://aclanthology.org/2022.tacl-1.31/), represents composed
+  multi-hop questions with an underlying DAG and targets connected
+  composition.
+- Khot et al.,
+  [QASC](https://doi.org/10.1609/aaai.v34i05.6319), annotates two facts, their
+  bridge/composition, and the composed fact.
+- Ho et al.,
+  [2WikiMultiHopQA](https://aclanthology.org/2020.coling-main.580/), includes
+  evidence information containing reasoning paths for multi-hop questions.
+
 ### 3. Use bounded multi-chunk source windows
 
 - [ ] Group adjacent chunks under reliable section boundaries.
