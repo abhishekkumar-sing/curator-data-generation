@@ -1401,13 +1401,13 @@ Implementation result:
   construction, section hierarchy, adjacency, cross-references, provenance,
   splitting, and model-aware prompt budgets.
 - [x] Group adjacent chunks under reliable section boundaries.
-- [ ] Include required definitions, exceptions, and referenced provisions when
+- [x] Include required definitions, exceptions, and referenced provisions when
   resolvable.
 - [x] Split oversized sections on chunk boundaries.
 - [x] Preserve every constituent chunk ID and page.
 - [x] Prevent repeated or generic headings from establishing a match by
   themselves.
-- [ ] Support one-to-many section relationships.
+- [x] Support one-to-many section relationships.
 
 Implementation progress:
 
@@ -1423,14 +1423,18 @@ Implementation progress:
 - [x] Added `source_windows.jsonl`, `source_windows_rejected.jsonl`, manifest
   statistics, configuration, documentation, and regression tests. Thirty-two
   local tests, Ruff, compilation, and YAML parsing pass.
-- [ ] Add exact, unambiguous definition/exception/cross-reference support
+- [x] Add exact, unambiguous definition/exception/cross-reference support
   edges and one-to-many path associations.
-- [ ] Add selected-tokenizer rendered-chat budgeting; the current conservative
-  estimator is recorded explicitly and remains the fallback.
+- [x] Add a selected-tokenizer rendered-chat budgeting utility; the current
+  conservative estimator is recorded explicitly and remains the fallback.
+- [ ] Invoke full rendered-request budgeting in P0.4 immediately before every
+  new path-driven Curator call. Legacy generation remains unchanged until that
+  migration.
 
 ##### Cross-reference and rendered-token-budget research addendum (2026-07-29)
 
-Status: focused research complete; implementation has not started.
+Status: focused research and reusable implementation complete; enforcement on
+the new path-driven request stage remains a P0.4 integration gate.
 
 Verified findings and decision:
 
@@ -1486,6 +1490,25 @@ Official sources:
   tool-schema template inputs.
 - [Hugging Face tokenizer API](https://huggingface.co/docs/transformers/main_classes/tokenizer)
   documents tokenized chat-template output including control tokens.
+
+Implementation result:
+
+- [x] Added conservative same-manual component indexing for explicit numbered
+  paragraphs/clauses/sections and annexures.
+- [x] Explicit comma/`and` enumerations create one-to-many edges only when each
+  target resolves uniquely. Missing and duplicate targets remain audited as
+  `missing` or `ambiguous` and never become support edges.
+- [x] Windows now retain both accepted `support_edges` and complete
+  `reference_audit` entries with source chunk, raw citation, normalized target,
+  resolution status, and target chunk IDs.
+- [x] Added reusable full-request measurement that counts chat-template control
+  tokens and response-schema tokens with a supplied local tokenizer, records
+  tokenizer/template identity, reserves completion and safety margin, and can
+  require exact counting. Its fallback is explicitly labeled conservative.
+- [x] Added regression tests for unique, missing, ambiguous, same-manual,
+  one-to-many, tokenizer-template, response-schema, safety-margin, fallback,
+  and exact-mode behavior. Thirty-six local tests, Ruff, compilation, and YAML
+  parsing pass.
 
 Acceptance criteria:
 

@@ -19,6 +19,12 @@ GENERIC_HEADINGS = {
     "section",
 }
 SPACE = re.compile(r"\s+")
+COMPONENT_ANCHOR = re.compile(r"(?im)^\s*(?:#{1,6}\s+)?(?:\*\*)?" r"(?P<component>(?:\d+(?:\.\d+){1,5}|annexure\s+[a-z0-9-]+))" r"(?:\*\*)?(?=\s|[.:\-)])")
+REFERENCE = re.compile(
+    r"(?i)\b(?P<kind>paras?|paragraphs?|clauses?|sections?|annexures?)\s+"
+    r"(?P<targets>(?:\d+(?:\.\d+){1,5}|[a-z0-9-]+)"
+    r"(?:\s*(?:,|and)\s*(?:\d+(?:\.\d+){1,5}|[a-z0-9-]+))*)"
+)
 
 
 def _section_key(row: dict[str, Any]) -> tuple[str, ...]:
@@ -40,11 +46,50 @@ def _window_id(rows: list[dict[str, Any]]) -> str:
     return "window-" + digest[:24]
 
 
+def _component_key(value: str, kind: str = "") -> str:
+    normalized = SPACE.sub(" ", value.casefold()).strip(" .:)-")
+    if "annexure" in kind.casefold() and not normalized.startswith("annexure "):
+        normalized = f"annexure {normalized}"
+    return normalized
+
+
+def resolve_component_references(
+    chunks: list[dict[str, Any]],
+) -> dict[str, list[dict[str, Any]]]:
+    """Resolve only explicit, unique same-manual component references."""
+    indexes: dict[str, dict[str, list[str]]] = defaultdict(lambda: defaultdict(list))
+    for row in chunks:
+        for match in COMPONENT_ANCHOR.finditer(row["passage"]):
+            key = _component_key(match.group("component"))
+            if row["chunk_id"] not in indexes[row["manual_id"]][key]:
+                indexes[row["manual_id"]][key].append(row["chunk_id"])
+
+    audits: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in chunks:
+        for match in REFERENCE.finditer(row["passage"]):
+            raw_targets = re.split(r"\s*(?:,|and)\s*", match.group("targets"))
+            for raw_target in raw_targets:
+                key = _component_key(raw_target, match.group("kind"))
+                candidates = indexes[row["manual_id"]].get(key, [])
+                status = "resolved" if len(candidates) == 1 else "missing" if not candidates else "ambiguous"
+                audits[row["chunk_id"]].append(
+                    {
+                        "edge_type": "explicit_component_reference",
+                        "raw_reference": match.group(0),
+                        "target_component": key,
+                        "status": status,
+                        "target_chunk_ids": candidates if status == "resolved" else [],
+                    }
+                )
+    return audits
+
+
 def _materialize(
     rows: list[dict[str, Any]],
     maximum_input_tokens: int,
     reserved_prompt_tokens: int,
     chars_per_token: float,
+    reference_audits: dict[str, list[dict[str, Any]]],
 ) -> dict[str, Any]:
     text = "\n\n".join(row["generation_passage"] for row in rows)
     estimated_source_tokens = int(len(text) / chars_per_token) + 1
@@ -81,7 +126,23 @@ def _materialize(
             "maximum_input_tokens": maximum_input_tokens,
             "passed": estimated_source_tokens + reserved_prompt_tokens <= maximum_input_tokens,
         },
-        "support_edges": [],
+        "support_edges": [
+            {
+                **edge,
+                "source_chunk_id": row["chunk_id"],
+            }
+            for row in rows
+            for edge in reference_audits.get(row["chunk_id"], [])
+            if edge["status"] == "resolved"
+        ],
+        "reference_audit": [
+            {
+                **edge,
+                "source_chunk_id": row["chunk_id"],
+            }
+            for row in rows
+            for edge in reference_audits.get(row["chunk_id"], [])
+        ],
         "schema_version": WINDOW_SCHEMA_VERSION,
     }
 
@@ -102,6 +163,7 @@ def build_source_windows(
         raise ValueError("Source-window prompt reservation exhausts context")
 
     by_manual: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    reference_audits = resolve_component_references(chunks)
     for row in chunks:
         by_manual[row["manual_id"]].append(row)
     accepted: list[dict[str, Any]] = []
@@ -122,6 +184,7 @@ def build_source_windows(
                         maximum_input_tokens,
                         reserved_prompt_tokens,
                         chars_per_token,
+                        reference_audits,
                     )
                 )
                 current = []
@@ -132,6 +195,7 @@ def build_source_windows(
                 maximum_input_tokens,
                 reserved_prompt_tokens,
                 chars_per_token,
+                reference_audits,
             )
             if not single["token_budget"]["passed"]:
                 rejected.append(
@@ -149,6 +213,7 @@ def build_source_windows(
                     maximum_input_tokens,
                     reserved_prompt_tokens,
                     chars_per_token,
+                    reference_audits,
                 )
             )
     return accepted, rejected

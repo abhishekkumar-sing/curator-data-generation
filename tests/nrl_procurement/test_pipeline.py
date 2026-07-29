@@ -35,6 +35,7 @@ from generate import (  # noqa: E402
     plan_single_document_requests,
     request_coverage,
 )
+from prompt_budget import measure_rendered_request  # noqa: E402
 from propositions import (  # noqa: E402
     materialize_proposition,
     proposition_cache_fingerprint,
@@ -50,7 +51,10 @@ from schemas import (  # noqa: E402
     DraftingResult,
     JudgeBatch,
 )
-from source_windows import build_source_windows  # noqa: E402
+from source_windows import (  # noqa: E402
+    build_source_windows,
+    resolve_component_references,
+)
 from validation import (  # noqa: E402
     deduplicate,
     judge_quotes_are_grounded,
@@ -158,6 +162,111 @@ def test_source_windows_split_by_bound_and_reject_oversize_chunk() -> None:
     assert [row["chunk_ids"] for row in accepted] == [["c1"], ["c2"]]
     assert rejected[0]["chunk_ids"] == ["c3"]
     assert rejected[0]["rejection_reasons"] == ["source_chunk_exceeds_token_budget"]
+
+
+def test_component_references_resolve_only_unique_same_manual_targets() -> None:
+    chunks = [
+        _window_chunk(
+            "anchor",
+            1,
+            1,
+            ["Evaluation"],
+            "5.6.8 The committee shall record its recommendation.",
+        ),
+        _window_chunk(
+            "source",
+            2,
+            2,
+            ["Award"],
+            "Apply para 5.6.8 and para 9.9.9 before award.",
+        ),
+    ]
+    audit = resolve_component_references(chunks)
+    assert audit["source"][0]["status"] == "resolved"
+    assert audit["source"][0]["target_chunk_ids"] == ["anchor"]
+    assert audit["source"][1]["status"] == "missing"
+    windows, _ = build_source_windows(
+        chunks,
+        {
+            "max_chunks": 4,
+            "max_input_tokens": 1000,
+            "reserved_prompt_tokens": 100,
+            "conservative_chars_per_token": 2.5,
+        },
+    )
+    source_window = next(row for row in windows if "source" in row["chunk_ids"])
+    assert source_window["support_edges"][0]["target_chunk_ids"] == ["anchor"]
+    assert len(source_window["reference_audit"]) == 2
+
+
+def test_component_references_do_not_resolve_ambiguous_targets() -> None:
+    chunks = [
+        _window_chunk("a1", 1, 1, ["A"], "5.6.8 First copy."),
+        _window_chunk("a2", 2, 2, ["B"], "5.6.8 Duplicate copy."),
+        _window_chunk("source", 3, 3, ["C"], "See clause 5.6.8."),
+    ]
+    audit = resolve_component_references(chunks)
+    assert audit["source"][0]["status"] == "ambiguous"
+    assert audit["source"][0]["target_chunk_ids"] == []
+
+
+class _FakeTokenizer:
+    chat_template = "template"
+
+    def apply_chat_template(self, messages, tokenize, add_generation_prompt):
+        assert tokenize is True
+        assert add_generation_prompt is True
+        return list(range(12))
+
+    def encode(self, text, add_special_tokens):
+        assert add_special_tokens is False
+        return list(range(5))
+
+
+def test_rendered_prompt_budget_uses_template_and_schema_tokens() -> None:
+    result = measure_rendered_request(
+        [{"role": "user", "content": "Question"}],
+        {"type": "object"},
+        context_window=100,
+        reserved_completion_tokens=50,
+        safety_margin_tokens=10,
+        conservative_chars_per_token=2.5,
+        tokenizer=_FakeTokenizer(),
+        tokenizer_identity="local-tokenizer",
+        tokenizer_revision="rev",
+        require_exact=True,
+    )
+    assert result["method"] == "tokenizer_chat_template"
+    assert result["prompt_tokens"] == 17
+    assert result["passed"] is True
+    assert result["chat_template_sha256"]
+
+
+def test_prompt_budget_fallback_is_labeled_and_exact_mode_fails() -> None:
+    fallback = measure_rendered_request(
+        [{"role": "user", "content": "x" * 100}],
+        {"type": "object"},
+        context_window=20,
+        reserved_completion_tokens=5,
+        safety_margin_tokens=2,
+        conservative_chars_per_token=2,
+    )
+    assert fallback["method"] == "conservative_character_estimate"
+    assert fallback["passed"] is False
+    try:
+        measure_rendered_request(
+            [{"role": "user", "content": "Question"}],
+            {},
+            context_window=100,
+            reserved_completion_tokens=10,
+            safety_margin_tokens=5,
+            conservative_chars_per_token=2.5,
+            require_exact=True,
+        )
+    except ValueError as exc:
+        assert "local tokenizer" in str(exc)
+    else:
+        raise AssertionError("exact prompt counting must fail without tokenizer")
 
 
 def test_validation_rejects_unsupported_number() -> None:

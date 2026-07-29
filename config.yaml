@@ -132,6 +132,8 @@ source_windows:
   max_input_tokens: 8192
   reserved_prompt_tokens: 3072
   conservative_chars_per_token: 2.5
+  require_exact_prompt_tokens: false
+  safety_margin_tokens: 256
 
 # Orthogonal dataset axes:
 # - task: underlying procurement work
