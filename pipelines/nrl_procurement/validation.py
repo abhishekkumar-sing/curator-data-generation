@@ -25,10 +25,24 @@ NUMBER = re.compile(
     """,
     re.IGNORECASE | re.VERBOSE,
 )
-QUALIFIERS = {"must", "shall", "may", "not", "except", "unless", "only", "subject to"}
+QUALIFIER_EQUIVALENTS = {
+    "must": (r"\bmust\b", r"\bshall\b", r"\brequired\b", r"\bmandatory\b"),
+    "shall": (
+        r"\bshall\b",
+        r"\bmust\b",
+        r"\brequired\b",
+        r"\bmandatory\b",
+        r"\b(?:is|are)\s+put\b",
+    ),
+    "may": (r"\bmay\b", r"\bcan\b", r"\bpermitted\b", r"\ballowed\b", r"\bentitled\b"),
+    "not": (r"\bnot\b", r"\bno\b", r"\bnever\b", r"\bneither\b", r"\bnor\b", r"\bwithout\b", r"\bcannot\b"),
+    "except": (r"\bexcept\b", r"\bexcluding\b", r"\bother\s+than\b"),
+    "unless": (r"\bunless\b", r"\bif\s+not\b", r"\bexcept\s+when\b"),
+    "only": (r"\bonly\b", r"\bsolely\b", r"\bexclusively\b", r"\blimited\s+to\b"),
+    "subject to": (r"\bsubject\s+to\b", r"\bprovided\s+that\b", r"\bconditional\s+on\b"),
+}
 DANGLING_FINAL_WORD = re.compile(
-    r"\b(?:a|an|and|at|but|by|for|from|if|in|of|on|or|over|than|that|the|"
-    r"to|under|when|which|while|whose|with)\s*$",
+    r"\b(?:a|an|and|at|but|by|for|from|if|in|of|on|or|over|than|that|the|" r"to|under|when|which|while|whose|with)\s*$",
     re.IGNORECASE,
 )
 
@@ -56,12 +70,7 @@ def _unsupported_quantities(answer: str, support_text: str) -> list[str]:
     for display, value, unit in _quantities(answer):
         exact = (value, unit) in supported
         parent_section = (
-            not unit
-            and value.isdigit()
-            and any(
-                not support_unit and support_value.startswith(f"{value}.")
-                for support_value, support_unit in supported
-            )
+            not unit and value.isdigit() and any(not support_unit and support_value.startswith(f"{value}.") for support_value, support_unit in supported)
         )
         if not exact and not parent_section:
             unsupported.append(display)
@@ -72,6 +81,54 @@ def _is_incomplete_evidence_fragment(quote: str) -> bool:
     """Detect only high-confidence dangling prose without rejecting headings."""
     text = quote.strip()
     return bool(text and DANGLING_FINAL_WORD.search(text))
+
+
+_QUOTE_MARK_PAIRS = (('"', '"'), ("'", "'"), ("“", "”"), ("‘", "’"))
+
+
+def _normalized_text(value: str) -> str:
+    """Normalize only whitespace; preserve every lexical and punctuation token."""
+    return " ".join(str(value or "").split())
+
+
+def _unwrap_balanced_quote(value: str) -> str:
+    text = str(value or "").strip()
+    for opening, closing in _QUOTE_MARK_PAIRS:
+        if len(text) >= 2 and text.startswith(opening) and text.endswith(closing):
+            return text[len(opening) : -len(closing)].strip()
+    return text
+
+
+def judge_quotes_are_grounded(
+    judge_quotes: list[str],
+    source_text: str,
+    evidence_quotes: list[str],
+) -> bool:
+    """Verify judge witnesses without weakening the primary evidence contract.
+
+    A witness may be one source substring or a lossless concatenation of
+    consecutive, already-verified evidence items. Persisted evidence remains
+    unchanged and must have passed the stricter source-specific validator.
+    """
+    if not judge_quotes:
+        return False
+    normalized_source = _normalized_text(source_text)
+    normalized_evidence = [_normalized_text(quote) for quote in evidence_quotes if quote]
+    allowed_concatenations: set[str] = set()
+    for start in range(len(normalized_evidence)):
+        for end in range(start + 2, len(normalized_evidence) + 1):
+            allowed_concatenations.add(" ".join(normalized_evidence[start:end]))
+    for quote in judge_quotes:
+        normalized_quote = _normalized_text(_unwrap_balanced_quote(quote))
+        if not normalized_quote:
+            return False
+        if normalized_quote not in normalized_source and normalized_quote not in allowed_concatenations:
+            return False
+    return True
+
+
+def _has_pattern(text: str, patterns: tuple[str, ...]) -> bool:
+    return any(re.search(pattern, text, flags=re.IGNORECASE) for pattern in patterns)
 
 
 def validate_record(record: dict[str, Any], passage: str) -> list[str]:
@@ -94,10 +151,9 @@ def validate_record(record: dict[str, Any], passage: str) -> list[str]:
     support = " ".join(quotes)
     for number in _unsupported_quantities(record["answer"], support):
         reasons.append(f"unsupported_number:{number}")
-    support_lower = support.lower()
-    answer = record["answer"].lower()
-    for qualifier in QUALIFIERS:
-        if qualifier in support_lower and qualifier not in answer and len(quotes) == 1:
+    answer = record["answer"]
+    for qualifier, patterns in QUALIFIER_EQUIVALENTS.items():
+        if _has_pattern(support, (patterns[0],)) and not _has_pattern(answer, patterns) and len(quotes) == 1:
             reasons.append(f"dropped_qualifier:{qualifier}")
     steps = record.get("reasoning_steps", [])
     if record["task_type"] == "qa_cot" and len(steps) < 2:
@@ -110,18 +166,13 @@ def validate_record(record: dict[str, Any], passage: str) -> list[str]:
     return sorted(set(reasons))
 
 
-def deduplicate(
-    records: Iterable[dict[str, Any]], threshold: float = 94.0
-) -> tuple[list[dict[str, Any]], int]:
+def deduplicate(records: Iterable[dict[str, Any]], threshold: float = 94.0) -> tuple[list[dict[str, Any]], int]:
     """Remove exact and near-duplicate questions deterministically."""
     accepted: list[dict[str, Any]] = []
     removed = 0
     for record in records:
         question = " ".join(record["question"].lower().split())
-        if any(
-            token_set_ratio(question, existing["_normalized_question"]) >= threshold
-            for existing in accepted
-        ):
+        if any(token_set_ratio(question, existing["_normalized_question"]) >= threshold for existing in accepted):
             removed += 1
             continue
         record["_normalized_question"] = question
@@ -149,11 +200,7 @@ def validate_cross_record(record: dict[str, Any], documents: list[dict[str, Any]
             if _is_incomplete_evidence_fragment(quote):
                 reasons.append("incomplete_evidence_fragment")
             used_claim_sources.add(source_id)
-    claim_support = " ".join(
-        evidence["quote"]
-        for claim in record.get("claims", [])
-        for evidence in claim.get("evidence", [])
-    )
+    claim_support = " ".join(evidence["quote"] for claim in record.get("claims", []) for evidence in claim.get("evidence", []))
     # Manual identity and version dates are valid support for attribution in the
     # answer even when they are not repeated inside the quoted policy sentence.
     metadata_support = " ".join(
@@ -168,9 +215,7 @@ def validate_cross_record(record: dict[str, Any], documents: list[dict[str, Any]
             "section",
         )
     )
-    for number in _unsupported_quantities(
-        record["answer"], f"{claim_support}\n{metadata_support}"
-    ):
+    for number in _unsupported_quantities(record["answer"], f"{claim_support}\n{metadata_support}"):
         reasons.append(f"unsupported_number:{number}")
     for step in record.get("reasoning_steps", []):
         for evidence in step.get("evidence", []):

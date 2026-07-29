@@ -30,7 +30,7 @@ from drafting import (
 from export import assign_splits, export_records, write_manifest
 from jsonl_io import write_jsonl_rows
 from schemas import CandidateBatch, JudgeBatch
-from validation import deduplicate, validate_record
+from validation import deduplicate, judge_quotes_are_grounded, validate_record
 
 # settings enforces local-only mode before Curator is imported.
 from bespokelabs import curator
@@ -321,16 +321,10 @@ rationale shape, and every unanswerable record uses the required exact answer.
             draft = candidate.model_dump()
             reasons = []
             if draft["task_type"] != row["planned_task_type"]:
-                reasons.append(
-                    f"planned_task_type_mismatch:{row['planned_task_type']}"
-                )
+                reasons.append(f"planned_task_type_mismatch:{row['planned_task_type']}")
             if draft["answerable"] != row["planned_answerable"]:
-                reasons.append(
-                    f"planned_answerability_mismatch:{row['planned_answerable']}"
-                )
-            if draft["task"] not in TAXONOMY.get("tasks", []) or draft[
-                "persona"
-            ] not in TAXONOMY.get("personas", []):
+                reasons.append(f"planned_answerability_mismatch:{row['planned_answerable']}")
+            if draft["task"] not in TAXONOMY.get("tasks", []) or draft["persona"] not in TAXONOMY.get("personas", []):
                 reasons.append("unsupported_taxonomy_value")
             reasons.extend(validate_record(draft, row["passage"]))
             reasons = sorted(set(reasons))
@@ -474,13 +468,13 @@ and issues, and rejection of every unsupported claim or lost qualification.
             quotes = decision["answer_quotes"]
             quote_consistent = (
                 decision["answer_found_in_source"]
-                and bool(quotes)
-                and all(quote in record["_source_passage"] for quote in quotes)
-                if record["answerable"]
-                else (
-                    not decision["answer_found_in_source"]
-                    and not quotes
+                and judge_quotes_are_grounded(
+                    quotes,
+                    record["_source_passage"],
+                    [item["quote"] for item in record.get("evidence", [])],
                 )
+                if record["answerable"]
+                else (not decision["answer_found_in_source"] and not quotes)
             )
             record["judge"] = {
                 **decision,
@@ -650,16 +644,8 @@ def main() -> None:
     ).dataset.to_list()
     _write_audit(files_dir / "qa_generated_audit.jsonl", generated_audit)
     single_generation_coverage = request_coverage(planned_single, generated_audit)
-    deterministic_rejected = [
-        row
-        for row in generated_audit
-        if not row.get("deterministic_checks", {}).get("passed", False)
-    ]
-    generated = [
-        row
-        for row in generated_audit
-        if row.get("deterministic_checks", {}).get("passed", False)
-    ]
+    deterministic_rejected = [row for row in generated_audit if not row.get("deterministic_checks", {}).get("passed", False)]
+    generated = [row for row in generated_audit if row.get("deterministic_checks", {}).get("passed", False)]
     generated, duplicates = deduplicate(generated, float(QUALITY.get("dedupe_threshold", 94)))
     if not generated:
         write_manifest(
@@ -695,15 +681,12 @@ def main() -> None:
     single_accepted = list(accepted)
     single_coverage = {
         "generated": single_generation_coverage,
-        "judged": request_coverage(
-            planned_single, generated if args.skip_judge else judged
-        ),
+        "judged": request_coverage(planned_single, generated if args.skip_judge else judged),
         "accepted": request_coverage(planned_single, single_accepted),
     }
     _write_audit(
         files_dir / "qa_rejected.jsonl",
-        deterministic_rejected
-        + ([] if args.skip_judge else _rejected_records(generated, judged)),
+        deterministic_rejected + ([] if args.skip_judge else _rejected_records(generated, judged)),
     )
 
     cross_accepted: list[dict[str, Any]] = []
@@ -725,9 +708,7 @@ def main() -> None:
         planned_cross = plan_cross_document_requests(bundles, seed)
         if bundles:
             os.environ["HOSTED_VLLM_API_KEY"] = _model_settings(GENERATION)[2]
-            cross_generated_audit = CrossDocumentGenerator(
-                **_llm_kwargs(GENERATION)
-            )(
+            cross_generated_audit = CrossDocumentGenerator(**_llm_kwargs(GENERATION))(
                 Dataset.from_list(planned_cross),
                 working_dir=_working_dir(run_id, "cross_generation"),
             ).dataset.to_list()
@@ -735,16 +716,8 @@ def main() -> None:
                 files_dir / "cross_generated_audit.jsonl",
                 cross_generated_audit,
             )
-            cross_deterministic_rejected = [
-                row
-                for row in cross_generated_audit
-                if not row.get("deterministic_checks", {}).get("passed", False)
-            ]
-            cross_generated = [
-                row
-                for row in cross_generated_audit
-                if row.get("deterministic_checks", {}).get("passed", False)
-            ]
+            cross_deterministic_rejected = [row for row in cross_generated_audit if not row.get("deterministic_checks", {}).get("passed", False)]
+            cross_generated = [row for row in cross_generated_audit if row.get("deterministic_checks", {}).get("passed", False)]
             cross_generated, cross_duplicates = deduplicate(cross_generated, float(QUALITY.get("dedupe_threshold", 94)))
             if args.skip_judge:
                 cross_accepted = cross_generated
@@ -758,19 +731,12 @@ def main() -> None:
                 cross_accepted = [row for row in cross_judged if row["judge"]["accepted"]]
     cross_coverage = {
         "generated": request_coverage(planned_cross, cross_generated_audit),
-        "judged": request_coverage(
-            planned_cross, cross_generated if args.skip_judge else cross_judged
-        ),
+        "judged": request_coverage(planned_cross, cross_generated if args.skip_judge else cross_judged),
         "accepted": request_coverage(planned_cross, cross_accepted),
     }
     _write_audit(
         files_dir / "cross_rejected.jsonl",
-        cross_deterministic_rejected
-        + (
-            []
-            if args.skip_judge
-            else _rejected_records(cross_generated, cross_judged)
-        ),
+        cross_deterministic_rejected + ([] if args.skip_judge else _rejected_records(cross_generated, cross_judged)),
     )
 
     accepted.extend(cross_accepted)
@@ -895,9 +861,7 @@ def main() -> None:
 
     task_counts = {task_type: sum(row["task_type"] == task_type for row in accepted) for task_type in QUALITY.get("required_task_types", [])}
     required_missing = [task_type for task_type, count in task_counts.items() if count == 0]
-    incomplete_requests = single_coverage["accepted"].get(
-        "missing_request_ids", []
-    ) or cross_coverage["accepted"].get("missing_request_ids", [])
+    incomplete_requests = single_coverage["accepted"].get("missing_request_ids", []) or cross_coverage["accepted"].get("missing_request_ids", [])
     status = "complete" if not required_missing and not incomplete_requests else "partial"
     final_manifest = _final_manifest(
         run_id=run_id,

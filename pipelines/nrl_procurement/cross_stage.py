@@ -11,7 +11,7 @@ from typing import Any
 from cross_document import evidence_location
 from schemas import CrossCandidateBatch, CrossJudgeBatch
 from settings import CONFIG
-from validation import validate_cross_record
+from validation import judge_quotes_are_grounded, validate_cross_record
 
 from bespokelabs import curator
 
@@ -126,16 +126,10 @@ preserved authority and qualifications, and task_type-consistent rationale struc
             draft = candidate.model_dump()
             reasons = []
             if draft["task_type"] != row["planned_task_type"]:
-                reasons.append(
-                    f"planned_task_type_mismatch:{row['planned_task_type']}"
-                )
+                reasons.append(f"planned_task_type_mismatch:{row['planned_task_type']}")
             if draft["answerable"] != row["planned_answerable"]:
-                reasons.append(
-                    f"planned_answerability_mismatch:{row['planned_answerable']}"
-                )
-            if draft["task"] not in TAXONOMY.get("tasks", []) or draft[
-                "persona"
-            ] not in TAXONOMY.get("personas", []):
+                reasons.append(f"planned_answerability_mismatch:{row['planned_answerable']}")
+            if draft["task"] not in TAXONOMY.get("tasks", []) or draft["persona"] not in TAXONOMY.get("personas", []):
                 reasons.append("unsupported_taxonomy_value")
             reasons.extend(validate_cross_record(draft, row["source_documents"]))
             reasons = sorted(set(reasons))
@@ -167,9 +161,7 @@ preserved authority and qualifications, and task_type-consistent rationale struc
                     }
                 )
             draft["reasoning_steps"] = steps
-            documents = {
-                document["source_id"]: document for document in row["source_documents"]
-            }
+            documents = {document["source_id"]: document for document in row["source_documents"]}
             citations = []
             for item in flat_evidence.values():
                 document = documents[item["source_id"]]
@@ -306,14 +298,11 @@ and consistency among booleans, ablation list, score, and issues.
             ablation_passed = set(decision["unsupported_without_source_ids"]) == {"source_a", "source_b"} if record["answerable"] else True
             task_correct = decision["recommended_task"] == record["task"]
             persona_correct = decision["recommended_persona"] == record["persona"]
-            source_text = "\n\n".join(
-                document["passage"] for document in record["source_documents"]
-            )
+            source_text = "\n\n".join(document["passage"] for document in record["source_documents"])
             quotes = decision["answer_quotes"]
+            evidence_quotes = [evidence["quote"] for claim in record.get("claims", []) for evidence in claim.get("evidence", [])]
             answerability_correct = (
-                decision["answer_found_in_source"]
-                and bool(quotes)
-                and all(quote in source_text for quote in quotes)
+                decision["answer_found_in_source"] and judge_quotes_are_grounded(quotes, source_text, evidence_quotes)
                 if record["answerable"]
                 else not decision["answer_found_in_source"] and not quotes
             )

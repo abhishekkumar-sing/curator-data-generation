@@ -1474,6 +1474,119 @@ Observed under `data/`:
 - [ ] Report judge score distributions and disagreement with deterministic
   checks. An all-5 pilot is a calibration warning, not proof of perfect data.
 
+### Pilot-007 validation-overhaul research record (2026-07-29)
+
+Status: deterministic implementation complete; local regression tests pass.
+A user-run validation pilot remains required.
+
+Capability and observed failures:
+
+- Pilot-007 completed every provider request and eliminated the earlier missing
+  response-file crash, but accepted no `cross_document_qa_cot` record.
+- Three otherwise supported records exposed deterministic or judge-witness
+  false negatives: `not` matched the substring in `note`; categorical
+  paraphrases of `shall` were rejected solely by lexical mismatch; and Gemma
+  concatenated multiple individually exact evidence spans into one judge quote.
+- Three other cross-document records contained genuinely modified or
+  misattributed evidence. Any repair must continue rejecting those records.
+
+Verified local and reference findings:
+
+- `validation.py` currently finds qualifiers with unrestricted substring
+  membership. It therefore cannot distinguish the token `not` from `note`.
+- The single- and cross-document judge parsers require every judge witness to
+  be one literal substring of the entire source passage. They do not recognize
+  a witness that losslessly concatenates already-verified, non-contiguous
+  evidence spans.
+- The reference project normalizes harmless whitespace and removes one balanced
+  decorative outer quote pair before exact grounding. It persists only the
+  canonical source-grounded quote and rejects changed internal wording. It
+  does not implement concatenated judge-witness verification.
+- Pilot-007's accepted citations already retain exact source text, chunk/page
+  identity, and offsets. Judge-witness tolerance must not mutate that primary
+  evidence or replace its deterministic checks.
+
+Research-supported decision:
+
+- Tokenize qualifier checks with word boundaries and compare modality classes,
+  so lexical substrings cannot trigger a failure and equivalent mandatory or
+  permissive forms can preserve modality. Continue treating lost negation,
+  conditions, exceptions, and exclusivity as failures.
+- Keep generator evidence exact. For judge `answer_quotes`, accept an exact
+  source span after whitespace/balanced-wrapper normalization, or a lossless
+  concatenation of two or more already deterministically verified evidence
+  spans in their original record order. Do not allow fuzzy matching,
+  punctuation changes, reordered spans, partial-token matching, or
+  model-authored replacement text.
+- Judge semantic booleans, taxonomy agreement, score threshold, deterministic
+  evidence checks, and cross-source ablation remain independently mandatory.
+  The change repairs witness serialization only; it does not turn a judge score
+  into proof of grounding.
+
+Alternatives rejected:
+
+- Removing deterministic modality checks: increases acceptance by discarding a
+  material procurement safeguard.
+- Fuzzy quote similarity: may silently accept changed thresholds, negations,
+  authorities, or remedies.
+- Trusting a score-5 judge without a grounded witness: conflicts with the
+  pipeline's independent traceability contract.
+- Rewriting generated evidence to the nearest source span: can conceal
+  attribution errors and corrupt audit lineage.
+
+Known risks and validation:
+
+- Modality equivalence is necessarily narrower than full natural-language
+  entailment. Regression tests must include preserved and genuinely dropped
+  mandatory, permissive, conditional, negative, and exception cases.
+- Concatenation tolerance could be over-broad unless it is limited to complete,
+  pre-verified evidence items in record order. Tests must reject altered,
+  partial, reordered, and foreign-source spans.
+- Unit tests establish deterministic behavior only. The conclusion that this
+  improves production yield remains provisional until the user runs another
+  bounded pilot; Codex must not run that model-backed pilot.
+
+Implementation result:
+
+- [x] Match qualifiers as tokens rather than unrestricted substrings.
+- [x] Preserve mandatory/permissive modality through narrow, tested
+  equivalence classes while continuing to reject a `shall` to `may` weakening.
+- [x] Accept whitespace-normalized, balanced-wrapper judge witnesses and
+  lossless concatenations of consecutive, already-verified evidence items.
+- [x] Continue rejecting altered, reordered, partial, and foreign-source
+  witnesses; persisted generator evidence and citations remain unchanged.
+- [x] Re-evaluate Pilot-007 locally without model calls: the two holiday-list
+  records and performance-notice record clear their false deterministic
+  failures; the hospitality/gifts judge witness clears its serialization
+  failure; the truncated final-payment evidence remains rejected.
+- [x] Keep the malformed LD judge witness rejected because it changes source
+  punctuation with an unmatched trailing quote. The existing prompt already
+  requires each judge witness to be a contiguous verbatim span, so a future
+  well-formed response can pass without weakening validation.
+- [x] Add regression coverage and pass the complete local procurement test
+  suite and Ruff checks.
+- [ ] Confirm production yield and `cross_document_qa_cot` coverage through a
+  bounded user-run pilot.
+
+Primary and official sources:
+
+- [Bespoke Curator repository](https://github.com/bespokelabsai/curator)
+  documents Pydantic structured responses followed by application-defined
+  `parse` processing, caching, and recovery.
+- [Google Gemini structured-output documentation](https://ai.google.dev/gemini-api/docs/structured-output)
+  explicitly states that schema-valid JSON does not guarantee semantically
+  correct values and recommends application validation.
+- [Hugging Face structured-output documentation](https://huggingface.co/docs/huggingface_hub/guides/inference#structured-outputs--json-mode)
+  distinguishes schema conformance from downstream provider/model behavior.
+- Alberti et al.,
+  [Synthetic QA Corpora Generation with Roundtrip Consistency](https://aclanthology.org/P19-1620/),
+  supports filtering generated QA through an independent answer-consistency
+  check instead of accepting schema-valid generations directly.
+- Gao et al.,
+  [Enabling Large Language Models to Generate Text with Citations](https://aclanthology.org/2023.emnlp-main.398/),
+  treats citation correctness and answer support as distinct verifiability
+  dimensions.
+
 #### Exports, splits, and run manifest
 
 - [ ] Write the manifest last, atomically, with a terminal status of

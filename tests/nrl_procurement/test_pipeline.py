@@ -42,7 +42,12 @@ from schemas import (  # noqa: E402
     DraftingResult,
     JudgeBatch,
 )
-from validation import deduplicate, validate_cross_record, validate_record  # noqa: E402
+from validation import (  # noqa: E402
+    deduplicate,
+    judge_quotes_are_grounded,
+    validate_cross_record,
+    validate_record,
+)
 
 
 def test_manifest_metadata_and_stable_chunk(tmp_path: Path) -> None:
@@ -84,6 +89,56 @@ def test_validation_rejects_unsupported_number() -> None:
     assert "unsupported_number:10 years" in validate_record(record, "The buyer shall retain it for 5 years.")
 
 
+def test_validation_uses_qualifier_tokens_and_modality_equivalence() -> None:
+    passage = "You are requested to note that the contract shall be cancelled. " "The bidder shall be put on the holiday list."
+    consequence = {
+        "task_type": "qa",
+        "question": "What is the consequence?",
+        "answer": "The contract shall be cancelled.",
+        "answerable": True,
+        "evidence": [{"quote": ("You are requested to note that the contract shall be cancelled.")}],
+        "reasoning_steps": [],
+    }
+    assert "dropped_qualifier:not" not in validate_record(consequence, passage)
+
+    categorical = {
+        **consequence,
+        "question": "What happens to the bidder?",
+        "answer": "The bidder is put on the holiday list.",
+        "evidence": [{"quote": "The bidder shall be put on the holiday list."}],
+    }
+    assert "dropped_qualifier:shall" not in validate_record(categorical, passage)
+
+    weakened = {**categorical, "answer": "The bidder may be put on the holiday list."}
+    assert "dropped_qualifier:shall" in validate_record(weakened, passage)
+
+
+def test_judge_witness_accepts_only_lossless_grounded_forms() -> None:
+    evidence = [
+        "Hospitality must never be solicited, directly or indirectly.",
+        "Gifts must never be solicited, directly or indirectly.",
+        "Cash gift cheques may not be accepted regardless of the amount.",
+    ]
+    source = f"{evidence[0]}\nIntervening policy text.\n{evidence[1]} " f"{evidence[2]}"
+    combined = f"{evidence[1]} {evidence[2]}"
+    assert judge_quotes_are_grounded([combined], source, evidence)
+    assert judge_quotes_are_grounded(
+        ["“Hospitality must never be solicited, directly or indirectly.”"],
+        source,
+        evidence,
+    )
+    assert not judge_quotes_are_grounded(
+        [f"{evidence[2]} {evidence[1]}"],
+        source,
+        evidence,
+    )
+    assert not judge_quotes_are_grounded(
+        ["Cash gift cheques may be accepted regardless of the amount."],
+        source,
+        evidence,
+    )
+
+
 def test_cross_validation_accepts_typed_quantities_and_metadata_dates() -> None:
     documents = [
         {
@@ -94,9 +149,7 @@ def test_cross_validation_accepts_typed_quantities_and_metadata_dates() -> None:
             "as_of_date": "2019",
             "page": 1,
             "section": "Liquidated damages",
-            "passage": (
-                "Damages shall not exceed 10 (ten) per cent of the Contract Price."
-            ),
+            "passage": ("Damages shall not exceed 10 (ten) per cent of the Contract Price."),
         },
         {
             "source_id": "source_b",
@@ -106,19 +159,13 @@ def test_cross_validation_accepts_typed_quantities_and_metadata_dates() -> None:
             "as_of_date": "2025",
             "page": 2,
             "section": "Liquidated damages",
-            "passage": (
-                "Damages shall not exceed 10 (ten) per cent of the Contract Price. "
-                "Milestone LD shall be refunded without interest."
-            ),
+            "passage": ("Damages shall not exceed 10 (ten) per cent of the Contract Price. " "Milestone LD shall be refunded without interest."),
         },
     ]
     record = {
         "task_type": "cross_document_qa",
         "question": "What changed between the 2019 and 2025 manuals?",
-        "answer": (
-            "The 2019 and 2025 manuals cap damages at 10 percent, while the "
-            "2025 manual additionally refunds milestone LD without interest."
-        ),
+        "answer": ("The 2019 and 2025 manuals cap damages at 10 percent, while the " "2025 manual additionally refunds milestone LD without interest."),
         "answerable": True,
         "claims": [
             {
@@ -155,9 +202,7 @@ def test_quantity_validation_does_not_swallow_following_prose() -> None:
 
 
 def test_validation_rejects_dangling_evidence_without_requiring_punctuation() -> None:
-    truncated = (
-        "Before releasing the PBG, ensure that there is nothing outstanding from the"
-    )
+    truncated = "Before releasing the PBG, ensure that there is nothing outstanding from the"
     record = {
         "task_type": "qa",
         "question": "What must be checked before releasing the PBG?",
@@ -171,9 +216,7 @@ def test_validation_rejects_dangling_evidence_without_requiring_punctuation() ->
     heading_evidence = "Defects Liability Certificate"
     record["answer"] = "A Defects Liability Certificate is required."
     record["evidence"] = [{"quote": heading_evidence}]
-    assert "incomplete_evidence_fragment" not in validate_record(
-        record, heading_evidence
-    )
+    assert "incomplete_evidence_fragment" not in validate_record(record, heading_evidence)
 
 
 def test_dedup_and_amendment_connected_split() -> None:
@@ -294,10 +337,7 @@ def test_deterministic_rejections_are_materialized_for_audit() -> None:
     )
     assert len(single) == 1
     assert single[0]["deterministic_checks"]["passed"] is False
-    assert (
-        "unsupported_number:10 years"
-        in single[0]["deterministic_checks"]["issues"]
-    )
+    assert "unsupported_number:10 years" in single[0]["deterministic_checks"]["issues"]
 
     cross_row = {
         "source_bundle_id": "bundle",
