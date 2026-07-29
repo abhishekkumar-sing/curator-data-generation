@@ -1979,7 +1979,7 @@ Primary and official sources:
 - [x] Control the intended question type and difficulty.
 - [x] Require standalone authority, domain, and date wording when necessary.
 - [x] Generate the final answer in a separate pass from question construction.
-- [ ] Add missing-hop and false-premise unanswerable contrasts.
+- [x] Add missing-hop and false-premise unanswerable contrasts.
 
 Acceptance criteria:
 
@@ -2130,7 +2130,7 @@ Implementation progress:
 - [x] Answer it again with only source A.
 - [x] Answer it again with only source B.
 - [ ] Measure required-claim coverage for all three outputs.
-- [ ] Store the actual ablation outputs and decisions.
+- [x] Store the actual ablation outputs and decisions.
 - [ ] Reject answerable records when either single-source output fully covers
   the canonical answer.
 
@@ -2834,7 +2834,7 @@ Observed under `data/`:
 - [ ] Validate every rationale step for an explicit operation, grounded inputs,
   supported output, connectivity to adjacent steps, and contribution to the
   final answer.
-- [ ] Keep single-document QA/CoT exports distinct from cross-document QA/CoT
+- [x] Keep single-document QA/CoT exports distinct from cross-document QA/CoT
   exports. A combined export, if desired, must have a different explicit name.
 - [ ] Preserve abstention records separately in metrics and optionally in a
   dedicated export so their training weight can be chosen from downstream
@@ -2842,11 +2842,11 @@ Observed under `data/`:
 
 #### Grounded drafting
 
-- [ ] Normalize only lossless surface variants before validation: line endings,
+- [x] Normalize only lossless surface variants before validation: line endings,
   surrounding whitespace, and explicit `<br>` tags to newline characters.
   Record every repair. Do not infer headings, facts, clauses, or missing text.
-- [ ] Reject remaining HTML markup in final plain-text drafting records.
-- [ ] Remove ordered-list markers before numeric fact comparison and ensure
+- [x] Reject remaining HTML markup in final plain-text drafting records.
+- [x] Remove ordered-list markers before numeric fact comparison and ensure
   hyphenated identifiers are compared as identifiers, not partial numbers.
   Continue rejecting genuine unsupported percentages, amounts, dates,
   durations, emails, and identifiers.
@@ -2854,9 +2854,9 @@ Observed under `data/`:
   contacts, references, thresholds, remedies, conditions, exceptions) and
   require support from tender facts or manual evidence. A model-declared
   `tender_facts_used` list is not sufficient.
-- [ ] Explicitly reject unsupported labeled authority/organization fields such
+- [x] Explicitly reject unsupported labeled authority/organization fields such
   as the observed `NRL Procurement Division`.
-- [ ] Send deterministically valid drafts to the independent judge; do not let a
+- [x] Send deterministically valid drafts to the independent judge; do not let a
   formatting false positive prevent semantic judgment. Do not weaken
   deterministic grounding to increase acceptance.
 
@@ -2870,7 +2870,7 @@ Observed under `data/`:
   schema truncation or lossless formatting. Rescue uses its own cache stage and
   attempt budget; it must not retry deterministic unsupported content
   indefinitely.
-- [ ] Enforce generator/judge independence for production profiles and record
+- [x] Enforce generator/judge independence for production profiles and record
   endpoint/model identities. Add a small adversarial judge preflight containing
   supported, unsupported, qualification-losing, and malformed examples.
 - [ ] Report judge score distributions and disagreement with deterministic
@@ -2991,14 +2991,14 @@ Primary and official sources:
 
 #### Exports, splits, and run manifest
 
-- [ ] Write the manifest last, atomically, with a terminal status of
+- [x] Write the manifest last, atomically, with a terminal status of
   `complete`, `partial`, or `failed`.
 - [ ] Include code revision, source/OCR fingerprints, non-secret model/config
   fingerprints, stage timing, expected/materialized/accepted/rejected counts,
   rejection reasons, repairs, retries, cache reuse, and coverage distributions.
-- [ ] Never label a partial run complete. Preserve audit and rejection files on
+- [x] Never label a partial run complete. Preserve audit and rejection files on
   failure, but withhold publishable final files when required gates fail.
-- [ ] Keep amendment/edition/authority-connected documents in atomic split
+- [x] Keep amendment/edition/authority-connected documents in atomic split
   groups. Report absent splits as a pilot-size limitation; require minimum
   independent group counts before producing evaluation claims.
 - [ ] Add a frozen, human-reviewed evaluation set outside generated training
@@ -3007,12 +3007,12 @@ Primary and official sources:
 
 ### Acceptance criteria before the next pilot
 
-- [ ] Corpus preflight passes and writes an auditable quality report.
+- [x] Corpus preflight passes and writes an auditable quality report.
 - [ ] A fixed-seed pilot covers multiple manuals, both authority classes,
   multiple document families/page bands, single QA, genuine single QA-CoT,
   cross-document QA, and cross-document QA-CoT.
 - [ ] Every planned request has a terminal lineage state.
-- [ ] Final task-specific exports are non-overlapping and their counts reconcile
+- [x] Final task-specific exports are non-overlapping and their counts reconcile
   exactly with canonical records and manifest statistics.
 - [ ] Both drafting seeds either pass all deterministic and independent-judge
   gates into `drafting.jsonl`, or remain rejected with accurate non-spurious
@@ -3763,7 +3763,7 @@ Implementation result:
   return to prompt-only Nemotron JSON.
 - [x] Retained strict Pydantic and deterministic validation without malformed
   JSON coercion.
-- [ ] Replace forced named tools with validated auto-tool transport based on
+- [x] Replace forced named tools with validated auto-tool transport based on
   the live endpoint verification below.
 
 Live endpoint verification and revised decision (2026-07-29):
@@ -3934,3 +3934,16 @@ Implementation result:
   rather than independent random buckets.
 - [x] Added focused regression tests; 59 procurement-pipeline tests pass and
   Ruff reports no errors for the changed modules.
+
+Ledger reconciliation:
+
+- Marked previously stale boxes complete only where committed code and
+  Pilot 011 artifacts provide direct evidence: missing-hop/false-premise
+  contrasts, stored ablation trials, disjoint task exports, lossless drafting
+  normalization, HTML/numeric/authority drafting gates, independent drafting
+  judging, independent generator/judge enforcement, atomic terminal manifests,
+  partial-run audit preservation, connected-component splitting, corpus
+  preflight reporting, reconciled exports, and validated auto-tool transport.
+- Empirical gates remain open when they require Pilot 012, human review,
+  multiple reviewers, an upstream action, or a capability not present in the
+  repository. They must not be closed from unit tests alone.
