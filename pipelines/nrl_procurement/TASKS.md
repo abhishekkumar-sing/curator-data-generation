@@ -1207,7 +1207,8 @@ Implementation result:
 
 #### Stable proposition-row schema research record (2026-07-29)
 
-Status: research complete after pilot-009; implementation pending.
+Status: implemented and locally verified after pilot-009; user-run resume
+validation pending.
 
 Observed failure:
 
@@ -1255,6 +1256,21 @@ Risks and validation:
 - A stable top-level schema does not itself prove proposition quality.
 - Resume pilot-009 only after unit tests and an Arrow round-trip regression
   pass. The user, not Codex, performs the model-backed rerun.
+
+Implementation and verification:
+
+- [x] Added `empty_extraction: false` to every materialized proposition.
+- [x] Added a full-schema empty-extraction materializer with immutable source
+  metadata, type-compatible neutral fields, blank proposition ID, and explicit
+  `empty_extraction: true`.
+- [x] Kept accepted-record filtering unchanged: only nonblank proposition IDs
+  with passing deterministic checks are eligible.
+- [x] Added regression coverage for parser empty batches and an actual
+  `ArrowWriter` round trip containing an empty extraction followed by a real
+  proposition.
+- [x] Passed all 46 focused procurement tests and Ruff checks.
+- [ ] Resume pilot-009 with the same command/run ID and inspect all downstream
+  artifacts and manifest counts before considering the pilot complete.
 
 ### 2. Construct connected reasoning paths before questions
 

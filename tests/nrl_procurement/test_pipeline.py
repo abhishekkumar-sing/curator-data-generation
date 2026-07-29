@@ -46,6 +46,8 @@ from path_qa import (  # noqa: E402
 )
 from prompt_budget import measure_rendered_request  # noqa: E402
 from propositions import (  # noqa: E402
+    PropositionExtractor,
+    materialize_empty_extraction,
     materialize_proposition,
     proposition_cache_fingerprint,
     proposition_validation_issues,
@@ -60,6 +62,7 @@ from schemas import (  # noqa: E402
     DraftingBlock,
     DraftingResult,
     JudgeBatch,
+    PropositionBatch,
 )
 from source_windows import (  # noqa: E402
     build_source_windows,
@@ -603,6 +606,46 @@ def test_proposition_cache_fingerprint_and_round_trip(tmp_path: Path) -> None:
     )
     assert empty_hits == {empty_fingerprint}
     assert cached_empty == [empty]
+
+
+def test_proposition_and_empty_extraction_share_arrow_schema(tmp_path: Path) -> None:
+    from datasets import Dataset
+    from datasets.arrow_writer import ArrowWriter
+
+    row = _proposition_source_row()
+    fingerprint = "f" * 64
+    proposition = materialize_proposition(_proposition_draft(), row, fingerprint)
+    empty = materialize_empty_extraction(row, fingerprint)
+
+    assert proposition.keys() == empty.keys()
+    assert proposition["empty_extraction"] is False
+    assert empty["empty_extraction"] is True
+
+    arrow_path = tmp_path / "mixed-propositions.arrow"
+    with ArrowWriter(path=str(arrow_path)) as writer:
+        writer.write(empty)
+        writer.write(proposition)
+        writer.finalize()
+    dataset = Dataset.from_file(str(arrow_path))
+
+    assert len(dataset) == 2
+    assert dataset["empty_extraction"] == [True, False]
+
+
+def test_proposition_extractor_uses_full_schema_for_empty_batch() -> None:
+    row = {
+        **_proposition_source_row(),
+        "proposition_cache_fingerprint": "f" * 64,
+    }
+    extractor = object.__new__(PropositionExtractor)
+    parsed = extractor.parse(row, PropositionBatch(propositions=[]))
+
+    assert parsed == [
+        materialize_empty_extraction(
+            row,
+            row["proposition_cache_fingerprint"],
+        )
+    ]
 
 
 def _path_proposition(

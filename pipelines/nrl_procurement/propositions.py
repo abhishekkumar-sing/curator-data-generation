@@ -141,6 +141,7 @@ def materialize_proposition(
     proposition_id = "prop-" + hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()[:24]
     return {
         "proposition_id": proposition_id,
+        "empty_extraction": False,
         "subject": draft["subject"],
         "authority": {
             "manual_id": row["manual_id"],
@@ -177,6 +178,47 @@ def materialize_proposition(
             "passed": not issues,
             "issues": issues,
         },
+    }
+
+
+def materialize_empty_extraction(
+    row: dict[str, Any],
+    cache_fingerprint: str,
+) -> dict[str, Any]:
+    """Represent a valid zero-result extraction with the proposition schema."""
+    return {
+        "proposition_id": "",
+        "empty_extraction": True,
+        "subject": "",
+        "authority": {
+            "manual_id": row["manual_id"],
+            "manual_title": row["title"],
+            "issuing_organization": row["issuing_organization"],
+            "policy_scope": row["policy_scope"],
+            "revision_date": row["revision_date"],
+            "as_of_date": row["as_of_date"],
+        },
+        "action": "",
+        "object": "",
+        "modality": "declarative",
+        "polarity": "positive",
+        "conditions": [],
+        "exceptions": [],
+        "threshold": {"value": "", "unit": ""},
+        "temporal_scope": "",
+        "evidence": {
+            "source_file": row["source_file"],
+            "source_sha256": row["source_sha256"],
+            "chunk_id": row["chunk_id"],
+            "page": row["page"],
+            "section": row["section"],
+            "quote": "",
+            "start_char": -1,
+            "end_char": -1,
+        },
+        "schema_version": PROPOSITION_SCHEMA_VERSION,
+        "cache_fingerprint": cache_fingerprint,
+        "deterministic_checks": {"passed": True, "issues": []},
     }
 
 
@@ -240,16 +282,7 @@ conditions, exceptions, thresholds, and zero unsupported content.
         """Materialize model drafts with deterministic source authority."""
         fingerprint = row["proposition_cache_fingerprint"]
         records = [materialize_proposition(draft.model_dump(), row, fingerprint) for draft in response.propositions]
-        return records or [
-            {
-                "proposition_id": "",
-                "cache_fingerprint": fingerprint,
-                "empty_extraction": True,
-                "source_chunk_id": row["chunk_id"],
-                "schema_version": PROPOSITION_SCHEMA_VERSION,
-                "deterministic_checks": {"passed": True, "issues": []},
-            }
-        ]
+        return records or [materialize_empty_extraction(row, fingerprint)]
 
 
 def read_cached_propositions(
