@@ -126,6 +126,10 @@ reasoning_paths:
   enabled: true
   max_per_pair: 25
 
+path_qa:
+  enabled: true
+  qa_cot_fraction: 0.5
+
 source_windows:
   enabled: true
   max_chunks: 4

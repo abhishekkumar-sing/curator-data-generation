@@ -1427,7 +1427,7 @@ Implementation progress:
   edges and one-to-many path associations.
 - [x] Add a selected-tokenizer rendered-chat budgeting utility; the current
   conservative estimator is recorded explicitly and remains the fallback.
-- [ ] Invoke full rendered-request budgeting in P0.4 immediately before every
+- [x] Invoke full rendered-request budgeting in P0.4 immediately before every
   new path-driven Curator call. Legacy generation remains unchanged until that
   migration.
 
@@ -1653,11 +1653,11 @@ Primary and official sources:
 - [x] Complete and record the mandatory research-first gate for path-conditioned
   question planning, separate answering, difficulty control, standalone
   authority/time wording, missing-hop negatives, and false-premise negatives.
-- [ ] Generate natural-language questions only after a path passes
+- [x] Generate natural-language questions only after a path passes
   deterministic checks.
-- [ ] Control the intended question type and difficulty.
-- [ ] Require standalone authority, domain, and date wording when necessary.
-- [ ] Generate the final answer in a separate pass from question construction.
+- [x] Control the intended question type and difficulty.
+- [x] Require standalone authority, domain, and date wording when necessary.
+- [x] Generate the final answer in a separate pass from question construction.
 - [ ] Add missing-hop and false-premise unanswerable contrasts.
 
 Acceptance criteria:
@@ -1772,6 +1772,33 @@ Primary sources:
   Premises](https://aclanthology.org/2023.acl-long.309/), distinguishes false
   premises from missing-context unanswerability and evaluates premise
   verification.
+
+Implementation progress:
+
+- [x] Added typed, model-portable question and answer schemas and separate
+  Curator stages. The planner receives a verified path and grounded
+  propositions without a polished target answer; the answerer receives the
+  accepted immutable question.
+- [x] Added deterministic checks for failed/unknown path inputs, taxonomy,
+  standalone authority/domain/date wording, malformed questions, output-claim
+  leakage, exact proposition evidence, two-input coverage, claim count, and
+  QA-versus-rationale shape.
+- [x] Enforced full rendered planner and answer prompt budgets, including
+  response schema, reserved completion, and safety margin, before either new
+  provider call. Over-budget inputs are written to dedicated rejection audits.
+- [x] Added stable planner/answer IDs, raw/accepted/rejected audit artifacts,
+  deterministic QA/CoT assignment, and manifest yield statistics.
+- [x] Added two traceable missing-hop twins per accepted question with exact
+  withheld source/proposition and visible-source lineage.
+- [x] False-premise candidates are explicitly quarantined with
+  `contradiction_verifier_not_implemented`; they cannot enter training output.
+  Implementing and researching that verifier remains required before this
+  checklist item is complete.
+- [x] New path answers report `accepted_for_training: 0` until P0.5 real source
+  ablation and independent judging complete. Legacy QA behavior remains
+  unchanged.
+- [x] Thirty-nine local procurement tests, Ruff, compilation, and YAML parsing
+  pass. Model-backed quality remains a user-run validation gate.
 
 ### 5. Execute real source-ablation trials
 

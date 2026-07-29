@@ -148,6 +148,13 @@ That `files/` directory contains:
 - `reasoning_paths.jsonl`: accepted pre-question, two-source reasoning DAGs
 - `reasoning_paths_rejected.jsonl`: path candidates rejected by deterministic
   connectivity, authority, temporal, or structural-ablation checks
+- `path_questions.jsonl` / `path_questions_rejected.jsonl`: accepted and
+  rejected questions planned from verified paths
+- `path_answers.jsonl` / `path_answers_rejected.jsonl`: separately generated
+  grounded answers pending real source ablation and independent judging
+- `path_missing_hop_contrasts.jsonl`: traceable one-source-withheld negatives
+- `path_false_premise_quarantine.jsonl`: non-exportable candidates awaiting a
+  contradiction verifier
 - `qa_sft.jsonl`: concise QA chat training data
 - `qa_cot_sft.jsonl`: QA with short evidence-based teaching rationales
 - `rag.jsonl`: questions, contexts, and answerability labels

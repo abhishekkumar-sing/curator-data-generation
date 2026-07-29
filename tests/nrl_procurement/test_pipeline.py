@@ -35,6 +35,12 @@ from generate import (  # noqa: E402
     plan_single_document_requests,
     request_coverage,
 )
+from path_qa import (  # noqa: E402
+    answer_validation_issues,
+    build_missing_hop_contrasts,
+    false_premise_quarantine,
+    question_validation_issues,
+)
 from prompt_budget import measure_rendered_request  # noqa: E402
 from propositions import (  # noqa: E402
     materialize_proposition,
@@ -587,6 +593,113 @@ def test_reasoning_bridge_requires_an_exact_non_generic_entity() -> None:
     assert accepted[0]["relationship_type"] == "complementary_procedure"
     assert "technical" in accepted[0]["connection_anchors"]
     assert "evaluation" in accepted[0]["connection_anchors"]
+
+
+def _verified_path_question_row() -> dict:
+    left = _path_proposition(
+        "prop-left",
+        "goods_2017",
+        "Goods Manual 2017",
+        "Government of India",
+        "2017",
+    )
+    right = _path_proposition(
+        "prop-right",
+        "goods_2024",
+        "Goods Manual 2024",
+        "Government of India",
+        "2024",
+    )
+    pair = {
+        "pair_id": "goods-temporal",
+        "left_manual": "goods_2017",
+        "right_manual": "goods_2024",
+        "relationship_type": "same_authority_temporal",
+    }
+    paths, _ = build_reasoning_paths([left, right], {"pairs": [pair]}, 1)
+    return {"path": paths[0], "propositions": [left, right]}
+
+
+def test_path_question_requires_standalone_dates_and_rejects_answer_leakage() -> None:
+    row = _verified_path_question_row()
+    valid = {
+        "task": "currentness",
+        "persona": "procurement_officer",
+        "question_type": "temporal",
+        "difficulty": "advanced",
+        "question": (
+            "How does the procurement committee's technical-bid evaluation "
+            "differ between the Goods Manual 2017 state as of 2017 and the "
+            "Goods Manual 2024 state as of 2024?"
+        ),
+    }
+    assert question_validation_issues(valid, row) == []
+    missing_date = {
+        **valid,
+        "question": "How do the two Goods Manual rules differ?",
+    }
+    assert "missing_standalone_date" in question_validation_issues(
+        missing_date,
+        row,
+    )
+    leaked = {
+        **valid,
+        "question": row["path"]["output_claim"]["statement"] + "?",
+    }
+    assert "output_claim_leaked_into_question" in question_validation_issues(
+        leaked,
+        row,
+    )
+
+
+def test_path_answer_requires_exact_evidence_from_every_input() -> None:
+    row = _verified_path_question_row()
+    draft = {
+        "answer": "The two dated source states describe the evaluation rule.",
+        "claims": [
+            {
+                "statement": "The 2017 state contains the first rule.",
+                "evidence": [
+                    {
+                        "proposition_id": "prop-left",
+                        "quote": "Source evidence.",
+                    }
+                ],
+            },
+            {
+                "statement": "The 2024 state contains the second rule.",
+                "evidence": [
+                    {
+                        "proposition_id": "prop-right",
+                        "quote": "Source evidence.",
+                    }
+                ],
+            },
+        ],
+        "rationale_steps": [],
+    }
+    assert answer_validation_issues(draft, row) == []
+    draft["claims"][1]["evidence"][0]["quote"] = "Changed evidence."
+    issues = answer_validation_issues(draft, row)
+    assert "non_exact_answer_evidence" in issues
+    assert "answer_does_not_use_every_path_input" in issues
+
+
+def test_missing_hop_and_false_premise_lineage_are_separate() -> None:
+    row = _verified_path_question_row()
+    question = {
+        **row,
+        "question_id": "pathq-1",
+        "path_id": row["path"]["path_id"],
+        "question": "How do the two dated rules differ?",
+    }
+    contrasts = build_missing_hop_contrasts([question])
+    assert len(contrasts) == 2
+    assert {item["withheld_proposition_id"] for item in contrasts} == {"prop-left", "prop-right"}
+    assert all(item["answer"] == "Not answerable from the provided sources." for item in contrasts)
+    quarantine = false_premise_quarantine([question])
+    assert quarantine[0]["status"] == "quarantined"
+    assert quarantine[0]["reason"] == "contradiction_verifier_not_implemented"
 
 
 def test_validation_uses_qualifier_tokens_and_modality_equivalence() -> None:

@@ -37,6 +37,14 @@ from propositions import (
 )
 from reasoning_paths import build_reasoning_paths
 from source_windows import build_source_windows
+from path_qa import (
+    VerifiedPathAnswerGenerator,
+    VerifiedPathQuestionGenerator,
+    build_missing_hop_contrasts,
+    false_premise_quarantine,
+)
+from prompt_budget import measure_rendered_request
+from schemas import PathAnswerDraft, PathQuestionBatch
 from schemas import CandidateBatch, JudgeBatch
 from validation import deduplicate, judge_quotes_are_grounded, validate_record
 
@@ -580,6 +588,7 @@ def _final_manifest(
     proposition_stats: dict[str, Any] | None = None,
     reasoning_path_stats: dict[str, Any] | None = None,
     source_window_stats: dict[str, Any] | None = None,
+    path_qa_stats: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return {
         "run_id": run_id,
@@ -603,6 +612,7 @@ def _final_manifest(
         "propositions": proposition_stats or {"enabled": False},
         "reasoning_paths": reasoning_path_stats or {"enabled": False},
         "source_windows": source_window_stats or {"enabled": False},
+        "path_qa": path_qa_stats or {"enabled": False},
         "near_duplicates_removed": duplicates,
         "manuals": manuals,
     }
@@ -673,7 +683,9 @@ def main() -> None:
 
     proposition_stats: dict[str, Any] = {"enabled": False}
     reasoning_path_stats: dict[str, Any] = {"enabled": False}
+    path_qa_stats: dict[str, Any] = {"enabled": False}
     accepted_propositions: list[dict[str, Any]] = []
+    accepted_paths: list[dict[str, Any]] = []
     proposition_config = CONFIG.get("propositions", {})
     if proposition_config.get("enabled", False):
         model_manifest = _non_secret_model_manifest(GENERATION)
@@ -748,6 +760,150 @@ def main() -> None:
             "schema_version": (accepted_paths[0]["schema_version"] if accepted_paths else None),
         }
 
+    path_qa_config = CONFIG.get("path_qa", {})
+    if path_qa_config.get("enabled", False) and accepted_paths:
+        proposition_by_id = {row["proposition_id"]: row for row in accepted_propositions}
+        path_question_inputs = [
+            {
+                "path": path,
+                "propositions": [proposition_by_id[proposition_id] for proposition_id in path["input_claim_ids"]],
+            }
+            for path in accepted_paths
+            if all(proposition_id in proposition_by_id for proposition_id in path["input_claim_ids"])
+        ]
+        question_generator = VerifiedPathQuestionGenerator(**_llm_kwargs(GENERATION))
+        source_window_config = CONFIG.get("source_windows", {})
+        generation_params = GENERATION.get("generation_params", {})
+        budgeted_inputs = []
+        prompt_budget_rejected = []
+        for row in path_question_inputs:
+            budget = measure_rendered_request(
+                [{"role": "user", "content": question_generator.prompt(row)}],
+                PathQuestionBatch.model_json_schema(),
+                context_window=int(
+                    GENERATION.get(
+                        "context_window",
+                        source_window_config.get("max_input_tokens", 8192),
+                    )
+                ),
+                reserved_completion_tokens=int(generation_params.get("max_tokens", 4096)),
+                safety_margin_tokens=int(source_window_config.get("safety_margin_tokens", 256)),
+                conservative_chars_per_token=float(
+                    source_window_config.get(
+                        "conservative_chars_per_token",
+                        2.5,
+                    )
+                ),
+                require_exact=bool(
+                    source_window_config.get(
+                        "require_exact_prompt_tokens",
+                        False,
+                    )
+                ),
+            )
+            item = {**row, "prompt_budget": budget}
+            (budgeted_inputs if budget["passed"] else prompt_budget_rejected).append(item)
+        _write_audit(
+            files_dir / "path_question_prompt_rejected.jsonl",
+            prompt_budget_rejected,
+        )
+        path_questions_audit: list[dict[str, Any]] = []
+        if budgeted_inputs:
+            os.environ["HOSTED_VLLM_API_KEY"] = _model_settings(GENERATION)[2]
+            path_questions_audit = question_generator(
+                Dataset.from_list(budgeted_inputs),
+                working_dir=_working_dir(run_id, "path_questions"),
+            ).dataset.to_list()
+        _write_audit(
+            files_dir / "path_questions_generated_audit.jsonl",
+            path_questions_audit,
+        )
+        path_questions = [row for row in path_questions_audit if row.get("deterministic_checks", {}).get("passed", False)]
+        _write_audit(files_dir / "path_questions.jsonl", path_questions)
+        _write_audit(
+            files_dir / "path_questions_rejected.jsonl",
+            [row for row in path_questions_audit if not row.get("deterministic_checks", {}).get("passed", False)],
+        )
+        answer_inputs = []
+        cot_fraction = float(path_qa_config.get("qa_cot_fraction", 0.5))
+        cot_cutoff = int(len(path_questions) * cot_fraction)
+        for index, row in enumerate(sorted(path_questions, key=lambda item: item["question_id"])):
+            answer_inputs.append(
+                {
+                    **row,
+                    "task_type": ("cross_document_qa_cot" if index < cot_cutoff else "cross_document_qa"),
+                }
+            )
+        answer_generator = VerifiedPathAnswerGenerator(**_llm_kwargs(GENERATION))
+        budgeted_answer_inputs = []
+        answer_prompt_budget_rejected = []
+        for row in answer_inputs:
+            budget = measure_rendered_request(
+                [{"role": "user", "content": answer_generator.prompt(row)}],
+                PathAnswerDraft.model_json_schema(),
+                context_window=int(
+                    GENERATION.get(
+                        "context_window",
+                        source_window_config.get("max_input_tokens", 8192),
+                    )
+                ),
+                reserved_completion_tokens=int(generation_params.get("max_tokens", 4096)),
+                safety_margin_tokens=int(source_window_config.get("safety_margin_tokens", 256)),
+                conservative_chars_per_token=float(
+                    source_window_config.get(
+                        "conservative_chars_per_token",
+                        2.5,
+                    )
+                ),
+                require_exact=bool(
+                    source_window_config.get(
+                        "require_exact_prompt_tokens",
+                        False,
+                    )
+                ),
+            )
+            item = {**row, "prompt_budget": budget}
+            (budgeted_answer_inputs if budget["passed"] else answer_prompt_budget_rejected).append(item)
+        _write_audit(
+            files_dir / "path_answer_prompt_rejected.jsonl",
+            answer_prompt_budget_rejected,
+        )
+        path_answers_audit: list[dict[str, Any]] = []
+        if budgeted_answer_inputs:
+            os.environ["HOSTED_VLLM_API_KEY"] = _model_settings(GENERATION)[2]
+            path_answers_audit = answer_generator(
+                Dataset.from_list(budgeted_answer_inputs),
+                working_dir=_working_dir(run_id, "path_answers"),
+            ).dataset.to_list()
+        _write_audit(
+            files_dir / "path_answers_generated_audit.jsonl",
+            path_answers_audit,
+        )
+        path_answers = [row for row in path_answers_audit if row.get("deterministic_checks", {}).get("passed", False)]
+        _write_audit(files_dir / "path_answers.jsonl", path_answers)
+        _write_audit(
+            files_dir / "path_answers_rejected.jsonl",
+            [row for row in path_answers_audit if not row.get("deterministic_checks", {}).get("passed", False)],
+        )
+        _write_audit(
+            files_dir / "path_missing_hop_contrasts.jsonl",
+            build_missing_hop_contrasts(path_questions),
+        )
+        _write_audit(
+            files_dir / "path_false_premise_quarantine.jsonl",
+            false_premise_quarantine(path_questions),
+        )
+        path_qa_stats = {
+            "enabled": True,
+            "planned": len(path_question_inputs),
+            "prompt_budget_rejected": len(prompt_budget_rejected),
+            "answer_prompt_budget_rejected": len(answer_prompt_budget_rejected),
+            "questions_accepted": len(path_questions),
+            "answers_accepted": len(path_answers),
+            "accepted_for_training": 0,
+            "pending_source_ablation_and_judge": len(path_answers),
+        }
+
     os.environ["HOSTED_VLLM_API_KEY"] = _model_settings(GENERATION)[2]
     generated_audit = ProcurementGenerator(**_llm_kwargs(GENERATION))(
         Dataset.from_list(planned_single),
@@ -775,6 +931,7 @@ def main() -> None:
                 proposition_stats=proposition_stats,
                 reasoning_path_stats=reasoning_path_stats,
                 source_window_stats=source_window_stats,
+                path_qa_stats=path_qa_stats,
             ),
         )
         raise SystemExit("No records passed deterministic validation")
@@ -870,6 +1027,7 @@ def main() -> None:
                 proposition_stats=proposition_stats,
                 reasoning_path_stats=reasoning_path_stats,
                 source_window_stats=source_window_stats,
+                path_qa_stats=path_qa_stats,
             ),
         )
         raise SystemExit("No records passed the quality judge")
@@ -962,6 +1120,7 @@ def main() -> None:
                     proposition_stats=proposition_stats,
                     reasoning_path_stats=reasoning_path_stats,
                     source_window_stats=source_window_stats,
+                    path_qa_stats=path_qa_stats,
                 ),
             )
             raise SystemExit("No drafting records passed generation and quality checks")
@@ -996,6 +1155,7 @@ def main() -> None:
         proposition_stats=proposition_stats,
         reasoning_path_stats=reasoning_path_stats,
         source_window_stats=source_window_stats,
+        path_qa_stats=path_qa_stats,
     )
     final_manifest["required_task_type_counts"] = task_counts
     final_manifest["missing_required_task_types"] = required_missing

@@ -154,6 +154,44 @@ class PropositionBatch(BaseModel):
     propositions: list[PropositionDraft]
 
 
+PathQuestionType = Literal[
+    "comparison",
+    "bridge",
+    "temporal",
+    "complementary",
+    "condition_exception",
+    "cross_domain",
+]
+
+
+class PathQuestionDraft(BaseModel):
+    task: ProcurementTask
+    persona: ProcurementPersona
+    question_type: PathQuestionType
+    difficulty: Literal["moderate", "advanced"]
+    question: str = Field(min_length=12)
+
+
+class PathQuestionBatch(BaseModel):
+    questions: list[PathQuestionDraft] = Field(max_length=1)
+
+
+class PathAnswerEvidenceDraft(BaseModel):
+    proposition_id: str = Field(min_length=1)
+    quote: str = Field(min_length=8)
+
+
+class PathAnswerClaimDraft(BaseModel):
+    statement: str = Field(min_length=8)
+    evidence: list[PathAnswerEvidenceDraft] = Field(min_length=1)
+
+
+class PathAnswerDraft(BaseModel):
+    answer: str = Field(min_length=1)
+    claims: list[PathAnswerClaimDraft] = Field(min_length=2)
+    rationale_steps: list[str] = Field(default_factory=list, max_length=4)
+
+
 class JudgeDecision(BaseModel):
     supported: bool
     relevant: bool
