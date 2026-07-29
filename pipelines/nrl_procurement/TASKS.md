@@ -3809,7 +3809,9 @@ Implementation result:
 - [x] Selected `tools_auto` only for the verified Nemotron profile.
 - [x] Documented the new model-portable mode and added focused regression
   coverage.
-- [ ] Confirm path-answer yield in the next user-run pilot.
+- [x] Confirmed path-answer yield in user-run Pilot 012: all 26 requests
+  reached successful terminal responses and 9 answers passed deterministic
+  validation.
 
 ## Pilot 011 completed-run audit (2026-07-29)
 
@@ -3848,8 +3850,10 @@ Outcome:
 
 Follow-up:
 
-- [ ] Confirm Nemotron `tools_auto` path-answer and ablation yield in the next
-  user-run pilot.
+- [x] Confirmed Nemotron `tools_auto` path-answer and ablation yield in
+  user-run Pilot 012: 26/26 path-answer and 27/27 ablation requests reached
+  successful terminal responses after bounded retries; 9 answers and 24
+  ablation trials passed deterministic validation.
 - [x] Reconciled drafting block-level evidence and tender facts by deriving
   stable top-level aggregates from the validated block-local attribution.
 - [x] Bounded judge requests against the endpoint's actual 8,192-token context
@@ -3947,3 +3951,59 @@ Ledger reconciliation:
 - Empirical gates remain open when they require Pilot 012, human review,
   multiple reviewers, an upstream action, or a capability not present in the
   repository. They must not be closed from unit tests alone.
+
+## Pilot 012 completed-run audit (2026-07-29)
+
+Status: inspected after the user-run pilot completed; manifest status is
+`partial`.
+
+Verified improvements:
+
+- `tools_auto` completed all 50 proposition, 36 path-question, 26 path-answer,
+  and 27 ablation requests after bounded retries. It eliminated Pilot 011's
+  permanent path-stage serialization failure.
+- Proposition/path outputs include 89 accepted propositions, 36 accepted
+  reasoning paths, 26 accepted questions, 9 accepted answers, and 24 valid
+  ablation trials.
+- Single-document judging completed 81/81 submitted requests without the
+  Pilot 011 context-window API error.
+- Drafting aggregation remediation worked: one draft passed deterministic
+  validation and independent judging at 5/5. The other failed only its
+  block-local instruction-quotation attribution.
+- The component allocator produced 57 train, 8 validation, and 8 test records,
+  eliminating Pilot 011's empty validation split.
+- All 73 canonical records have unique IDs, non-empty claims/evidence/citations,
+  `citations` last, passing deterministic checks, accepted 5/5 judges, and
+  correct QA versus QA-CoT reasoning contracts.
+
+Remaining defects:
+
+- Ordinary generation had 4 permanent failures out of 50 and cross generation
+  had 3 out of 50. Auto-tool retries still encounter absent calls, empty
+  objects, stringified arrays, invalid enum values, and missing fields.
+- The new judge preflight used the conservative character fallback and
+  quarantined 4 single-document and all 5 deterministically valid
+  cross-document candidates. As a result, Pilot 012 exported zero
+  cross-document records. Exact endpoint-compatible token measurement or a
+  safer adaptive budget is required before the next pilot.
+- Curator's generated `failed_requests.jsonl` files contain 7 ordinary and 21
+  cross-generation rows, while terminal response files contain only 4 and 3
+  permanent failures respectively. The files currently include requests that
+  failed an earlier attempt but later recovered, so their name/count
+  overstates permanent failure.
+- Manifest completion currently depends on every planned request producing an
+  accepted record. Deterministic or judge rejection therefore makes a run
+  `partial` even when every request has an auditable terminal state. Terminal
+  completeness and quality acceptance should be reported separately.
+
+Next research gates:
+
+- [ ] Research and probe vLLM auto-tool `strict: true`, then decide whether to
+  add it before forced named/required tool calling becomes available.
+- [ ] Research exact Gemma prompt counting and adaptive completion reservation;
+  replace the over-conservative judge fallback without allowing API overflow.
+- [ ] Research Curator retry/failure-file semantics and persist only permanent
+  failures in `failed_requests.jsonl`, while retaining attempt history
+  separately.
+- [ ] Separate manifest terminal-request completeness from accepted-record
+  yield and required-task coverage.
