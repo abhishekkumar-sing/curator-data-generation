@@ -66,13 +66,56 @@ def assign_splits(
     validation: float,
     seed: str,
 ) -> None:
-    """Assign whole amendment-connected manual groups to one split."""
+    """Assign whole connected components near configured record targets."""
     components = _components(manuals, records)
+    test = 1.0 - train - validation
+    fractions = {"train": train, "validation": validation, "test": test}
+    counts: dict[str, int] = defaultdict(int)
+    for record in records:
+        manual_ids = [
+            document["manual_id"]
+            for document in record.get("source_documents", [])
+        ] or [record["manual_id"]]
+        counts[components[manual_ids[0]]] += 1
+    targets = {
+        split: len(records) * fraction for split, fraction in fractions.items()
+    }
+    assigned = {split: 0 for split in fractions}
     split_by_component: dict[str, str] = {}
-    for component in set(components.values()):
-        value = int(hashlib.sha256(f"{seed}:{component}".encode()).hexdigest()[:12], 16)
-        fraction = value / float(16**12)
-        split_by_component[component] = "train" if fraction < train else "validation" if fraction < train + validation else "test"
+    populated = sorted(
+        counts,
+        key=lambda component: (
+            -counts[component],
+            hashlib.sha256(f"{seed}:{component}".encode()).hexdigest(),
+        ),
+    )
+    for component in populated:
+        size = counts[component]
+
+        def allocation_cost(
+            split: str,
+            component: str = component,
+            size: int = size,
+        ) -> tuple[float, str]:
+            projected = {**assigned, split: assigned[split] + size}
+            cost = sum(
+                (
+                    (projected[name] - targets[name])
+                    / max(targets[name], 1.0)
+                )
+                ** 2
+                for name in fractions
+            )
+            tie = hashlib.sha256(
+                f"{seed}:{component}:{split}".encode()
+            ).hexdigest()
+            return cost, tie
+
+        selected = min(fractions, key=allocation_cost)
+        split_by_component[component] = selected
+        assigned[selected] += size
+    for component in set(components.values()) - set(populated):
+        split_by_component[component] = "train"
     for record in records:
         manual_ids = [document["manual_id"] for document in record.get("source_documents", [])] or [record["manual_id"]]
         record["split"] = split_by_component[components[manual_ids[0]]]

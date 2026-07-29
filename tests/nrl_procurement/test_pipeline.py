@@ -25,6 +25,7 @@ from cross_stage import (  # noqa: E402
 from drafting import (  # noqa: E402
     TenderDraftingGenerator,
     TenderDraftingJudge,
+    _stable_block_union,
     build_drafting_inputs,
     compact_drafting,
     drafting_citation_integrity_issues,
@@ -37,6 +38,8 @@ from generate import (  # noqa: E402
     ProcurementGenerator,
     ProcurementJudge,
     SingularProcurementJudge,
+    _budget_judge_rows,
+    _judge_prompt_budget,
     _singular_judge_batch_size,
     plan_cross_document_requests,
     plan_single_document_requests,
@@ -583,7 +586,45 @@ def test_model_context_window_is_explicit_and_profile_local() -> None:
         except ValueError as exc:
             assert "positive context_window" in str(exc)
         else:
-            raise AssertionError("missing or invalid model context must fail closed")
+            raise AssertionError(
+                "missing or invalid model context must fail closed"
+            )
+
+
+def test_judge_prompt_budget_reserves_output_and_quarantines_overflow() -> None:
+    class Response:
+        @classmethod
+        def model_json_schema(cls):
+            return {"type": "object", "properties": {"accepted": {"type": "boolean"}}}
+
+    judge = SimpleNamespace(
+        response_format=Response,
+        prompt=lambda row: row["review_text"],
+    )
+    profile = {
+        "context_window": 100,
+        "generation_params": {"max_tokens": 40},
+    }
+    row = {
+        "review_text": "x" * 1000,
+        "judge_items": [
+            {
+                "record_id": "record-1",
+                "record": {"record_id": "record-1"},
+            }
+        ],
+    }
+
+    budget = _judge_prompt_budget(judge, row, profile)
+    accepted, rejected = _budget_judge_rows(judge, [row], profile)
+
+    assert budget["reserved_completion_tokens"] == 40
+    assert budget["passed"] is False
+    assert accepted == []
+    assert rejected[0]["judge"]["issues"] == [
+        "judge_prompt_exceeds_context_window"
+    ]
+    assert rejected[0]["judge_prompt_budget"] == budget
 
 
 def test_validation_rejects_unsupported_number() -> None:
@@ -1408,6 +1449,31 @@ def test_dedup_and_amendment_connected_split() -> None:
     assert records[0]["split"] == records[1]["split"]
 
 
+def test_connected_split_targets_records_without_leaking_components() -> None:
+    sizes = [26, 16, 6, 3, 3, 3, 2, 1]
+    manuals = [{"manual_id": f"manual-{index}"} for index in range(len(sizes))]
+    records = [
+        {
+            "record_id": f"record-{component}-{index}",
+            "manual_id": f"manual-{component}",
+        }
+        for component, size in enumerate(sizes)
+        for index in range(size)
+    ]
+
+    assign_splits(records, manuals, 0.8, 0.1, "pilot-011")
+
+    split_by_manual = {}
+    counts = {"train": 0, "validation": 0, "test": 0}
+    for record in records:
+        split_by_manual.setdefault(record["manual_id"], record["split"])
+        assert split_by_manual[record["manual_id"]] == record["split"]
+        counts[record["split"]] += 1
+    assert all(counts[split] > 0 for split in counts)
+    assert counts["train"] >= counts["validation"]
+    assert counts["train"] >= counts["test"]
+
+
 def _cross_row(manual_id: str, chunk_id: str, passage: str) -> dict:
     return {
         "manual_id": manual_id,
@@ -2079,6 +2145,31 @@ def test_drafting_surface_normalization_and_semantic_validation() -> None:
     assert "draft_contains_html_markup" in issues
     assert "unsupported_authority:Invented Division" in issues
     assert "unsupported_number:10%" in issues
+
+
+def test_drafting_aggregate_is_derived_from_block_first_use() -> None:
+    blocks = [
+        DraftingBlock(
+            text="First",
+            tender_facts_used=["fact-b", "fact-a"],
+            manual_evidence_quotes=["quote-b"],
+        ),
+        DraftingBlock(
+            text="Second",
+            tender_facts_used=["fact-a", "fact-c"],
+            manual_evidence_quotes=["quote-a", "quote-b"],
+        ),
+    ]
+
+    assert _stable_block_union(blocks, "tender_facts_used") == [
+        "fact-b",
+        "fact-a",
+        "fact-c",
+    ]
+    assert _stable_block_union(blocks, "manual_evidence_quotes") == [
+        "quote-b",
+        "quote-a",
+    ]
 
 
 def test_exports_keep_qa_and_rationale_task_files_disjoint(tmp_path: Path) -> None:

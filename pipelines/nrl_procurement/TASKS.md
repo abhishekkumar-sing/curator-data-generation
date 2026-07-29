@@ -3850,12 +3850,14 @@ Follow-up:
 
 - [ ] Confirm Nemotron `tools_auto` path-answer and ablation yield in the next
   user-run pilot.
-- [ ] Reconcile drafting block-level tender facts with the top-level aggregate
-  before the next drafting-enabled run.
-- [ ] Bound judge requests against the endpoint's actual 8,192-token context
-  limit, including reserved output tokens.
-- [ ] Decide how to guarantee useful validation/test representation while
-  preserving connected-component leakage isolation.
+- [x] Reconciled drafting block-level evidence and tender facts by deriving
+  stable top-level aggregates from the validated block-local attribution.
+- [x] Bounded judge requests against the endpoint's actual 8,192-token context
+  limit, including reserved output tokens, a safety margin, and an auditable
+  pre-request quarantine.
+- [x] Replaced independent split hashing with deterministic whole-component
+  target optimization so small pilots retain leakage isolation without an
+  avoidable empty validation/test split.
 
 ### Pilot 011 remediation research (2026-07-29)
 
@@ -3916,3 +3918,19 @@ Design decision:
   every positive split.
 - Do not claim that Pilot 011 validates these changes; validation requiring
   model calls remains a user-run Pilot 012 gate.
+
+Implementation result:
+
+- [x] Reduced the Gemma judge completion reservation from 2,048 to 1,024
+  tokens.
+- [x] Added complete rendered judge-request measurement and separate
+  `qa_judge_prompt_rejected.jsonl` /
+  `cross_judge_prompt_rejected.jsonl` audit artifacts.
+- [x] Kept over-budget records out of API calls and retained them in the
+  ordinary rejection exports with `judge_prompt_exceeds_context_window`.
+- [x] Derived drafting aggregates from block-local support without weakening
+  unknown-fact, verbatim-evidence, numeric, authority, or citation gates.
+- [x] Assigned connected components by deterministic normalized target error
+  rather than independent random buckets.
+- [x] Added focused regression tests; 59 procurement-pipeline tests pass and
+  Ruff reports no errors for the changed modules.

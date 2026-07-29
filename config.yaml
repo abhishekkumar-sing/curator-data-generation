@@ -43,7 +43,9 @@ model_profiles:
       temperature: 1.0
       top_p: 0.95
       top_k: 64
-      max_tokens: 2048
+      # Judge schemas are compact. Reserving 1024 leaves source capacity inside
+      # this endpoint's verified 8192-token combined prompt/output limit.
+      max_tokens: 1024
       extra_body:
         chat_template_kwargs:
           enable_thinking: false

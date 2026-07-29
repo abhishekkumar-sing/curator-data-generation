@@ -101,6 +101,19 @@ def normalize_drafting_response(response: str) -> tuple[str, list[str]]:
     return normalized, repairs
 
 
+def _stable_block_union(
+    blocks: list[Any],
+    field: str,
+) -> list[str]:
+    """Derive one stable first-use union from block-local attribution."""
+    values: list[str] = []
+    for block in blocks:
+        for value in getattr(block, field):
+            if value not in values:
+                values.append(value)
+    return values
+
+
 def drafting_validation_issues(row: dict[str, Any], result: DraftingResult) -> list[str]:
     """Return deterministic grounding failures for a drafting response."""
     issues: list[str] = []
@@ -295,7 +308,17 @@ and tender-fact lists, and absence of unsupported content.
             normalized_text, block_repairs = normalize_drafting_response(block.text)
             blocks.append(block.model_copy(update={"text": normalized_text}))
             repairs.extend(block_repairs)
-        normalized = response.model_copy(update={"document_blocks": blocks})
+        normalized = response.model_copy(
+            update={
+                "document_blocks": blocks,
+                "manual_evidence_quotes": _stable_block_union(
+                    blocks, "manual_evidence_quotes"
+                ),
+                "tender_facts_used": _stable_block_union(
+                    blocks, "tender_facts_used"
+                ),
+            }
+        )
         issues = drafting_validation_issues(row, normalized)
         context = [*row["tender_context"], *normalized.manual_evidence_quotes]
         rendered_response = "\n\n".join(block.text for block in normalized.document_blocks)

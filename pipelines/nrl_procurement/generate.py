@@ -625,6 +625,56 @@ def _singular_judge_batch_size() -> int:
     return batch_size
 
 
+def _judge_prompt_budget(
+    judge: Any,
+    row: dict[str, Any],
+    profile: dict[str, Any],
+) -> dict[str, Any]:
+    """Measure one complete judge request against its served context limit."""
+    source_window_config = CONFIG.get("source_windows", {})
+    return measure_rendered_request(
+        [{"role": "user", "content": judge.prompt(row)}],
+        judge.response_format.model_json_schema(),
+        context_window=configured_context_window(profile),
+        reserved_completion_tokens=int(
+            profile["generation_params"].get("max_tokens", 1024)
+        ),
+        safety_margin_tokens=int(
+            source_window_config.get("safety_margin_tokens", 256)
+        ),
+        conservative_chars_per_token=float(
+            source_window_config.get("conservative_chars_per_token", 2.5)
+        ),
+    )
+
+
+def _budget_judge_rows(
+    judge: Any,
+    rows: list[dict[str, Any]],
+    profile: dict[str, Any],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Partition judge rows and preserve over-budget records as rejections."""
+    accepted: list[dict[str, Any]] = []
+    rejected: list[dict[str, Any]] = []
+    for row in rows:
+        budget = _judge_prompt_budget(judge, row, profile)
+        if budget["passed"]:
+            accepted.append({**row, "prompt_budget": budget})
+            continue
+        for item in row["judge_items"]:
+            rejected.append(
+                {
+                    **item["record"],
+                    "judge": {
+                        "accepted": False,
+                        "issues": ["judge_prompt_exceeds_context_window"],
+                    },
+                    "judge_prompt_budget": budget,
+                }
+            )
+    return accepted, rejected
+
+
 def _assert_independent_judge() -> None:
     """Prevent self-judging when production quality policy requires separation."""
     if not QUALITY.get("require_independent_judge", True):
@@ -1079,6 +1129,7 @@ def main() -> None:
         raise SystemExit("No records passed deterministic validation")
 
     judged: list[dict[str, Any]] = []
+    judge_prompt_rejected: list[dict[str, Any]] = []
     if args.skip_judge:
         if not QUALITY.get("allow_unjudged_exports", False):
             raise SystemExit("--skip-judge is disabled by config; set quality.allow_unjudged_exports=true " "only for development")
@@ -1087,10 +1138,21 @@ def main() -> None:
         judge_profile = JUDGE
         os.environ["HOSTED_VLLM_API_KEY"] = _model_settings(judge_profile)[2]
         judge_batch_size = _singular_judge_batch_size()
-        judged = SingularProcurementJudge(**_llm_kwargs(judge_profile))(
-            _judge_rows(generated, judge_batch_size),
-            working_dir=_working_dir(run_id, "judge"),
-        ).dataset.to_list()
+        judge = SingularProcurementJudge(**_llm_kwargs(judge_profile))
+        budgeted_judge_rows, judge_prompt_rejected = _budget_judge_rows(
+            judge,
+            _judge_rows(generated, judge_batch_size).to_list(),
+            judge_profile,
+        )
+        _write_audit(
+            files_dir / "qa_judge_prompt_rejected.jsonl",
+            judge_prompt_rejected,
+        )
+        if budgeted_judge_rows:
+            judged = judge(
+                Dataset.from_list(budgeted_judge_rows),
+                working_dir=_working_dir(run_id, "judge"),
+            ).dataset.to_list()
         accepted = [row for row in judged if row["judge"]["accepted"]]
     single_accepted = list(accepted)
     single_coverage = {
@@ -1100,7 +1162,24 @@ def main() -> None:
     }
     _write_audit(
         files_dir / "qa_rejected.jsonl",
-        deterministic_rejected + ([] if args.skip_judge else _rejected_records(generated, judged)),
+        deterministic_rejected
+        + (
+            []
+            if args.skip_judge
+            else judge_prompt_rejected
+            + _rejected_records(
+                [
+                    row
+                    for row in generated
+                    if row["record_id"]
+                    not in {
+                        rejected["record_id"]
+                        for rejected in judge_prompt_rejected
+                    }
+                ],
+                judged,
+            )
+        ),
     )
 
     cross_accepted: list[dict[str, Any]] = []
@@ -1108,6 +1187,7 @@ def main() -> None:
     cross_generated_audit: list[dict[str, Any]] = []
     cross_deterministic_rejected: list[dict[str, Any]] = []
     cross_judged: list[dict[str, Any]] = []
+    cross_judge_prompt_rejected: list[dict[str, Any]] = []
     planned_cross: list[dict[str, Any]] = []
     cross_duplicates = 0
     if cross_config.get("enabled", False) and not args.skip_cross_document:
@@ -1138,14 +1218,27 @@ def main() -> None:
                 judge_profile = JUDGE
                 os.environ["HOSTED_VLLM_API_KEY"] = _model_settings(judge_profile)[2]
                 judge_batch_size = _singular_judge_batch_size()
-                cross_judged = SingularCrossDocumentJudge(
+                cross_judge = SingularCrossDocumentJudge(
                     **_llm_kwargs(judge_profile)
-                )(
-                    Dataset.from_list(
-                        cross_judge_rows(cross_generated, judge_batch_size)
-                    ),
-                    working_dir=_working_dir(run_id, "cross_judge"),
-                ).dataset.to_list()
+                )
+                budgeted_cross_rows, cross_judge_prompt_rejected = (
+                    _budget_judge_rows(
+                        cross_judge,
+                        cross_judge_rows(
+                            cross_generated, judge_batch_size
+                        ),
+                        judge_profile,
+                    )
+                )
+                _write_audit(
+                    files_dir / "cross_judge_prompt_rejected.jsonl",
+                    cross_judge_prompt_rejected,
+                )
+                if budgeted_cross_rows:
+                    cross_judged = cross_judge(
+                        Dataset.from_list(budgeted_cross_rows),
+                        working_dir=_working_dir(run_id, "cross_judge"),
+                    ).dataset.to_list()
                 cross_accepted = [row for row in cross_judged if row["judge"]["accepted"]]
     cross_coverage = {
         "generated": request_coverage(planned_cross, cross_generated_audit),
@@ -1154,7 +1247,24 @@ def main() -> None:
     }
     _write_audit(
         files_dir / "cross_rejected.jsonl",
-        cross_deterministic_rejected + ([] if args.skip_judge else _rejected_records(cross_generated, cross_judged)),
+        cross_deterministic_rejected
+        + (
+            []
+            if args.skip_judge
+            else cross_judge_prompt_rejected
+            + _rejected_records(
+                [
+                    row
+                    for row in cross_generated
+                    if row["record_id"]
+                    not in {
+                        rejected["record_id"]
+                        for rejected in cross_judge_prompt_rejected
+                    }
+                ],
+                cross_judged,
+            )
+        ),
     )
 
     accepted.extend(cross_accepted)
