@@ -2108,6 +2108,87 @@ Acceptance criteria:
 - [ ] Require comparison answers to state the actual relationship rather than
   concatenate summaries.
 
+#### Evidence entailment, absence, and deontic-modality research (2026-07-29)
+
+Status: research complete after pilot-009; implementation pending.
+
+Pilot evidence:
+
+- An accepted temporal comparison asserted that a refund provision was “not
+  present” in the 2019 manual even though the request supplied only a bounded
+  passage from that manual. Another rationale treated the lack of a sentence
+  in one selected passage as proof that the whole Government manual lacked it.
+- An accepted cross-document answer strengthened “should be sealed” to “must
+  be sealed.” An accepted drafting clause strengthened the source's “buyer may
+  recover” liquidated damages to “shall ... deduct.”
+- Existing deterministic checks detect dropped source qualifiers in ordinary
+  QA, but do not reject introduced/strengthened modality, do not cover drafting
+  responses, and do not reject whole-document absence claims.
+
+Research-supported conclusions:
+
+- ContractNLI treats `Entailment`, `Contradiction`, and `NotMentioned` as
+  distinct document-level labels and requires evidence spans. Failure to find
+  a proposition in a bounded passage is neutral/not-mentioned evidence, not
+  proof of its negation or absence from a document.
+- FActScore evaluates atomic generated facts against reliable supporting
+  sources. Validation should therefore operate claim-wise where possible and
+  reject any material generated claim that lacks support, rather than accept a
+  response because some surrounding text is grounded.
+- Research on agent-specific deontic modality in legal language distinguishes
+  obligation, prohibition, permission, and entitlement, with cues including
+  `shall`, `shall not`, and `may`. Changing permission/recommendation into an
+  obligation—or the reverse—is a semantic legal change, not paraphrase.
+
+Primary sources:
+
+- Koreeda and Manning,
+  [ContractNLI](https://aclanthology.org/2021.findings-emnlp.164/), defines
+  entailed, contradicting, and not-mentioned contract hypotheses with evidence
+  spans; the official implementation is
+  https://github.com/stanfordnlp/contract-nli-bert.
+- Min et al.,
+  [FActScore](https://aclanthology.org/2023.emnlp-main.741/), evaluates
+  fine-grained atomic facts against reliable knowledge sources.
+- Savelka et al.,
+  [Agent-Specific Deontic Modality Detection in Legal
+  Language](https://aclanthology.org/2022.emnlp-main.795/), models legal
+  obligations, permissions, prohibitions, and entitlements separately.
+- Kryscinski et al.,
+  [FactCC](https://aclanthology.org/2020.emnlp-main.750/), couples factual
+  consistency decisions with supporting source spans.
+
+Decision:
+
+- Add shared deterministic checks for high-confidence modality strengthening
+  and weakening. Apply them to ordinary QA, cross-document QA/rationales, and
+  drafting using only the exact evidence quotes declared for the generated
+  material.
+- Reject explicit whole-document absence/deletion claims such as “not present
+  in the manual” unless the supplied evidence itself explicitly states the
+  absence, deletion, withdrawal, or lack of provision. Bounded-window silence
+  never establishes absence.
+- Keep categories conservative: obligation, recommendation, permission, and
+  prohibition. Do not attempt unrestricted semantic NLI with regexes; the
+  independent judge remains an additional gate.
+- Use stable reason codes that distinguish unsupported absence from
+  strengthened/weakened modality, and add pilot-derived regression cases.
+
+Risks and rejected alternatives:
+
+- Exact word equality alone rejects valid `shall`/`must` equivalence; use
+  category-level cue equivalence.
+- Treating every `will` as obligation is unsafe because it is often
+  declarative/future tense; exclude it from the first high-confidence gate.
+- Searching an entire manual for a phrase is still not proof of semantic
+  absence and is sensitive to paraphrase/OCR; absence generation requires an
+  explicit source statement or a separately designed exhaustive document-level
+  task.
+- A response containing several claims and several evidence spans can mask a
+  local modality mismatch. This conservative batch-level gate is an immediate
+  safeguard; the planned atomic claim-to-evidence schema remains the stronger
+  long-term solution.
+
 Acceptance criteria:
 
 - Every deterministic failure has a stable machine-readable reason code.
