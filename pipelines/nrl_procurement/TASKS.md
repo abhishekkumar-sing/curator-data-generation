@@ -3671,3 +3671,82 @@ Implementation result:
 - [x] Left PR 734's work-conserving retry scheduling unchanged.
 - [x] Added a regression test using a real Pydantic response format and parser.
 - [ ] Confirm partial-success finalization in the next user-run pilot.
+
+## Nemotron path-answer structured-output failures (2026-07-29)
+
+Status: researched; implementation pending.
+
+Problem:
+
+- Pilot 011's path-question stage completed 61/61 requests, but the path-answer
+  stage repeatedly generated JSON-like text with unquoted `answer` or
+  `statement` values.
+- Instructor's prompt-only Markdown JSON recovery sometimes selected a nested
+  `claims` or `evidence` list and attempted to validate that list as the root
+  `PathAnswerDraft`, producing `Input should be an object`.
+- Curator's terminal-failure persistence fix worked: 41 successful path answers
+  finalized and the one permanent failure was audited rather than crashing the
+  pipeline.
+
+Official-source findings:
+
+- NVIDIA's official Nemotron 3 Super model card uses
+  `temperature=1.0`, `top_p=0.95` and serves vLLM with
+  `--enable-auto-tool-choice --tool-call-parser qwen3_coder`. The model is
+  trained for tool use and structured-output environments:
+  https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4
+- The official NVIDIA generation configuration confirms
+  `temperature=1.0` and `top_p=0.95`; lowering temperature is not the documented
+  remedy:
+  https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4/blob/main/generation_config.json
+- vLLM's official structured-output documentation says JSON Schema decoding
+  constrains output to the schema and recommends also describing the expected
+  schema in the prompt:
+  https://docs.vllm.ai/en/stable/features/structured_outputs/
+- vLLM's official tool-calling documentation says named or required function
+  calls use schema-constrained decoding and recommends nullable schema types
+  for genuinely optional fields:
+  https://docs.vllm.ai/en/stable/features/tool_calling/
+- Instructor distinguishes prompt-parsed Markdown JSON from tool/function
+  modes. Prompt-only recovery cannot provide the structural guarantee of a
+  server-constrained tool call:
+  https://python.useinstructor.com/modes-comparison/
+- LiteLLM's official vLLM provider documentation treats the endpoint as an
+  OpenAI-compatible transport; actual schema/tool support still depends on the
+  private server's launch configuration:
+  https://docs.litellm.ai/docs/providers/vllm
+
+Local evidence:
+
+- The committed Nemotron profile uses `structured_output_mode: md_json`, so
+  Instructor asks for JSON in text and parses the result after generation.
+- The saved Curator requests contain the complete `PathAnswerDraft` JSON Schema,
+  but prompt-only mode does not constrain token generation at the vLLM server.
+- The malformed completions contain substantively useful grounded answers; the
+  failure is serialization, not model reachability, context length, rate
+  limiting, or missing evidence.
+- Multiple inner Instructor repair attempts repeated the same quoting mistake,
+  inflating token use and latency. Accepting a nested list as the root would
+  silently lose the answer and other claims and is therefore unsafe.
+
+Design decision:
+
+- Keep the documented Nemotron sampling values unchanged.
+- Change only the Nemotron endpoint profile from prompt-only `md_json` to
+  schema-constrained `tools`, matching NVIDIA's documented vLLM serving path.
+- Retain `json_schema` for GLM and Gemma; structured-output transport remains a
+  per-profile configuration rather than a model-name conditional.
+- Do not add heuristic malformed-JSON repair or coerce nested lists into root
+  response objects.
+- Preserve Curator's partial-success behavior so an isolated structured-output
+  failure is audited without aborting the run.
+
+Validation plan:
+
+- Assert the Nemotron profile selects tools while other profiles retain their
+  configured modes.
+- Run configuration/unit tests, Ruff, and compilation without contacting model
+  endpoints.
+- Confirm the private Nemotron deployment accepts forced tool calls in the next
+  user-run pilot. If it rejects them, its serving flags must be aligned with
+  NVIDIA's official launch command before production generation.
