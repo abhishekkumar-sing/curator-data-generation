@@ -3353,6 +3353,58 @@ Implementation status:
   behavior. Complete local procurement verification: 42 tests passed; Ruff
   passed. No model-backed pipeline was run.
 
+### Pilot-009 singular judge response research (2026-07-29)
+
+Status: research complete; implementation pending.
+
+Observed behavior:
+
+- The fail-closed identity gate worked, but Gemma returned duplicate arrays for
+  four one-record cross-document judge requests. Those four records were safely
+  quarantined, reducing useful pilot yield.
+- Configuration deliberately uses `judge_batch_size: 1` for the private
+  8,192-token Gemma endpoint, yet both judge schemas still ask the model to
+  return an arbitrarily sized `judgments` array. The transport contract exposes
+  cardinality freedom that the request does not have.
+
+Official/schema findings:
+
+- JSON Schema distinguishes variable-length lists from fixed/singular
+  structures and supports explicit `minItems`/`maxItems` constraints:
+  https://json-schema.org/understanding-json-schema/reference/array
+- Pydantic fields produce and validate JSON Schema constraints, but a direct
+  object is simpler than a one-element array when exactly one result is
+  requested:
+  https://docs.pydantic.dev/latest/concepts/fields/
+- Gemma uses model-specific prompt/control formatting; structured transport
+  support does not eliminate the need for an unambiguous task schema:
+  https://ai.google.dev/gemma/docs/core/prompt-formatting-gemma4
+
+Decision:
+
+- For configured batch size one, use the existing `JudgedCandidate` or
+  `CrossJudgedCandidate` object directly as the response schema—no enclosing
+  judgments array. The prompt supplies one review object and requests one
+  preserved record ID.
+- Wrap the singular validated object internally and reuse the existing
+  fail-closed parse/identity logic. Keep the batch schemas and parsers available
+  for future explicitly enabled batches and existing integrity regressions.
+- Reject unsupported judge batch sizes at orchestration until a profile has a
+  researched context budget and the batch response path is deliberately
+  enabled. Do not silently switch contracts based on model name.
+- Preserve independent judging, exact witness grounding, audit rows, and
+  terminal coverage behavior.
+
+Risks and validation:
+
+- A provider can still return malformed JSON or the wrong ID; existing retry,
+  response validation, and identity quarantine remain necessary.
+- Singular calls increase request count compared with true batching, but the
+  current deployment is already configured at one record per request.
+- Unit-test direct schema shape, singular parser wrapping, wrong-ID
+  quarantine, and fail-fast rejection of batch sizes other than one. Validate
+  yield only in a user-run pilot.
+
 Research basis:
 
 - [Curator repository and quickstart](https://github.com/bespokelabsai/curator):
