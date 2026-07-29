@@ -1205,6 +1205,57 @@ Implementation result:
   latency through a bounded user-run pilot before allowing propositions to
   drive question/path planning.
 
+#### Stable proposition-row schema research record (2026-07-29)
+
+Status: research complete after pilot-009; implementation pending.
+
+Observed failure:
+
+- Pilot-009 completed all 15 Nemotron proposition requests successfully, then
+  failed locally in `datasets.arrow_writer.ArrowWriter.finalize()` with
+  `KeyError: 'empty_extraction'`.
+- `PropositionExtractor.parse()` currently mixes full proposition dictionaries
+  with a smaller empty-extraction sentinel. The failure therefore occurs after
+  provider completion and is independent of endpoint availability, Curator
+  throttling, or model generation speed.
+
+Official evidence and verified code findings:
+
+- Hugging Face Datasets documents that its Arrow-backed datasets require every
+  example to have the same keys and compatible value/subvalue types:
+  https://huggingface.co/docs/datasets/package_reference/main_classes
+- Hugging Face maintainers likewise explain that Arrow enforces fixed column
+  types across rows:
+  https://github.com/huggingface/datasets/issues/7322
+- Curator's local `BaseRequestProcessor.create_dataset_files()` streams every
+  dictionary returned by `parse()` directly into one `ArrowWriter`; it does
+  not normalize heterogeneous top-level schemas before finalization.
+- The local Curator patch already supports a successful response being
+  deliberately filtered with `[]`, but removing empty sentinels would lose
+  negative-extraction cache and audit evidence used by this pipeline.
+
+Decision:
+
+- Define one explicit top-level proposition audit-row schema. Materialized
+  propositions set `empty_extraction: false`; empty results set
+  `empty_extraction: true` and populate every other field with type-compatible
+  neutral/source-derived values.
+- Keep the empty sentinel so a valid zero-proposition result remains distinct
+  from provider failure and can be cached. Do not encode heterogeneous rows as
+  arbitrary JSON or buffer the entire Curator result merely to infer a union
+  schema.
+- Add a regression test containing both a real proposition and an empty
+  extraction, and assert identical top-level keys plus compatible nested
+  shapes before Arrow serialization.
+
+Risks and validation:
+
+- Neutral values must never pass the accepted-proposition filter; the existing
+  empty flag and blank proposition ID remain mandatory rejection signals.
+- A stable top-level schema does not itself prove proposition quality.
+- Resume pilot-009 only after unit tests and an Arrow round-trip regression
+  pass. The user, not Codex, performs the model-backed rerun.
+
 ### 2. Construct connected reasoning paths before questions
 
 - [x] Build explicit two-hop path types:
