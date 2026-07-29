@@ -866,6 +866,134 @@ Acceptance criteria:
 - Government propositions cannot be labelled as NRL policy.
 - Re-running unchanged sources reuses the cached proposition set.
 
+#### Grounded atomic-proposition research record (2026-07-29)
+
+Status: research gate complete; production implementation has not started.
+
+Questions researched:
+
+- What should “atomic” mean for procurement rules containing modality,
+  negation, conditions, exceptions, thresholds, and attributed authority?
+- Should propositions be decontextualized, and how can that avoid adding facts?
+- What evidence identity and validation are needed before propositions can
+  support cross-document paths?
+- Which inputs must invalidate a cached extraction?
+- What does the reference project implement, and what remains missing?
+
+Verified local and reference findings:
+
+- The current pipeline generates QA claims inside `CrossDocumentGenerator`.
+  Those claims have stable per-record IDs and exact source-specific evidence,
+  but they are downstream of pair selection and question generation. They are
+  not reusable source propositions and cannot establish a verified reasoning
+  path before a question is written.
+- Current corpus chunks already provide manual ID/title, issuer, policy scope,
+  revision/as-of dates, source hash/file, chunk ID, page, section, and passage.
+  Evidence locations can therefore be resolved deterministically without
+  asking a model to invent provenance.
+- The reference project similarly creates claim IDs while parsing generated
+  cross-document QA. It validates source-specific quotes and links rationale
+  steps to claims, but it has no independent proposition extraction stage or
+  proposition cache. Copying it would preserve the same ordering problem.
+- FActScore and SAFE decompose text into independently verifiable facts.
+  FActScore notes assumptions about non-conflicting knowledge sources that do
+  not hold across procurement authorities and editions. Authority and temporal
+  scope must therefore be part of each proposition rather than inferred later.
+- Graphene represents a core proposition plus linked contextual information;
+  MinIE separately annotates polarity and modality. These are better fits than
+  a bare triple for rules whose legal force changes with `shall`, `may`,
+  negation, conditions, or exceptions.
+- SAFE-style self-contained rewriting can reduce ambiguous references but may
+  introduce or omit information. A model-authored self-contained statement
+  cannot replace the exact evidence span as the canonical truth source.
+
+Research-supported design:
+
+- Extract propositions independently from one registered source window at a
+  time. The model receives source metadata as immutable context and emits
+  semantic fields plus one exact evidence quote; it never authors IDs, hashes,
+  offsets, issuer, scope, or dates.
+- Represent the core event as `subject`, `action`, and `object`, with separate
+  `authority`, `modality`, `polarity`, `conditions`, `exceptions`,
+  threshold/value/unit, and temporal scope. Use explicit enum values plus
+  source-language text where normalization could lose meaning.
+- Derive proposition IDs from a versioned canonical serialization of source
+  identity, exact evidence location, and semantic fields. Resolve the quote to
+  its registered chunk and offsets deterministically. Reject ambiguous
+  duplicate quote locations unless the model supplies a valid occurrence or
+  the location is otherwise uniquely resolvable.
+- Treat the exact quote and registered metadata as authoritative. The concise
+  proposition statement is an indexable representation, not evidence.
+- Validate every numeric/date/name literal and every material modality,
+  polarity, condition, and exception against the evidence. Deterministic checks
+  handle exact membership, offsets, metadata authority, and literal integrity;
+  an independent judge handles semantic completeness. Fail closed on
+  disagreement.
+- Cache a proposition batch under a fingerprint containing source SHA-256,
+  chunk/window IDs and content hashes, extraction profile/model/endpoint
+  identity excluding credentials, decoding parameters, structured-output mode,
+  prompt hash, response-schema version/hash, and validator version. Write
+  atomically and retain rejected/raw lineage separately.
+
+Alternatives rejected:
+
+- Generate propositions jointly from two manuals: risks authority leakage and
+  makes source-specific validation ambiguous.
+- Use only subject–predicate–object triples: loses conditions, exceptions,
+  modality, and temporal applicability.
+- Let the model emit provenance or proposition IDs: permits fabricated
+  authority/offsets and makes cache identity unstable.
+- Automatically rewrite evidence into self-contained text: decontextualization
+  may introduce meaning not present in the quoted source.
+- Cache only by chunk ID: fails to invalidate on source, schema, prompt,
+  validator, model, or decoding changes.
+- Use the existing downstream QA claim list as the proposition store: makes
+  planning depend on a question that has already been generated and preserves
+  circular verification.
+
+Known risks and proposed validation:
+
+- Coordinated clauses may need multiple propositions sharing one evidence
+  span; atomicity cannot be proven by schema alone. Add fixtures for conjunction,
+  exception, conditional, threshold, definition, cross-reference, and table
+  rows.
+- Exact duplicate sentences can occur within a window. Offset resolution must
+  reject ambiguity rather than silently select the first occurrence.
+- Model extraction may omit contextual qualifiers even when every returned
+  field is individually grounded. Independent completeness judging and a
+  user-reviewed pilot are required before using propositions for path planning.
+- Cache hits prove deterministic input identity, not proposition quality.
+  Cache metadata must preserve validator/judge status and code fingerprints.
+- Codex will test schema, validation, cache invalidation, and local
+  orchestration without model calls. Only the user runs the bounded extraction
+  pilot.
+
+Primary and official sources:
+
+- Min et al.,
+  [FActScore](https://aclanthology.org/2023.emnlp-main.741/), defines atomic
+  facts as separately supportable units and explicitly records limitations
+  involving conflicting or overlapping knowledge sources.
+- Wei et al.,
+  [Long-form factuality / SAFE](https://openreview.net/forum?id=4M9f8VMt2C),
+  decomposes responses into individual facts and verifies each independently.
+- Cetto et al.,
+  [Graphene](https://aclanthology.org/C18-1321/), represents core relational
+  propositions with semantically linked contextual information.
+- Gashteovski et al.,
+  [MinIE](https://aclanthology.org/D17-1278/), retains factuality through
+  explicit polarity and modality annotations.
+- Morante and Sporleder,
+  [Modality and Negation](https://doi.org/10.1162/COLI_a_00095), identifies
+  source, time, conditionality, modality type, actuality, polarity, and focus
+  as distinct meaning-bearing dimensions.
+- [Bespoke Curator](https://github.com/bespokelabsai/curator) provides the
+  structured generation, parse, cache, and recovery boundary but does not
+  establish domain semantic correctness.
+- [Pydantic validators](https://docs.pydantic.dev/latest/concepts/validators/)
+  support typed boundary validation; semantic source support remains an
+  application responsibility.
+
 ### 2. Construct connected reasoning paths before questions
 
 - [ ] Build explicit two-hop path types:
