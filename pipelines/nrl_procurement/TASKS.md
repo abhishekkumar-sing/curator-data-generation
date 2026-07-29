@@ -318,6 +318,49 @@ behavior remains provisional until a user-run judge pilot completes.
   response schema, and output reserve against the selected profile's actual
   server context. A fixed batch size is conservative but cannot prove every
   future source record fits.
+  - Research update (2026-07-29):
+    - Question: how can the preflight remain exact when generation and judge
+      profiles may be switched independently, and which structured-output
+      bytes are actually part of the rendered model prompt?
+    - Verified fact: vLLM's official `TokenizeChatRequest` accepts chat
+      messages, tools, `add_generation_prompt`, and `chat_template_kwargs`.
+      Its serving implementation preprocesses the chat through the endpoint's
+      active renderer and returns both the exact token count and
+      `max_model_len`. This is a closer match to the eventual request than a
+      locally guessed tokenizer or a model-name conditional.
+    - Verified fact: Hugging Face documents that `apply_chat_template` owns
+      model-specific control tokens and that tools are template inputs. A tool
+      schema must therefore be supplied to tokenization for `tools_auto`
+      profiles. Conversely, vLLM's tokenization request has no
+      `response_format` field; a JSON-schema guided-decoding constraint must
+      not be counted as literal prompt text unless a future transport actually
+      injects it into messages or template inputs.
+    - Pilot-012 evidence: all nine judge preflight rejections used
+      `conservative_character_estimate`, with estimated prompts of
+      7,111-8,851 tokens before the 1,024-token completion reservation and
+      256-token margin. The current code never supplies a tokenizer and always
+      appends serialized response-schema characters, so these quarantines
+      cannot be treated as exact endpoint-capacity failures.
+    - Alternatives considered: hardcode tokenizer paths per known model
+      (rejected because profiles and served revisions are switchable); keep
+      character-only estimates (retained only as an explicitly labeled,
+      fail-closed fallback); query endpoint-native `/tokenize` (selected
+      because it uses the active served tokenizer, chat template, template
+      kwargs, and runtime model limit).
+    - Recommended implementation: build tokenization inputs from the selected
+      profile's actual structured-output mode; call its private vLLM
+      `/tokenize` endpoint with the served model and template kwargs; include
+      the strict Pydantic tool only for `tools_auto`; reserve the selected
+      profile's completion ceiling and safety margin; audit the count method
+      and server limit; and fall back conservatively when tokenization is
+      unavailable. Never branch on Gemma, GLM, or Nemotron names.
+    - Sources accessed 2026-07-29:
+      - vLLM tokenization protocol:
+        https://docs.vllm.ai/en/v0.15.0/api/vllm/entrypoints/serve/tokenize/protocol/
+      - vLLM tokenization serving implementation:
+        https://docs.vllm.ai/en/latest/api/vllm/entrypoints/serve/tokenize/serving/
+      - Hugging Face tokenizer/chat-template contract:
+        https://huggingface.co/docs/transformers/main_classes/tokenizer
 - [ ] Validate schema compliance, exact witness behavior, latency, and judge
   calibration with a user-run pilot before production-scale generation.
 
