@@ -3443,3 +3443,68 @@ Pilot evidence:
 - `outputs/pilot-008/files/manifest.json`
 - `outputs/pilot-008/files/cross_document_qa_sft.jsonl`
 - `.curator_working/pilot-008/cross_judge/d2fbb3ff6891fb63/responses_0.jsonl`
+
+## QA answer completeness and atomic attribution research (2026-07-29)
+
+Status: researched; implementation pending.
+
+Problem:
+
+- Pilot review found an answer that was an extracted sentence fragment rather
+  than a complete response to its question.
+- Single-document QA currently attaches a flat evidence list to the whole
+  answer. This proves that quotations occur in the source, but it does not
+  expose which quotation supports each material answer claim.
+- Cross-document QA already requests claim/evidence groups, but deterministic
+  validation checks only quote location and aggregate answer support. It does
+  not validate each claim against its own evidence, allowing an individually
+  unsupported claim to hide behind evidence attached to another claim.
+
+Official and primary-source findings:
+
+- Curator's official structured-output documentation makes the Pydantic
+  response model the generation contract and leaves application row validation
+  to `parse()`. Claim/evidence bindings therefore belong in the response schema
+  and deterministic parser rather than being reconstructed from citations
+  after generation:
+  https://docs.bespokelabs.ai/bespoke-curator/getting-started/structured-output
+- Curator's official API reference likewise separates `response_format`
+  enforcement from application-specific `parse()` behavior:
+  https://docs.bespokelabs.ai/bespoke-curator/api-reference
+- *Atomic Fact Decomposition Helps Attributed Question Answering* decomposes
+  long answers into atomic facts and verifies evidence at that granularity,
+  avoiding attribution of a whole answer to merely related evidence:
+  https://arxiv.org/abs/2410.16708
+- *Can LLMs Evaluate Complex Attribution in QA?* evaluates fine-grained
+  attribution categories rather than treating citation presence as sufficient:
+  https://aclanthology.org/2025.acl-long.837/
+- Research on long-form QA evaluation reports that correctness alone is not
+  enough and explicitly treats answer completeness as a quality dimension:
+  https://aclanthology.org/2023.acl-long.181/
+
+Design decision:
+
+- Add explicit material claims with exact claim-level evidence to ordinary QA,
+  matching the already established cross-document contract.
+- Validate every claim independently for exact evidence location, unsupported
+  quantities, legal modality, and unsupported absence assertions.
+- Require answerable records to contain at least one claim and require every
+  flat evidence item to be used by a claim. Derive exported evidence and
+  citations from validated claim bindings so citation lineage cannot drift.
+- Retain a concise whole-answer judge for relevance and completeness. Atomic
+  validation complements rather than replaces holistic review.
+- Add only high-confidence deterministic fragment checks: empty/whitespace
+  answers, dangling function words, terminal comma/colon/semicolon, unmatched
+  brackets, or an ellipsis indicating truncation. Do not reject concise noun
+  phrases that correctly answer direct-fact questions.
+- Preserve existing output fields and append claim attribution; do not remove
+  messages, evidence, reasoning, provenance, or citations.
+
+Validation plan:
+
+- Unit-test valid concise answers, incomplete fragments, claim-specific
+  unsupported modality/number/absence, unused evidence, and cross-claim
+  evidence leakage.
+- Run focused procurement tests, Ruff, and compilation locally without calling
+  any configured model endpoint.
+- Confirm yield and answer quality in the next user-run bounded pilot.
