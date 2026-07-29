@@ -11,6 +11,7 @@ from jsonl_io import write_jsonl_rows
 from pydantic import ValidationError
 from schemas import DraftingJudgeDecision, DraftingResult, DraftingSeed
 from settings import CONFIG
+from validation import semantic_support_issues
 
 from bespokelabs import curator
 
@@ -128,6 +129,10 @@ def drafting_validation_issues(row: dict[str, Any], result: DraftingResult) -> l
         authority = value.strip(" \t:-")
         if authority and authority.casefold() not in combined.casefold():
             issues.append(f"unsupported_authority:{authority}")
+    declared_support = "\n".join(
+        [*result.manual_evidence_quotes, *result.tender_facts_used]
+    )
+    issues.extend(semantic_support_issues(response, declared_support))
     return sorted(set(issues))
 
 

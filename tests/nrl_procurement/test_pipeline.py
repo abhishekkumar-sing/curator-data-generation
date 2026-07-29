@@ -75,6 +75,7 @@ from validation import (  # noqa: E402
     deduplicate,
     judge_batch_identity_issues,
     judge_quotes_are_grounded,
+    semantic_support_issues,
     validate_cross_record,
     validate_record,
 )
@@ -983,6 +984,56 @@ def test_validation_uses_qualifier_tokens_and_modality_equivalence() -> None:
 
     weakened = {**categorical, "answer": "The bidder may be put on the holiday list."}
     assert "dropped_qualifier:shall" in validate_record(weakened, passage)
+
+
+def test_semantic_support_rejects_absence_and_deontic_drift() -> None:
+    assert semantic_support_issues(
+        "The buyer shall deduct liquidated damages.",
+        "The buyer may recover liquidated damages.",
+    ) == ["strengthened_modality:permission_to_obligation"]
+    assert semantic_support_issues(
+        "The envelopes must be sealed separately.",
+        "The envelopes should be sealed separately.",
+    ) == ["strengthened_modality:recommendation_to_obligation"]
+    assert semantic_support_issues(
+        "The provision was not present in the 2019 Manual.",
+        "The contractor is liable to pay liquidated damages.",
+    ) == ["unsupported_absence_claim"]
+    assert semantic_support_issues(
+        "There is no provision for consortium registration.",
+        "There is no provision for registration of Consortium.",
+    ) == []
+    assert semantic_support_issues(
+        "The supplier must deliver the goods.",
+        "The supplier shall deliver the goods.",
+    ) == []
+
+
+def test_drafting_validation_applies_modality_support_gate() -> None:
+    source = "The buyer may recover liquidated damages."
+    row = {
+        "manual_passages": [source],
+        "combined_source_text": f"Tender mode: Limited.\n{source}",
+        "tender_context": ["Tender mode: Limited."],
+    }
+    result = DraftingResult.model_validate(
+        {
+            "document_blocks": [
+                {"block_type": "heading", "text": "Liquidated Damages"},
+                {
+                    "block_type": "paragraph",
+                    "text": "The buyer shall deduct liquidated damages.",
+                },
+            ],
+            "manual_evidence_quotes": [source],
+            "tender_facts_used": ["Tender mode: Limited."],
+        }
+    )
+
+    assert (
+        "strengthened_modality:permission_to_obligation"
+        in drafting_validation_issues(row, result)
+    )
 
 
 def test_judge_witness_accepts_only_lossless_grounded_forms() -> None:

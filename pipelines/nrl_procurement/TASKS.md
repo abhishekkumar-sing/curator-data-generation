@@ -2110,7 +2110,8 @@ Acceptance criteria:
 
 #### Evidence entailment, absence, and deontic-modality research (2026-07-29)
 
-Status: research complete after pilot-009; implementation pending.
+Status: first conservative deterministic gate implemented and locally
+verified; atomic claim-to-evidence enforcement remains pending.
 
 Pilot evidence:
 
@@ -2188,6 +2189,27 @@ Risks and rejected alternatives:
   local modality mismatch. This conservative batch-level gate is an immediate
   safeguard; the planned atomic claim-to-evidence schema remains the stronger
   long-term solution.
+
+Implementation result:
+
+- [x] Added shared, category-aware checks for obligation, recommendation,
+  permission, and prohibition cues, including `shall`/`must` equivalence.
+- [x] Reject high-confidence permission/recommendation-to-obligation
+  strengthening, obligation weakening, and introduced obligations or
+  prohibitions with stable reason codes.
+- [x] Reject explicit whole-document absence claims when their declared
+  evidence does not itself state absence/lack.
+- [x] Apply the checks to ordinary QA answers, cross-document answers, each
+  cross-document rationale step, and drafting outputs using declared exact
+  evidence.
+- [x] Re-audited pilot-009 locally: the gate identifies the accepted
+  “should”→“must” records, unsupported “not present” comparison, and an
+  introduced obligation that was supported only by a noun-phrase fragment.
+- [x] Passed 49 focused procurement tests and Ruff checks, including a
+  drafting permission→obligation regression.
+- [ ] Replace response-level multi-evidence checking with atomic
+  claim/block-to-evidence bindings so one correctly modalized source cannot
+  mask a different claim's modality drift.
 
 Acceptance criteria:
 

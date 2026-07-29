@@ -91,6 +91,37 @@ QUALIFIER_EQUIVALENTS = {
     "only": (r"\bonly\b", r"\bsolely\b", r"\bexclusively\b", r"\blimited\s+to\b"),
     "subject to": (r"\bsubject\s+to\b", r"\bprovided\s+that\b", r"\bconditional\s+on\b"),
 }
+DEONTIC_PATTERNS: dict[str, tuple[str, ...]] = {
+    "prohibition": (
+        r"\b(?:shall|must|may)\s+not\b",
+        r"\b(?:is|are)\s+prohibited\b",
+        r"\bprohibit(?:s|ed|ing)?\b",
+        r"\bno\b[^.\n]{0,80}\bshall\b",
+    ),
+    "obligation": (
+        r"\bshall\b",
+        r"\bmust\b",
+        r"\brequired\s+to\b",
+        r"\bmandatory\b",
+    ),
+    "recommendation": (r"\bshould\b", r"\brecommended\b", r"\badvisable\b"),
+    "permission": (
+        r"\bmay\b",
+        r"\bpermitted\b",
+        r"\ballowed\b",
+        r"\bentitled\b",
+    ),
+}
+ABSENCE_CLAIM = re.compile(
+    r"\b(?:"
+    r"(?:is|are|was|were)\s+(?:not\s+present|absent)|"
+    r"(?:does|do|did)\s+not\s+(?:contain|include|mention|provide|state)|"
+    r"(?:not|never)\s+(?:mentioned|provided|stated)|"
+    r"no\s+(?:such\s+)?provision|"
+    r"lack(?:s|ed|ing)?\s+(?:a|the|such)\s+provision"
+    r")\b",
+    re.IGNORECASE,
+)
 DANGLING_FINAL_WORD = re.compile(
     r"\b(?:a|an|and|at|but|by|for|from|if|in|of|on|or|over|than|that|the|" r"to|under|when|which|while|whose|with)\s*$",
     re.IGNORECASE,
@@ -181,6 +212,46 @@ def _has_pattern(text: str, patterns: tuple[str, ...]) -> bool:
     return any(re.search(pattern, text, flags=re.IGNORECASE) for pattern in patterns)
 
 
+def semantic_support_issues(answer: str, support_text: str) -> list[str]:
+    """Detect high-confidence absence and legal-modality support failures."""
+    issues: list[str] = []
+    if ABSENCE_CLAIM.search(answer) and not ABSENCE_CLAIM.search(support_text):
+        issues.append("unsupported_absence_claim")
+
+    answer_modalities = {
+        category
+        for category, patterns in DEONTIC_PATTERNS.items()
+        if _has_pattern(answer, patterns)
+    }
+    support_modalities = {
+        category
+        for category, patterns in DEONTIC_PATTERNS.items()
+        if _has_pattern(support_text, patterns)
+    }
+    # Prohibitions contain obligation/permission auxiliaries lexically but are
+    # semantically their own category.
+    if "prohibition" in answer_modalities:
+        answer_modalities -= {"obligation", "permission"}
+    if "prohibition" in support_modalities:
+        support_modalities -= {"obligation", "permission"}
+
+    if "obligation" in answer_modalities and "obligation" not in support_modalities:
+        if "permission" in support_modalities:
+            issues.append("strengthened_modality:permission_to_obligation")
+        elif "recommendation" in support_modalities:
+            issues.append("strengthened_modality:recommendation_to_obligation")
+        elif not support_modalities:
+            issues.append("introduced_modality:obligation")
+    if "obligation" in support_modalities and "obligation" not in answer_modalities:
+        if "permission" in answer_modalities:
+            issues.append("weakened_modality:obligation_to_permission")
+        elif "recommendation" in answer_modalities:
+            issues.append("weakened_modality:obligation_to_recommendation")
+    if "prohibition" in answer_modalities and "prohibition" not in support_modalities:
+        issues.append("introduced_modality:prohibition")
+    return sorted(set(issues))
+
+
 def validate_record(record: dict[str, Any], passage: str) -> list[str]:
     """Return machine-checkable rejection reasons."""
     reasons: list[str] = []
@@ -199,6 +270,7 @@ def validate_record(record: dict[str, Any], passage: str) -> list[str]:
         if _is_incomplete_evidence_fragment(quote):
             reasons.append("incomplete_evidence_fragment")
     support = " ".join(quotes)
+    reasons.extend(semantic_support_issues(record["answer"], support))
     for number in _unsupported_quantities(record["answer"], support):
         reasons.append(f"unsupported_number:{number}")
     answer = record["answer"]
@@ -251,6 +323,7 @@ def validate_cross_record(record: dict[str, Any], documents: list[dict[str, Any]
                 reasons.append("incomplete_evidence_fragment")
             used_claim_sources.add(source_id)
     claim_support = " ".join(evidence["quote"] for claim in record.get("claims", []) for evidence in claim.get("evidence", []))
+    reasons.extend(semantic_support_issues(record["answer"], claim_support))
     # Manual identity and version dates are valid support for attribution in the
     # answer even when they are not repeated inside the quoted policy sentence.
     metadata_support = " ".join(
@@ -268,6 +341,16 @@ def validate_cross_record(record: dict[str, Any], documents: list[dict[str, Any]
     for number in _unsupported_quantities(record["answer"], f"{claim_support}\n{metadata_support}"):
         reasons.append(f"unsupported_number:{number}")
     for step in record.get("reasoning_steps", []):
+        step_support = " ".join(
+            evidence.get("quote", "") for evidence in step.get("evidence", [])
+        )
+        reasons.extend(
+            f"reasoning_{issue}"
+            for issue in semantic_support_issues(
+                str(step.get("statement", "")),
+                step_support,
+            )
+        )
         for evidence in step.get("evidence", []):
             source_id, quote = evidence["source_id"], evidence["quote"]
             if source_id not in known or quote not in known.get(source_id, ""):
