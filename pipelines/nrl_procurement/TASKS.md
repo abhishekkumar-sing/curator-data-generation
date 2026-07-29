@@ -1802,6 +1802,9 @@ Implementation progress:
 
 ### 5. Execute real source-ablation trials
 
+- [x] Complete and record the mandatory research-first gate for counterfactual
+  source removal, answer trials, claim coverage, invalid-trial semantics,
+  caching, and independent adjudication.
 - [ ] Answer each candidate with both sources.
 - [ ] Answer it again with only source A.
 - [ ] Answer it again with only source B.
@@ -1816,6 +1819,83 @@ Acceptance criteria:
 - A-only misses at least one required source-B claim.
 - B-only misses at least one required source-A claim.
 - The judge reviews actual ablated outputs rather than predicting the result.
+
+#### Real source-ablation research record (2026-07-29)
+
+Status: research gate complete; production implementation has not started.
+
+Verified findings and design:
+
+- The legacy `CrossDocumentJudge` is shown the canonical answer and predicts
+  whether removing each source would break it. It does not execute three
+  answer calls, so its `unsupported_without_source_ids` is model opinion rather
+  than observed counterfactual behavior.
+- P0.4 now produces immutable questions, verified path inputs, and candidate
+  answers but intentionally exports none for training. These are the correct
+  inputs for actual ablation.
+- Multi-hop QA research repeatedly finds disconnected reasoning: systems can
+  answer intended multi-hop questions from subsets or shortcuts. Correct final
+  answer alone does not prove the intended path was used.
+- Run three answer trials with the same answer schema, model profile, decoding,
+  prompt structure, and completion budget: full inputs, only input A, and only
+  input B. The visible context and declared visible proposition IDs are the
+  only intended difference.
+- Trial outputs must include `answerable`, answer, material claim IDs covered,
+  exact evidence, and limitation reason. A trial may abstain. Unknown evidence,
+  claims attributed to withheld sources, malformed output, timeout, or missing
+  response makes the trial invalid; it does not prove source necessity.
+- Compare coverage against stable required claims derived from the verified
+  path/canonical full answer. Full context must cover every required terminal
+  claim. A-only must fail to cover at least one valid B-grounded required claim;
+  B-only must fail analogously for A. Merely changing wording or answer length
+  is irrelevant.
+- Store raw inputs/outputs, visible/withheld sources, request IDs, prompt
+  budgets, deterministic status, claim coverage, and decision for all trials.
+  Cache identity must include question/path/claim IDs, visible proposition
+  hashes, model profile/endpoint excluding secrets, decoding, prompt/schema,
+  and validator version.
+- After deterministic coverage, an independent judge reviews all three actual
+  outputs together. It cannot replace invalid trials or infer missing calls.
+- False-premise verification is distinct: a contradiction trial must compare a
+  typed mutated premise against full evidence. Source absence is insufficient.
+  Keep it quarantined rather than reuse missing-hop ablation as a contradiction
+  label.
+
+Rejected alternatives and risks:
+
+- Judge-only predicted ablation is cheaper but cannot detect actual one-hop
+  answering.
+- String/semantic similarity between full and ablated answers cannot establish
+  material claim coverage.
+- Treating timeout, refusal, or schema failure as “source needed” inflates
+  necessity.
+- Using different models or decoding across contexts confounds source removal
+  with inference behavior.
+- Even successful ablation is model-relative, not a universal proof that no
+  other model or human can exploit a shortcut. Record model/profile and retain
+  human review.
+
+Primary sources:
+
+- Min et al.,
+  [Compositional Questions Do Not Necessitate Multi-hop
+  Reasoning](https://aclanthology.org/P19-1416/), shows intended multi-hop
+  questions often remain answerable from partial evidence.
+- Trivedi et al.,
+  [Is Multihop QA in DiRe Condition?](https://aclanthology.org/2020.emnlp-main.712/),
+  formalizes disconnected reasoning and contrastive support sufficiency.
+- Tang et al.,
+  [Do Multi-Hop QA Systems Know How to Answer the Single-Hop
+  Sub-Questions?](https://aclanthology.org/2021.eacl-main.283/), shows final
+  answer correctness can conceal failure on constituent reasoning.
+- Guo et al.,
+  [Counterfactual Multihop QA](https://aclanthology.org/2023.acl-long.231/),
+  targets answers produced from a single fact rather than true multi-hop
+  reasoning.
+- Paranjape et al.,
+  [Retrieval-guided Counterfactual Generation for
+  QA](https://aclanthology.org/2022.acl-long.117/), uses a generate-and-filter
+  workflow and highlights answerability risks in counterfactual QA.
 
 ### 6. Create a replayable claim and reasoning graph
 
