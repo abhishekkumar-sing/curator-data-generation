@@ -839,6 +839,183 @@ Known limitations:
 
 ## P0 — required before full generation
 
+## Parallel capability — temporal curriculum and dataset annealing
+
+This capability is tracked separately from ordinary cross-document QA. It
+produces temporal training artifacts and a trainer-readable curriculum; Curator
+generates and validates the records but does not itself perform SFT sampling or
+claim that a schedule improves a model without a controlled training
+experiment.
+
+### Dataset-annealing research record (2026-07-29)
+
+Status: initial research gate complete; no production implementation has
+started. The effectiveness of any schedule remains an empirical hypothesis.
+
+Questions researched:
+
+- Does published evidence support dynamically shifting historical,
+  transition, and target examples during SFT?
+- How should evolving procurement facts be represented without overwriting
+  historical truth or projecting later rules backward?
+- Which work belongs in Curator data generation versus the downstream trainer?
+- Is the supplied manifest sufficient to infer amendment lineage and
+  currentness?
+- Which parts of the supplied/reference implementation are safe to reuse?
+
+Verified findings:
+
+- Data-mixture optimization for SFT is an active research area. Li et al.
+  optimize static mixture weights against validation loss and explicitly
+  describe SFT mixture optimization as underexplored; this does not validate a
+  universal linear or polynomial decay schedule for old facts.
+- “Annealing” in foundation-model training often refers to a final,
+  lower-learning-rate phase using a curated high-quality mixture. That usage
+  does not by itself show that a historical-to-current three-phase SFT
+  curriculum prevents catastrophic forgetting.
+- Continual Knowledge Learning evaluates three separate objectives: retain
+  invariant/older knowledge, update outdated knowledge, and acquire new
+  knowledge. Its results show that reliably achieving all three remains
+  difficult.
+- Temporal Knowledge Editing reports that direct updates can preserve new
+  knowledge while catastrophically forgetting historical facts. Its METO
+  method trains historical and new knowledge together with explicit time
+  objectives. This supports time-scoped contrast records, not an unscoped
+  “overwrite old with current” target.
+- The official Department of Expenditure manuals page currently lists Goods
+  Second Edition 2024, Consultancy and Non-Consultancy Services 2025, and Works
+  Second Edition 2025. Official publication listing is evidence of document
+  identity/date, but it does not establish that no later OM modifies a
+  provision. Currentness must be evaluated at a declared cutoff using the
+  complete registered amendment set.
+- The supplied manifest preserves useful manual IDs, dates, authority, and some
+  `amends` edges. It is not yet a complete amendment graph: several documents
+  whose titles describe an amendment/corrigendum have no `amends` field.
+  Titles and filename patterns cannot safely create those edges.
+- The reference project contains valuable safeguards: configured historical
+  and target pairs, bounded section alignment, exact evidence on both states,
+  time-labelled questions/answers, phase-specific exports, a validated optional
+  sampling schedule, and tests rejecting unrelated or identical states.
+- The reference alignment is still heuristic. Fuzzy heading/content similarity
+  proposes candidates but does not prove that two passages express different
+  states of the same rule. One-to-one greedy alignment may also miss
+  one-to-many amendments.
+
+Corrections to the supplied proposal:
+
+- Do not omit years/dates from the user query. Both visible question and answer
+  must identify historical and target editions/as-of dates, or an exported
+  record can teach temporal leakage.
+- Do not automatically call the later side “current” or “active.” Use
+  `historical_state` and `target_state` until official lineage and a declared
+  cutoff establish current applicability.
+- Do not generate an explanation of *why* a rule changed unless the source
+  explicitly states the reason. A safe transition explanation describes what
+  differs and the documented amendment relation.
+- Do not use `gpt-4o-mini`, OpenAI Batch, or any public Curator service. All
+  source passages stay on configured private endpoints, with Viewer and
+  telemetry disabled.
+- Curator `batch=True` is an inference-provider batching option, not a training
+  data scheduler. This repository should export a schedule manifest; the
+  downstream trainer must apply and log actual step-wise weights.
+- Generation temperature is unrelated to “temperature-based” dataset sampling.
+  Model decoding parameters remain profile-specific; sampling temperature or
+  phase weights belong to the trainer curriculum.
+- Do not rely on a paragraph-number regex over an entire converted manual.
+  Numbered lists, OCR spacing, Markdown emphasis, tables, repeated headings,
+  and cross-page provisions make that extraction brittle. Use registered
+  page/chunk/section structures, exact evidence offsets, and bounded
+  one-to-many windows.
+- Never pass an entire OM merely because a paragraph lookup failed. Quarantine
+  unresolved alignments or use bounded candidate windows with explicit
+  provenance.
+
+Research-supported architecture:
+
+1. **Authoritative temporal graph**
+   - Verify each edition and OM against the official source.
+   - Record explicit `amends`, `supersedes`, `effective_from`,
+     `effective_until`, and `verification_cutoff` only when documented.
+   - Keep Government and NRL graphs separate; no Government-to-NRL adoption
+     edge is inferred from similar language.
+2. **Verified state alignment**
+   - Reuse accepted atomic propositions and multi-chunk windows.
+   - Align candidates using section/subject/action signatures, then require
+     exact evidence and an independent same-provision/change judgment.
+   - Support one-to-many and many-to-one changes; identical states are not
+     transition examples.
+3. **Three exported record families**
+   - `historical_context`: historical-only QA with explicit historical
+     edition/as-of scope.
+   - `temporal_transition`: both dated states, exact evidence from each,
+     explicit change type, and no unsupported causal explanation.
+   - `target_context`: target-state QA explicitly scoped to its edition/as-of
+     date; “current as of cutoff” is allowed only after verified lineage.
+4. **Trainer-readable curriculum**
+   - Export immutable phase tags, record IDs, source-group IDs, and a validated
+     piecewise schedule whose non-negative weights sum to one at every anchor.
+   - Do not invent a default decay exponent. Candidate schedules are
+     experiment configurations, not truth.
+   - Preserve a nonzero replay/retention component unless experiments show it
+     is unnecessary.
+5. **Evaluation before adoption**
+   - Compare uniform mixing against at least one staged curriculum using the
+     same base checkpoint, total examples/tokens, optimizer, learning-rate
+     schedule, seed set, and evaluation suite.
+   - Measure historical retention, target-state accuracy, temporal
+     disambiguation, invariant procurement reasoning, authority isolation, and
+     general capability regression.
+   - Evaluate unscoped prompts separately from explicitly dated prompts.
+     Report confidence intervals across seeds before claiming an advantage.
+
+Implementation backlog:
+
+- [ ] Verify and complete amendment/currentness metadata against official
+  Department of Expenditure and NRL sources; record a verification cutoff.
+- [ ] Add typed temporal-pair and sampling-schedule configuration with strict
+  validation and secret-free fingerprints.
+- [ ] Build bounded one-to-many temporal alignments from accepted propositions
+  and section windows; write candidate and rejected alignment audits.
+- [ ] Add a source-grounded change extractor that emits historical/target
+  proposition IDs, exact evidence, change type, and explicit lineage basis.
+- [ ] Generate separately validated historical, transition, and target QA/CoT
+  exports with visible time and authority scope.
+- [ ] Export a trainer curriculum manifest; do not implement provider batching
+  or model training inside Curator.
+- [ ] Add leakage-safe temporal splits that keep a change lineage together
+  while holding out separate rule families for evaluation.
+- [ ] Add deterministic and judge checks for identical states, unrelated
+  subjects, reversed dates, unsupported currentness/supersession, missing
+  temporal labels, changed numbers/modalities, and NRL/Government leakage.
+- [ ] Run a user-controlled data pilot, followed by a separate controlled
+  training experiment before selecting or claiming benefits from a schedule.
+
+Primary and official sources:
+
+- Li et al.,
+  [Data Mixing Optimization for Supervised Fine-Tuning of Large Language
+  Models](https://proceedings.mlr.press/v267/li25bh.html), treats SFT mixture
+  selection as an optimization problem and reports that the area remains
+  underexplored.
+- Jang et al.,
+  [Towards Continual Knowledge Learning of Language Models](https://openreview.net/forum?id=vfsRB5MImo9),
+  evaluates retention, updating, and acquisition under temporal knowledge
+  change.
+- Yin et al.,
+  [History Matters: Temporal Knowledge Editing in Large Language
+  Model](https://arxiv.org/abs/2312.05497), documents historical forgetting and
+  uses explicit time objectives for old and new knowledge.
+- Dhingra et al.,
+  [Time-Aware Language Models as Temporal Knowledge
+  Bases](https://aclanthology.org/2022.tacl-1.15/), studies time-conditioned
+  language models and facts that change over time.
+- [Department of Expenditure manuals](https://www.doe.gov.in/manuals) is the
+  primary publication index for the registered Government procurement manual
+  editions.
+- [Bespoke Curator](https://github.com/bespokelabsai/curator) documents local
+  structured generation and batching boundaries; it does not provide a
+  temporal SFT curriculum or evidence for a particular schedule.
+
 ### 1. Extract grounded atomic propositions
 
 - [x] Add a proposition schema containing:
