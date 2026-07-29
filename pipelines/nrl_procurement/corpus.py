@@ -97,6 +97,19 @@ def _chunks(text: str, maximum: int) -> list[str]:
     return result
 
 
+def _updated_heading_stack(
+    stack: list[str],
+    passage: str,
+) -> list[str]:
+    """Apply explicit Markdown headings and return the current breadcrumb."""
+    updated = list(stack)
+    for marks, title in HEADING_PATTERN.findall(passage):
+        level = len(marks)
+        updated = updated[: level - 1]
+        updated.append(title.strip())
+    return updated
+
+
 def generation_text(passage: str) -> str:
     """Remove non-policy image descriptions while preserving tables and prose."""
     value = IMAGE_LINE_PATTERN.sub("", passage)
@@ -125,12 +138,7 @@ def _content_class(row: dict[str, Any]) -> str:
 
 def representative_rows(rows: list[dict[str, Any]], limit: int | None, seed: str) -> list[dict[str, Any]]:
     """Select a deterministic diversity-first pilot instead of a corpus prefix."""
-    eligible = [
-        row
-        for row in rows
-        if len(row["generation_passage"]) >= 200
-        and row["content_class"] != "front_matter"
-    ]
+    eligible = [row for row in rows if len(row["generation_passage"]) >= 200 and row["content_class"] != "front_matter"]
     if limit is None or limit >= len(eligible):
         return eligible
     if limit < 1:
@@ -253,16 +261,16 @@ def load_corpus(
         normalized_manuals.append(metadata)
         start_page = int(manual.get("start_page", 1))
         excluded = {int(page) for page in manual.get("exclude_pages", [])}
-        current_section: str | None = None
+        heading_stack: list[str] = []
+        document_order = 0
         for page, page_text in _pages(content_path.read_text(encoding="utf-8")):
             if page is not None and (page < start_page or page in excluded):
                 continue
             for index, passage in enumerate(_chunks(page_text, maximum_chars), 1):
                 if len(passage) < minimum_chars:
                     continue
-                headings = HEADING_PATTERN.findall(passage)
-                if headings:
-                    current_section = headings[-1][1].strip()
+                heading_stack = _updated_heading_stack(heading_stack, passage)
+                document_order += 1
                 digest = hashlib.sha256(passage.encode()).hexdigest()[:12]
                 page_label = f"p{page:04d}" if page is not None else "pnone"
                 chunk_id = f"{manual_id}-{page_label}-c{index:02d}-{digest}"
@@ -273,7 +281,10 @@ def load_corpus(
                     {
                         **metadata,
                         "page": page,
-                        "section": current_section,
+                        "page_chunk_index": index,
+                        "document_order": document_order,
+                        "section": heading_stack[-1] if heading_stack else None,
+                        "section_path": list(heading_stack),
                         "chunk_id": chunk_id,
                         "passage": passage,
                         "generation_passage": generation_text(passage),

@@ -36,6 +36,7 @@ from propositions import (
     write_proposition_cache,
 )
 from reasoning_paths import build_reasoning_paths
+from source_windows import build_source_windows
 from schemas import CandidateBatch, JudgeBatch
 from validation import deduplicate, judge_quotes_are_grounded, validate_record
 
@@ -578,6 +579,7 @@ def _final_manifest(
     duplicates: int,
     proposition_stats: dict[str, Any] | None = None,
     reasoning_path_stats: dict[str, Any] | None = None,
+    source_window_stats: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return {
         "run_id": run_id,
@@ -600,6 +602,7 @@ def _final_manifest(
         "drafting": drafting_stats,
         "propositions": proposition_stats or {"enabled": False},
         "reasoning_paths": reasoning_path_stats or {"enabled": False},
+        "source_windows": source_window_stats or {"enabled": False},
         "near_duplicates_removed": duplicates,
         "manuals": manuals,
     }
@@ -633,6 +636,24 @@ def main() -> None:
         json.dumps(corpus_report, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
+    source_window_stats: dict[str, Any] = {"enabled": False}
+    source_window_config = CONFIG.get("source_windows", {})
+    if source_window_config.get("enabled", False):
+        source_windows, rejected_source_windows = build_source_windows(
+            all_rows,
+            source_window_config,
+        )
+        _write_audit(files_dir / "source_windows.jsonl", source_windows)
+        _write_audit(
+            files_dir / "source_windows_rejected.jsonl",
+            rejected_source_windows,
+        )
+        source_window_stats = {
+            "enabled": True,
+            "accepted": len(source_windows),
+            "rejected": len(rejected_source_windows),
+            "schema_version": (source_windows[0]["schema_version"] if source_windows else None),
+        }
     seed = str(SPLITS.get("seed", "nrl-procurement-v1"))
     rows = representative_rows(all_rows, args.limit, seed)
     planned_single = plan_single_document_requests(rows, seed)
@@ -753,6 +774,7 @@ def main() -> None:
                 duplicates=duplicates,
                 proposition_stats=proposition_stats,
                 reasoning_path_stats=reasoning_path_stats,
+                source_window_stats=source_window_stats,
             ),
         )
         raise SystemExit("No records passed deterministic validation")
@@ -847,6 +869,7 @@ def main() -> None:
                 duplicates=duplicates + cross_duplicates,
                 proposition_stats=proposition_stats,
                 reasoning_path_stats=reasoning_path_stats,
+                source_window_stats=source_window_stats,
             ),
         )
         raise SystemExit("No records passed the quality judge")
@@ -938,6 +961,7 @@ def main() -> None:
                     duplicates=duplicates + cross_duplicates,
                     proposition_stats=proposition_stats,
                     reasoning_path_stats=reasoning_path_stats,
+                    source_window_stats=source_window_stats,
                 ),
             )
             raise SystemExit("No drafting records passed generation and quality checks")
@@ -971,6 +995,7 @@ def main() -> None:
         duplicates=duplicates + cross_duplicates,
         proposition_stats=proposition_stats,
         reasoning_path_stats=reasoning_path_stats,
+        source_window_stats=source_window_stats,
     )
     final_manifest["required_task_type_counts"] = task_counts
     final_manifest["missing_required_task_types"] = required_missing

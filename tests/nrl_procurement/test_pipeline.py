@@ -50,6 +50,7 @@ from schemas import (  # noqa: E402
     DraftingResult,
     JudgeBatch,
 )
+from source_windows import build_source_windows  # noqa: E402
 from validation import (  # noqa: E402
     deduplicate,
     judge_quotes_are_grounded,
@@ -83,6 +84,80 @@ def test_manifest_metadata_and_stable_chunk(tmp_path: Path) -> None:
     assert first[0]["chunk_id"] == second[0]["chunk_id"]
     assert first[0]["issuing_organization"] == "Government of India"
     assert manuals[0]["policy_scope"] == "government_reference"
+    assert first[0]["document_order"] == 1
+    assert first[0]["section_path"] == ["Rule"]
+
+
+def _window_chunk(
+    chunk_id: str,
+    order: int,
+    page: int,
+    section_path: list[str],
+    passage: str = "A grounded procurement provision.",
+) -> dict:
+    return {
+        "manual_id": "manual",
+        "title": "Manual",
+        "issuing_organization": "Government of India",
+        "policy_scope": "government_reference",
+        "revision_date": "2026",
+        "as_of_date": "2026",
+        "source_sha256": "a" * 64,
+        "chunk_id": chunk_id,
+        "page": page,
+        "document_order": order,
+        "section": section_path[-1] if section_path else None,
+        "section_path": section_path,
+        "passage": passage,
+        "generation_passage": passage,
+    }
+
+
+def test_source_windows_preserve_adjacency_boundaries_and_provenance() -> None:
+    chunks = [
+        _window_chunk("c1", 1, 1, ["Evaluation"]),
+        _window_chunk("c2", 2, 2, ["Evaluation"]),
+        _window_chunk("c3", 3, 2, ["Award"]),
+        _window_chunk("c4", 4, 3, ["General"]),
+    ]
+    accepted, rejected = build_source_windows(
+        chunks,
+        {
+            "max_chunks": 3,
+            "max_input_tokens": 1000,
+            "reserved_prompt_tokens": 100,
+            "conservative_chars_per_token": 2.5,
+        },
+    )
+    assert rejected == []
+    assert [row["chunk_ids"] for row in accepted] == [
+        ["c1", "c2"],
+        ["c3", "c4"],
+    ]
+    assert accepted[0]["pages"] == [1, 2]
+    assert accepted[0]["boundary_confidence"] == "explicit_markdown_heading"
+    assert accepted[0]["token_budget"]["passed"] is True
+    assert accepted[0]["chunks"][0]["passage"] == chunks[0]["passage"]
+
+
+def test_source_windows_split_by_bound_and_reject_oversize_chunk() -> None:
+    chunks = [
+        _window_chunk("c1", 1, 1, ["Evaluation"], "a" * 50),
+        _window_chunk("c2", 2, 1, ["Evaluation"], "b" * 50),
+        _window_chunk("c3", 3, 1, ["Evaluation"], "c" * 500),
+    ]
+    accepted, rejected = build_source_windows(
+        chunks,
+        {
+            "max_chunks": 1,
+            "max_input_tokens": 100,
+            "reserved_prompt_tokens": 20,
+            "conservative_chars_per_token": 2.5,
+        },
+    )
+    assert [row["chunk_ids"] for row in accepted] == [["c1"], ["c2"]]
+    assert rejected[0]["chunk_ids"] == ["c3"]
+    assert rejected[0]["rejection_reasons"] == ["source_chunk_exceeds_token_budget"]
 
 
 def test_validation_rejects_unsupported_number() -> None:

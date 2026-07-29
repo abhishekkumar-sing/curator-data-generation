@@ -1400,14 +1400,33 @@ Implementation result:
 - [x] Complete and record the mandatory research-first gate for source-window
   construction, section hierarchy, adjacency, cross-references, provenance,
   splitting, and model-aware prompt budgets.
-- [ ] Group adjacent chunks under reliable section boundaries.
+- [x] Group adjacent chunks under reliable section boundaries.
 - [ ] Include required definitions, exceptions, and referenced provisions when
   resolvable.
-- [ ] Split oversized sections on chunk boundaries.
-- [ ] Preserve every constituent chunk ID and page.
-- [ ] Prevent repeated or generic headings from establishing a match by
+- [x] Split oversized sections on chunk boundaries.
+- [x] Preserve every constituent chunk ID and page.
+- [x] Prevent repeated or generic headings from establishing a match by
   themselves.
 - [ ] Support one-to-many section relationships.
+
+Implementation progress:
+
+- [x] Added stable corpus `document_order`, per-page chunk order, and explicit
+  Markdown heading breadcrumbs without changing chunk IDs or source text.
+- [x] Added deterministic section/adjacency window construction with stable
+  IDs, ordered constituent chunks, pages, source hash, authority/edition
+  isolation, confidence labels, configurable chunk bounds, and conservative
+  pre-call token budgets.
+- [x] Oversized windows split only between chunks; an individually oversized
+  chunk is quarantined with `source_chunk_exceeds_token_budget` and is never
+  truncated.
+- [x] Added `source_windows.jsonl`, `source_windows_rejected.jsonl`, manifest
+  statistics, configuration, documentation, and regression tests. Thirty-two
+  local tests, Ruff, compilation, and YAML parsing pass.
+- [ ] Add exact, unambiguous definition/exception/cross-reference support
+  edges and one-to-many path associations.
+- [ ] Add selected-tokenizer rendered-chat budgeting; the current conservative
+  estimator is recorded explicitly and remains the fallback.
 
 Acceptance criteria:
 

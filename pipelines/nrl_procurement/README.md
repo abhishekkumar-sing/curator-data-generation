@@ -141,6 +141,10 @@ That `files/` directory contains:
 - `propositions_generated_audit.jsonl`: all proposition extractions, including
   deterministic rejections and explicit empty results
 - `propositions_rejected.jsonl`: proposition records that failed exact grounding
+- `source_windows.jsonl`: bounded section/adjacency windows retaining every
+  constituent chunk, page, and source hash
+- `source_windows_rejected.jsonl`: source chunks that cannot fit the configured
+  conservative prompt budget
 - `reasoning_paths.jsonl`: accepted pre-question, two-source reasoning DAGs
 - `reasoning_paths_rejected.jsonl`: path candidates rejected by deterministic
   connectivity, authority, temporal, or structural-ablation checks

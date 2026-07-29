@@ -126,6 +126,13 @@ reasoning_paths:
   enabled: true
   max_per_pair: 25
 
+source_windows:
+  enabled: true
+  max_chunks: 4
+  max_input_tokens: 8192
+  reserved_prompt_tokens: 3072
+  conservative_chars_per_token: 2.5
+
 # Orthogonal dataset axes:
 # - task: underlying procurement work
 # - persona: actor represented by the user request
