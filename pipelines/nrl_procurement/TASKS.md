@@ -1577,6 +1577,71 @@ Implementation result:
   and exact-mode behavior. Thirty-six local tests, Ruff, compilation, and YAML
   parsing pass.
 
+##### Pilot-009 model-context budgeting correction (2026-07-29)
+
+Status: research complete; implementation pending.
+
+Observed behavior and root cause:
+
+- All 12 accepted reasoning paths were rejected before question generation.
+  Their approximate rendered prompts were 4,037–4,131 tokens; with 4,096
+  completion tokens and a 256-token margin, each narrowly exceeded 8,192.
+- The selected Nemotron profile has no `context_window`, so the path stages
+  incorrectly fall back to `source_windows.max_input_tokens: 8192`. A source
+  window construction bound is not the serving model's context window.
+- The user confirmed that the private Nemotron deployment is configured for a
+  131K context length. This is below the model's theoretical maximum and is
+  therefore the operational limit the client must enforce.
+
+Official findings:
+
+- NVIDIA's official model card and Nemotron repository state that Nemotron 3
+  Super supports up to 1M tokens, but “up to” is a model capability rather
+  than proof of a particular server's launch-time limit:
+  https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4
+  and
+  https://github.com/NVIDIA-NeMo/Nemotron/blob/main/docs/nemotron/super3/README.md
+- Hugging Face documents that chat messages become a model-specific token
+  sequence and recommends `apply_chat_template(..., tokenize=True)` for exact
+  template-aware counting:
+  https://huggingface.co/docs/transformers/main/en/chat_templating
+- LiteLLM documents model-specific/custom tokenizers but falls back to a
+  generic tokenizer for unsupported model names. Such a fallback must not be
+  labelled exact:
+  https://docs.litellm.ai/docs/completion/token_usage
+
+Decision:
+
+- Add `context_window: 131072` to the Nemotron profile. Keep this value
+  profile-local and editable in configuration; never hard-code it in pipeline
+  logic or apply it to GLM, Gemma, Qwen, or future models.
+- Require every generation profile used by a full rendered-request budget to
+  declare a positive context window. Do not silently substitute
+  `source_windows.max_input_tokens`.
+- Preserve the independent 8,192-token Gemma judge limit and the 8,192-token
+  source-window construction bound. Those are separate constraints.
+- Continue using the explicitly labelled conservative character estimator
+  until an exact, server-matching local Nemotron tokenizer/template is
+  configured. Retain completion reserve and safety margin.
+
+Rejected alternatives and risks:
+
+- Setting the client to the advertised 1M maximum could exceed this deployment.
+- Increasing `source_windows.max_input_tokens` would enlarge evidence windows
+  globally and confuse source selection with provider capacity.
+- Removing the preflight budget would turn a deterministic quarantine into
+  provider-side context failures.
+- A configured context limit does not guarantee GPU KV-cache capacity or
+  acceptable latency at that length; pilot prompts remain far below 131K.
+
+Validation plan:
+
+- Unit-test explicit profile resolution, rejection of missing/non-positive
+  context limits, and isolation from `source_windows.max_input_tokens`.
+- Re-evaluate the 12 saved pilot-009 path prompts locally and confirm they pass
+  under 131,072 while preserving the same token estimates and reserves.
+- The user performs the next model-backed pilot; Codex does not run it.
+
 Acceptance criteria:
 
 - A source window never crosses manual, issuer, edition, or policy scope.
