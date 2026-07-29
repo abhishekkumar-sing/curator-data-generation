@@ -81,6 +81,7 @@ def build_drafting_inputs(seeds: list[DraftingSeed], corpus_rows: list[dict[str,
                 "manual_sources": selected,
                 "combined_source_text": "\n".join(tender_context) + "\n\n" + manual_context,
                 "candidate_citation_ids": [*seed.manual_chunk_ids, seed.tender_id],
+                "require_block_attribution": True,
             }
         )
     return inputs
@@ -133,6 +134,41 @@ def drafting_validation_issues(row: dict[str, Any], result: DraftingResult) -> l
         [*result.manual_evidence_quotes, *result.tender_facts_used]
     )
     issues.extend(semantic_support_issues(response, declared_support))
+    if row.get("require_block_attribution", False):
+        aggregate_manual: list[str] = []
+        aggregate_facts: list[str] = []
+        for index, block in enumerate(result.document_blocks):
+            block_support = [
+                *block.manual_evidence_quotes,
+                *block.tender_facts_used,
+                *block.instruction_evidence_quotes,
+            ]
+            if not block_support:
+                issues.append(f"unsupported_drafting_block:{index}")
+            for quote in block.manual_evidence_quotes:
+                if quote not in manual_text:
+                    issues.append(f"block_non_verbatim_manual_evidence:{index}")
+                if quote not in aggregate_manual:
+                    aggregate_manual.append(quote)
+            for fact in block.tender_facts_used:
+                if fact not in tender_facts:
+                    issues.append(f"block_unknown_tender_fact:{index}")
+                if fact not in aggregate_facts:
+                    aggregate_facts.append(fact)
+            for quote in block.instruction_evidence_quotes:
+                if not quote or quote not in row["instruction"]:
+                    issues.append(f"block_non_verbatim_instruction_evidence:{index}")
+            issues.extend(
+                f"block_{index}:{issue}"
+                for issue in semantic_support_issues(
+                    block.text,
+                    "\n".join(block_support),
+                )
+            )
+        if aggregate_manual != result.manual_evidence_quotes:
+            issues.append("drafting_manual_evidence_aggregate_mismatch")
+        if aggregate_facts != result.tender_facts_used:
+            issues.append("drafting_tender_fact_aggregate_mismatch")
     return sorted(set(issues))
 
 
@@ -207,6 +243,11 @@ CONSTRAINTS
 - Return ordered document_blocks. Use a separate block for each heading, labelled
   field, body paragraph, contact line, signature line, and footer line. The caller
   inserts a blank line between blocks. Never join unrelated document elements.
+- Bind every block to at least one exact support item. Policy language uses that
+  block's manual_evidence_quotes; instance particulars use complete
+  tender_facts_used; requested headings/layout may use exact substrings in
+  instruction_evidence_quotes. Instruction text never substitutes for policy or
+  tender-fact support.
 - Return plain text only. Never use HTML tags, HTML entities, Markdown tables, or
   literal <br> tags to represent document layout.
 - Do not add an issuing authority, department, division, signatory, approval block,
@@ -221,8 +262,10 @@ CONSTRAINTS
 OUTPUT CONTRACT
 Return DraftingResult under the enforced response schema:
 - document_blocks: ordered ready-to-use document lines or paragraphs; at least two.
-- manual_evidence_quotes: one or more exact quotations from MANUAL CONTEXT.
-- tender_facts_used: one or more complete verbatim items from TENDER FACTS.
+- Each document block includes block-local manual_evidence_quotes,
+  tender_facts_used, and instruction_evidence_quotes.
+- manual_evidence_quotes: stable first-use union of the block-local manual quotes.
+- tender_facts_used: stable first-use union of the block-local tender facts.
 
 REQUEST METADATA
 tender_id: {row['tender_id']}

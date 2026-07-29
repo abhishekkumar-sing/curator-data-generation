@@ -896,7 +896,7 @@ Implementation result:
 
 ### Atomic drafting block attribution research addendum (2026-07-29)
 
-Status: research complete; implementation pending.
+Status: implemented and locally verified; user-run pilot validation pending.
 
 Research and local findings:
 
@@ -960,6 +960,27 @@ Validation plan:
 - Do not accept the capability until a user-run bounded pilot shows that both
   drafting seeds produce complete block bindings without material quality
   regression.
+
+Implementation result:
+
+- [x] Extended `DraftingBlock` without removing its existing `text` field:
+  block-local exact manual quotations, complete tender facts, and exact
+  instruction substrings are now retained.
+- [x] Production drafting inputs require block attribution. Every block must
+  bind at least one source item; manual, tender, and instruction bindings are
+  checked against their correct source namespace.
+- [x] Require document-level manual evidence and tender-fact lists to equal the
+  stable first-use union of block bindings, preserving the earlier fields
+  without allowing an unrelated aggregate.
+- [x] Apply absence and deontic-modality checks independently to each block and
+  its own support while retaining document-level defense-in-depth checks.
+- [x] Updated the structured prompt contract to explain source roles and forbid
+  instruction text from substituting for policy or tender-fact evidence.
+- [x] Preserved compact drafting field order and citation behavior.
+- [x] Passed 50 focused procurement tests and Ruff checks, including a
+  block-local `may`→`shall` regression.
+- [ ] Validate block-attribution completeness, generation yield, and drafting
+  usefulness with both seeds in the next bounded user-run pilot.
 
 ## Current baseline
 

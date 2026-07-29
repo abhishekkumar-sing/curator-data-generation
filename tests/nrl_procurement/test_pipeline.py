@@ -1016,14 +1016,28 @@ def test_drafting_validation_applies_modality_support_gate() -> None:
         "manual_passages": [source],
         "combined_source_text": f"Tender mode: Limited.\n{source}",
         "tender_context": ["Tender mode: Limited."],
+        "instruction": "Draft the liquidated damages clause.",
+        "require_block_attribution": True,
     }
     result = DraftingResult.model_validate(
         {
             "document_blocks": [
-                {"block_type": "heading", "text": "Liquidated Damages"},
+                {
+                    "block_type": "heading",
+                    "text": "Liquidated Damages",
+                    "instruction_evidence_quotes": [
+                        "liquidated damages clause"
+                    ],
+                },
                 {
                     "block_type": "paragraph",
                     "text": "The buyer shall deduct liquidated damages.",
+                    "manual_evidence_quotes": [source],
+                },
+                {
+                    "block_type": "field",
+                    "text": "Tender mode: Limited.",
+                    "tender_facts_used": ["Tender mode: Limited."],
                 },
             ],
             "manual_evidence_quotes": [source],
@@ -1031,9 +1045,11 @@ def test_drafting_validation_applies_modality_support_gate() -> None:
         }
     )
 
+    issues = drafting_validation_issues(row, result)
+    assert "strengthened_modality:permission_to_obligation" in issues
     assert (
-        "strengthened_modality:permission_to_obligation"
-        in drafting_validation_issues(row, result)
+        "block_1:strengthened_modality:permission_to_obligation"
+        in issues
     )
 
 
@@ -1343,8 +1359,22 @@ def test_drafting_seed_resolution_validation_and_compact_output(tmp_path: Path) 
     inputs = build_drafting_inputs(read_drafting_seeds(seed_path), corpus)
     result = DraftingResult(
         document_blocks=[
-            DraftingBlock(text="Delayed Delivery & Liquidated Damages"),
-            DraftingBlock(text="LD is 0.5% per week and capped at 5% of delayed goods."),
+            DraftingBlock(
+                text="Delayed Delivery & Liquidated Damages",
+                instruction_evidence_quotes=[
+                    "Draft the delayed-delivery clause."
+                ],
+            ),
+            DraftingBlock(
+                text="LD is 0.5% per week and capped at 5% of delayed goods.",
+                manual_evidence_quotes=[
+                    "LD is 0.5% per week and capped at 5% of delayed goods."
+                ],
+            ),
+            DraftingBlock(
+                text="Tender mode: Limited.",
+                tender_facts_used=["Tender mode: Limited."],
+            ),
         ],
         manual_evidence_quotes=["LD is 0.5% per week and capped at 5% of delayed goods."],
         tender_facts_used=["Tender mode: Limited."],

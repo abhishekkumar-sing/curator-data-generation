@@ -248,6 +248,21 @@ class DraftingBlock(BaseModel):
             "One ready-to-use document line or paragraph. Do not combine unrelated " "headings, fields, contacts, clauses, or footer lines in one block."
         ),
     )
+    manual_evidence_quotes: list[str] = Field(
+        default_factory=list,
+        description="Exact manual quotations supporting this block.",
+    )
+    tender_facts_used: list[str] = Field(
+        default_factory=list,
+        description="Complete verbatim tender facts supporting this block.",
+    )
+    instruction_evidence_quotes: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Exact instruction substrings supporting requested headings or layout; "
+            "not a substitute for factual or policy evidence."
+        ),
+    )
 
 
 class DraftingResult(BaseModel):
