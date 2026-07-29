@@ -7,7 +7,7 @@ import json
 import re
 from typing import Any
 
-from schemas import PathAnswerDraft, PathQuestionBatch
+from schemas import AblationTrialDraft, PathAnswerDraft, PathQuestionBatch
 from settings import CONFIG
 
 from bespokelabs import curator
@@ -121,6 +121,111 @@ def false_premise_quarantine(
         }
         for row in questions
     ]
+
+
+def build_ablation_trial_inputs(
+    answers: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Create full, A-only, and B-only trials with identical non-context inputs."""
+    trials = []
+    for row in answers:
+        propositions = row["propositions"]
+        if len(propositions) != 2:
+            continue
+        variants = (
+            ("full", propositions, []),
+            ("source_a_only", [propositions[0]], [propositions[1]["proposition_id"]]),
+            ("source_b_only", [propositions[1]], [propositions[0]["proposition_id"]]),
+        )
+        for variant, visible, withheld in variants:
+            identity = f"{row['record_id']}:{variant}"
+            trials.append(
+                {
+                    "trial_id": "ablation-" + hashlib.sha256(identity.encode()).hexdigest()[:24],
+                    "variant": variant,
+                    "record_id": row["record_id"],
+                    "question_id": row["question_id"],
+                    "path_id": row["path_id"],
+                    "question": row["question"],
+                    "visible_propositions": visible,
+                    "visible_proposition_ids": [item["proposition_id"] for item in visible],
+                    "withheld_proposition_ids": withheld,
+                    "canonical_claims": row["claims"],
+                    "generation_task_type": row["task_type"],
+                }
+            )
+    return trials
+
+
+def ablation_trial_validation_issues(
+    draft: dict[str, Any],
+    row: dict[str, Any],
+) -> list[str]:
+    """Reject malformed trials and any use of unknown or withheld evidence."""
+    issues: list[str] = []
+    visible = {item["proposition_id"]: item for item in row["visible_propositions"]}
+    if draft.get("answerable"):
+        if not str(draft.get("answer", "")).strip():
+            issues.append("answerable_trial_has_empty_answer")
+        if not draft.get("claims"):
+            issues.append("answerable_trial_has_no_claims")
+    elif draft.get("claims"):
+        issues.append("abstaining_trial_has_claims")
+    elif not str(draft.get("limitation_reason", "")).strip():
+        issues.append("abstaining_trial_missing_limitation")
+    for claim in draft.get("claims", []):
+        if not claim.get("evidence"):
+            issues.append("trial_claim_has_no_evidence")
+        for evidence in claim.get("evidence", []):
+            proposition_id = evidence.get("proposition_id", "")
+            proposition = visible.get(proposition_id)
+            if proposition is None:
+                issues.append("trial_uses_non_visible_proposition")
+            elif evidence.get("quote", "").strip() != proposition["evidence"]["quote"]:
+                issues.append("non_exact_trial_evidence")
+    return sorted(set(issues))
+
+
+class SourceAblationAnswerGenerator(curator.LLM):
+    """Run one blind answer attempt with only the declared visible evidence."""
+
+    response_format = AblationTrialDraft
+
+    def prompt(self, row: dict[str, Any]) -> str:
+        """Keep the prompt invariant across full and single-source trials."""
+        return f"""TASK
+Answer the immutable procurement question using only VISIBLE EVIDENCE. Do not use outside
+knowledge. If the visible evidence cannot support a complete answer, set answerable=false,
+leave answer and claims empty, and briefly identify the missing information without
+guessing.
+
+For an answerable trial, return a concise complete answer and material claims with exact
+verbatim evidence. Evidence proposition_id values must come from VISIBLE EVIDENCE.
+Do not mention hidden, removed, missing, source-A/source-B, canonical, or ablation labels.
+Do not provide private chain-of-thought.
+
+QUESTION
+{row["question"]}
+
+VISIBLE EVIDENCE
+{json.dumps(row["visible_propositions"], ensure_ascii=False)}
+"""
+
+    def parse(self, row: dict[str, Any], response: AblationTrialDraft) -> list[dict[str, Any]]:
+        """Persist the actual trial output and deterministic validity status."""
+        draft = response.model_dump()
+        issues = ablation_trial_validation_issues(draft, row)
+        return [
+            {
+                **row,
+                "trial_output": draft,
+                "deterministic_checks": {
+                    "passed": not issues,
+                    "issues": issues,
+                },
+                "generation_model": self.model_name,
+            }
+        ]
 
 
 class VerifiedPathQuestionGenerator(curator.LLM):

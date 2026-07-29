@@ -192,6 +192,15 @@ class PathAnswerDraft(BaseModel):
     rationale_steps: list[str] = Field(default_factory=list, max_length=4)
 
 
+class AblationTrialDraft(BaseModel):
+    """One answer attempt under an explicitly bounded evidence context."""
+
+    answerable: bool
+    answer: str = ""
+    claims: list[PathAnswerClaimDraft] = Field(default_factory=list)
+    limitation_reason: str = ""
+
+
 class JudgeDecision(BaseModel):
     supported: bool
     relevant: bool

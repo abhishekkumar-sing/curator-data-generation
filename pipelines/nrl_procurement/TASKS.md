@@ -1805,9 +1805,9 @@ Implementation progress:
 - [x] Complete and record the mandatory research-first gate for counterfactual
   source removal, answer trials, claim coverage, invalid-trial semantics,
   caching, and independent adjudication.
-- [ ] Answer each candidate with both sources.
-- [ ] Answer it again with only source A.
-- [ ] Answer it again with only source B.
+- [x] Answer each candidate with both sources.
+- [x] Answer it again with only source A.
+- [x] Answer it again with only source B.
 - [ ] Measure required-claim coverage for all three outputs.
 - [ ] Store the actual ablation outputs and decisions.
 - [ ] Reject answerable records when either single-source output fully covers
@@ -1874,6 +1874,37 @@ Rejected alternatives and risks:
 - Even successful ablation is model-relative, not a universal proof that no
   other model or human can exploit a shortcut. Record model/profile and retain
   human review.
+
+Implementation progress (three-trial execution):
+
+- [x] Added one model-portable trial schema and one Curator answer class shared
+  by full, A-only, and B-only trials, ensuring the model profile, decoding,
+  prompt template, completion schema, and validator are identical.
+- [x] Constructed three stable trial IDs per accepted path answer. Only the
+  visible proposition list differs; canonical answers, canonical claim text,
+  withheld proposition content, and internal variant labels are absent from
+  the model prompt.
+- [x] Added rendered prompt-budget checks before every trial and dedicated
+  prompt-rejection, raw-audit, valid, and invalid JSONL artifacts under the
+  dynamic run directory.
+- [x] Added deterministic trial validation for empty answerable outputs,
+  unsupported abstentions, missing claim evidence, unknown/withheld
+  proposition use, and non-exact evidence.
+- [x] Added manifest counts for planned, prompt-rejected, valid, and invalid
+  trials. Invalid or missing trials remain ineligible for a necessity
+  decision.
+- [x] Regression tests verify the exact three context variants, prompt
+  blindness, and withheld/inexact-evidence rejection. Complete local
+  procurement verification: 44 tests passed; Ruff passed. No model-backed
+  pipeline was run.
+
+Remaining P0.5 work:
+
+- Derive stable required-claim coverage from the canonical verified answer.
+- Independently adjudicate the three actual outputs and enforce the full/A/B
+  coverage decision.
+- Store the final coverage decision and promote only passing path records from
+  `accepted_for_training: 0`.
 
 Primary sources:
 

@@ -38,13 +38,15 @@ from propositions import (
 from reasoning_paths import build_reasoning_paths
 from source_windows import build_source_windows
 from path_qa import (
+    SourceAblationAnswerGenerator,
     VerifiedPathAnswerGenerator,
     VerifiedPathQuestionGenerator,
+    build_ablation_trial_inputs,
     build_missing_hop_contrasts,
     false_premise_quarantine,
 )
 from prompt_budget import measure_rendered_request
-from schemas import PathAnswerDraft, PathQuestionBatch
+from schemas import AblationTrialDraft, PathAnswerDraft, PathQuestionBatch
 from schemas import CandidateBatch, JudgeBatch
 from validation import (
     deduplicate,
@@ -905,6 +907,69 @@ def main() -> None:
             files_dir / "path_answers_rejected.jsonl",
             [row for row in path_answers_audit if not row.get("deterministic_checks", {}).get("passed", False)],
         )
+        ablation_generator = SourceAblationAnswerGenerator(**_llm_kwargs(GENERATION))
+        ablation_inputs = build_ablation_trial_inputs(path_answers)
+        budgeted_ablation_inputs = []
+        ablation_prompt_rejected = []
+        for row in ablation_inputs:
+            budget = measure_rendered_request(
+                [{"role": "user", "content": ablation_generator.prompt(row)}],
+                AblationTrialDraft.model_json_schema(),
+                context_window=int(
+                    GENERATION.get(
+                        "context_window",
+                        source_window_config.get("max_input_tokens", 8192),
+                    )
+                ),
+                reserved_completion_tokens=int(generation_params.get("max_tokens", 4096)),
+                safety_margin_tokens=int(source_window_config.get("safety_margin_tokens", 256)),
+                conservative_chars_per_token=float(
+                    source_window_config.get(
+                        "conservative_chars_per_token",
+                        2.5,
+                    )
+                ),
+                require_exact=bool(
+                    source_window_config.get(
+                        "require_exact_prompt_tokens",
+                        False,
+                    )
+                ),
+            )
+            item = {**row, "prompt_budget": budget}
+            (budgeted_ablation_inputs if budget["passed"] else ablation_prompt_rejected).append(item)
+        _write_audit(
+            files_dir / "path_ablation_prompt_rejected.jsonl",
+            ablation_prompt_rejected,
+        )
+        ablation_trials_audit: list[dict[str, Any]] = []
+        if budgeted_ablation_inputs:
+            os.environ["HOSTED_VLLM_API_KEY"] = _model_settings(GENERATION)[2]
+            ablation_trials_audit = ablation_generator(
+                Dataset.from_list(budgeted_ablation_inputs),
+                working_dir=_working_dir(run_id, "path_ablation_trials"),
+            ).dataset.to_list()
+        _write_audit(
+            files_dir / "path_ablation_trials_audit.jsonl",
+            ablation_trials_audit,
+        )
+        valid_ablation_trials = [
+            row
+            for row in ablation_trials_audit
+            if row.get("deterministic_checks", {}).get("passed", False)
+        ]
+        _write_audit(
+            files_dir / "path_ablation_trials.jsonl",
+            valid_ablation_trials,
+        )
+        _write_audit(
+            files_dir / "path_ablation_trials_rejected.jsonl",
+            [
+                row
+                for row in ablation_trials_audit
+                if not row.get("deterministic_checks", {}).get("passed", False)
+            ],
+        )
         _write_audit(
             files_dir / "path_missing_hop_contrasts.jsonl",
             build_missing_hop_contrasts(path_questions),
@@ -922,6 +987,10 @@ def main() -> None:
             "answers_accepted": len(path_answers),
             "accepted_for_training": 0,
             "pending_source_ablation_and_judge": len(path_answers),
+            "ablation_trials_planned": len(ablation_inputs),
+            "ablation_prompt_rejected": len(ablation_prompt_rejected),
+            "ablation_trials_valid": len(valid_ablation_trials),
+            "ablation_trials_rejected": len(ablation_trials_audit) - len(valid_ablation_trials),
         }
 
     os.environ["HOSTED_VLLM_API_KEY"] = _model_settings(GENERATION)[2]

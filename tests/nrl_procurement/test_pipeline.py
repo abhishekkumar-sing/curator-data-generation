@@ -36,7 +36,10 @@ from generate import (  # noqa: E402
     request_coverage,
 )
 from path_qa import (  # noqa: E402
+    SourceAblationAnswerGenerator,
+    ablation_trial_validation_issues,
     answer_validation_issues,
+    build_ablation_trial_inputs,
     build_missing_hop_contrasts,
     false_premise_quarantine,
     question_validation_issues,
@@ -170,6 +173,98 @@ def test_export_identity_gate_rejects_duplicate_and_missing_stable_ids() -> None
         assert "missing record_id" in str(exc)
     else:
         raise AssertionError("missing stable IDs must fail closed")
+
+
+def test_ablation_trials_are_three_blind_context_variants() -> None:
+    propositions = [
+        {
+            "proposition_id": "prop-a",
+            "evidence": {"quote": "Source A exact evidence."},
+        },
+        {
+            "proposition_id": "prop-b",
+            "evidence": {"quote": "Source B exact evidence."},
+        },
+    ]
+    answer = {
+        "record_id": "answer-1",
+        "question_id": "question-1",
+        "path_id": "path-1",
+        "question": "What follows from the two procurement rules?",
+        "task_type": "cross_document_qa",
+        "claims": [{"statement": "Canonical claim", "evidence": []}],
+        "propositions": propositions,
+    }
+    trials = build_ablation_trial_inputs([answer])
+    assert [trial["variant"] for trial in trials] == [
+        "full",
+        "source_a_only",
+        "source_b_only",
+    ]
+    assert [trial["visible_proposition_ids"] for trial in trials] == [
+        ["prop-a", "prop-b"],
+        ["prop-a"],
+        ["prop-b"],
+    ]
+    prompts = [
+        SourceAblationAnswerGenerator.prompt(SimpleNamespace(), trial)
+        for trial in trials
+    ]
+    assert all("Canonical claim" not in prompt for prompt in prompts)
+    assert all("source_a_only" not in prompt and "source_b_only" not in prompt for prompt in prompts)
+
+
+def test_ablation_trial_validation_rejects_withheld_or_inexact_evidence() -> None:
+    row = {
+        "visible_propositions": [
+            {
+                "proposition_id": "prop-a",
+                "evidence": {"quote": "Source A exact evidence."},
+            }
+        ]
+    }
+    valid = {
+        "answerable": True,
+        "answer": "A supported answer.",
+        "claims": [
+            {
+                "statement": "A supported material claim.",
+                "evidence": [
+                    {
+                        "proposition_id": "prop-a",
+                        "quote": "Source A exact evidence.",
+                    }
+                ],
+            }
+        ],
+        "limitation_reason": "",
+    }
+    assert ablation_trial_validation_issues(valid, row) == []
+
+    withheld = json.loads(json.dumps(valid))
+    withheld["claims"][0]["evidence"][0]["proposition_id"] = "prop-b"
+    assert "trial_uses_non_visible_proposition" in ablation_trial_validation_issues(
+        withheld,
+        row,
+    )
+
+    inexact = json.loads(json.dumps(valid))
+    inexact["claims"][0]["evidence"][0]["quote"] = "Paraphrased evidence."
+    assert "non_exact_trial_evidence" in ablation_trial_validation_issues(
+        inexact,
+        row,
+    )
+
+    invalid_abstention = {
+        "answerable": False,
+        "answer": "",
+        "claims": [],
+        "limitation_reason": "",
+    }
+    assert "abstaining_trial_missing_limitation" in ablation_trial_validation_issues(
+        invalid_abstention,
+        row,
+    )
 
 
 def test_manifest_metadata_and_stable_chunk(tmp_path: Path) -> None:
