@@ -53,9 +53,14 @@ def test_auto_structured_output_mode_uses_static_lookup(monkeypatch):
 
 
 def test_auto_tool_mode_builds_and_validates_one_schema_tool():
+    class NestedProbe(BaseModel):
+        label: str
+        notes: list[str] = []
+
     class ProbeResponse(BaseModel):
         value: str
         count: int
+        nested: NestedProbe = NestedProbe(label="default")
 
     api_request = {
         "model": "hosted_vllm/private-model",
@@ -68,10 +73,14 @@ def test_auto_tool_mode_builds_and_validates_one_schema_tool():
     )
 
     assert request["tool_choice"] == "auto"
-    assert request["tools"][0]["function"]["name"] == "ProbeResponse"
-    assert request["tools"][0]["function"]["parameters"] == (
-        ProbeResponse.model_json_schema()
-    )
+    function = request["tools"][0]["function"]
+    parameters = function["parameters"]
+    assert function["name"] == "ProbeResponse"
+    assert function["strict"] is True
+    assert parameters["additionalProperties"] is False
+    assert parameters["required"] == ["value", "count", "nested"]
+    assert parameters["$defs"]["NestedProbe"]["additionalProperties"] is False
+    assert parameters["$defs"]["NestedProbe"]["required"] == ["label", "notes"]
     assert request["messages"][0]["role"] == "system"
     assert api_request["messages"] == [
         {"role": "user", "content": "return a probe"}

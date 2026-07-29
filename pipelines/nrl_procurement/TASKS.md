@@ -3998,8 +3998,9 @@ Remaining defects:
 
 Next research gates:
 
-- [ ] Research and probe vLLM auto-tool `strict: true`, then decide whether to
-  add it before forced named/required tool calling becomes available.
+- [x] Research and implement vLLM auto-tool `strict: true`; retain the
+  exactly-one-call validator until forced named/required tool calling becomes
+  available. Model-level yield remains a next-pilot validation item.
 - [ ] Research exact Gemma prompt counting and adaptive completion reservation;
   replace the over-conservative judge fallback without allowing API overflow.
 - [ ] Research Curator retry/failure-file semantics and persist only permanent
@@ -4080,3 +4081,15 @@ Decision and validation:
   tests.
 - Treat improved model yield as provisional until the next user-run pilot; do
   not infer it from schema inspection or unit tests.
+
+Implementation result:
+
+- `_auto_tool_request()` now uses the official
+  `openai.pydantic_function_tool()` converter, producing `strict: true` and a
+  recursively strict schema while leaving `tool_choice: "auto"` unchanged.
+- The parser still rejects zero calls, multiple calls, unexpected tool names,
+  malformed JSON arguments, and arguments that fail the original Pydantic
+  model.
+- Focused validation passed: 67 tests, Ruff, and Python bytecode compilation.
+- [ ] Run the next bounded Nemotron pilot and compare initial validation
+  retries, permanent failures, and accepted yield with Pilot 012.

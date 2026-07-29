@@ -7,6 +7,7 @@ import aiohttp
 import instructor
 import litellm
 from litellm import supports_response_schema
+from openai import pydantic_function_tool
 
 from bespokelabs.curator.file_utilities import get_base64_size
 from bespokelabs.curator.log import logger
@@ -108,16 +109,13 @@ class LiteLLMOnlineRequestProcessor(BaseOnlineRequestProcessor):
                 *api_request["messages"],
             ],
             "tools": [
-                {
-                    "type": "function",
-                    "function": {
-                        "name": tool_name,
-                        "description": (
-                            f"Return one validated {tool_name} structured response."
-                        ),
-                        "parameters": response_model.model_json_schema(),
-                    },
-                }
+                pydantic_function_tool(
+                    response_model,
+                    name=tool_name,
+                    description=(
+                        f"Return one validated {tool_name} structured response."
+                    ),
+                )
             ],
             "tool_choice": "auto",
         }
