@@ -3670,7 +3670,8 @@ Implementation result:
   receiving a failed response.
 - [x] Left PR 734's work-conserving retry scheduling unchanged.
 - [x] Added a regression test using a real Pydantic response format and parser.
-- [ ] Confirm partial-success finalization in the next user-run pilot.
+- [x] Confirmed partial-success finalization in user-run pilot 011: failed
+  requests were persisted and successful siblings reached the stage outputs.
 
 ## Nemotron path-answer structured-output failures (2026-07-29)
 
@@ -3809,3 +3810,49 @@ Implementation result:
 - [x] Documented the new model-portable mode and added focused regression
   coverage.
 - [ ] Confirm path-answer yield in the next user-run pilot.
+
+## Pilot 011 completed-run audit (2026-07-29)
+
+Status: inspected after the user-run pilot completed.
+
+Outcome:
+
+- The run exported 60 canonical records: 46 `qa`, 7 `qa_cot`, 5
+  `cross_document_qa`, and 2 `cross_document_qa_cot`.
+- All 60 canonical records have unique IDs, non-empty claims, evidence, and
+  citations; keep `citations` as the last field; pass deterministic validation;
+  and have an accepted 5/5 judge result.
+- CoT records contain reasoning steps and plain QA records do not. All seven
+  accepted cross-document records cite at least two manuals and manually
+  inspected questions compare substantively aligned provisions.
+- The run correctly persisted partial stage success. Eight requests failed:
+  three single-document generations, one path answer, three ablation trials,
+  and one cross-document judge request.
+- The Nemotron failures are consistent with the old prompt-parsed `md_json`
+  transport used by this already-running pilot: malformed root JSON, nested
+  list recovery, or a missing `examples` root field. Pilot 011 therefore does
+  not test the subsequently committed `tools_auto` transport.
+- The cross-judge failure was independent: the Gemma endpoint reported an
+  8,192-token context limit when prompt plus reserved output required at least
+  8,193 tokens.
+- The terminal manifest status is `failed` because both planned drafting
+  records failed deterministic validation with
+  `drafting_tender_fact_aggregate_mismatch`; the pipeline deliberately exits
+  when drafting is enabled but no drafting record is accepted.
+- Path QA produced 42 accepted questions, 16 accepted answers, and 45 valid
+  ablation trials, but remains explicitly pending source-ablation judgment and
+  contributed no training records.
+- Leakage-safe component splitting yielded 57 train, 0 validation, and 3 test
+  records. This avoids connected-manual leakage but is too imbalanced to serve
+  as a production evaluation split at this pilot size.
+
+Follow-up:
+
+- [ ] Confirm Nemotron `tools_auto` path-answer and ablation yield in the next
+  user-run pilot.
+- [ ] Reconcile drafting block-level tender facts with the top-level aggregate
+  before the next drafting-enabled run.
+- [ ] Bound judge requests against the endpoint's actual 8,192-token context
+  limit, including reserved output tokens.
+- [ ] Decide how to guarantee useful validation/test representation while
+  preserving connected-component leakage isolation.
