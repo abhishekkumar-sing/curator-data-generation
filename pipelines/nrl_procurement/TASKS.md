@@ -3753,8 +3753,8 @@ Validation plan:
 
 Implementation result:
 
-- [x] Changed only the configurable Nemotron profile from prompt-parsed
-  `md_json` to schema-constrained `tools`.
+- [x] Initially changed only the configurable Nemotron profile from
+  prompt-parsed `md_json` to schema-constrained `tools`.
 - [x] Kept the official Nemotron sampling values and context configuration.
 - [x] Left GLM and Gemma on their independently configured native
   `json_schema` modes.
@@ -3762,5 +3762,36 @@ Implementation result:
   return to prompt-only Nemotron JSON.
 - [x] Retained strict Pydantic and deterministic validation without malformed
   JSON coercion.
-- [ ] Confirm forced-tool compatibility and path-answer yield in the next
-  user-run pilot.
+- [ ] Replace forced named tools with validated auto-tool transport based on
+  the live endpoint verification below.
+
+Live endpoint verification and revised decision (2026-07-29):
+
+- The private endpoint advertised model ID `nvidia/nemotron-3-super`, vLLM
+  ownership, and `max_model_len: 131072`, matching committed configuration.
+- A minimal request containing no corpus data returned HTTP 500 for both a
+  named `tool_choice` and `tool_choice: "required"`.
+- The identical schema with `tool_choice: "auto"` returned HTTP 200 and one
+  valid `record_probe` call with arguments
+  `{"value": "alpha", "count": 7}`.
+- Inspection of installed Instructor 1.15.4 shows `Mode.TOOLS` unconditionally
+  replaces `tool_choice` with a named function. Passing `auto` through
+  generation parameters cannot override it.
+- Therefore, the private server's tool parser is active, but its forced-tool
+  path is incompatible with Instructor's standard tools mode. Leaving
+  `structured_output_mode: tools` would make the next run fail.
+
+Revised design:
+
+- Add an explicit, reusable `tools_auto` Curator/LiteLLM mode rather than a
+  Nemotron model-name branch.
+- For structured requests in this mode, send exactly one Pydantic-derived tool,
+  set `tool_choice: "auto"`, and add a transport-level instruction requiring
+  exactly one call to that tool.
+- Require exactly one returned tool call with the expected name and validate
+  its JSON arguments through the configured Pydantic model.
+- Treat missing, multiple, wrongly named, malformed, or schema-invalid tool
+  calls as normal request failures handled by Curator's existing retry and
+  partial-success machinery.
+- Select `tools_auto` only in the Nemotron profile. Preserve native
+  `json_schema` for endpoints that support it.
