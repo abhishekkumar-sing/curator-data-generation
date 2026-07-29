@@ -1397,6 +1397,9 @@ Implementation result:
 
 ### 3. Use bounded multi-chunk source windows
 
+- [x] Complete and record the mandatory research-first gate for source-window
+  construction, section hierarchy, adjacency, cross-references, provenance,
+  splitting, and model-aware prompt budgets.
 - [ ] Group adjacent chunks under reliable section boundaries.
 - [ ] Include required definitions, exceptions, and referenced provisions when
   resolvable.
@@ -1411,6 +1414,138 @@ Acceptance criteria:
 - A source window never crosses manual, issuer, edition, or policy scope.
 - Prompt size is checked before generation.
 - Exact evidence still resolves to its original chunk, page, and offsets.
+
+#### Bounded source-window research record (2026-07-29)
+
+Status: research gate complete; production implementation has not started.
+
+Questions researched:
+
+- When should adjacent chunks be joined without crossing a legal/manual
+  section boundary?
+- How should headings, pages, definitions, exceptions, tables, and explicit
+  paragraph cross-references affect a window?
+- How can windows preserve exact evidence provenance while remaining within
+  different local models' rendered context limits?
+- Which reference-project behaviors are safe to reuse?
+
+Verified local and reference findings:
+
+- The current corpus splitter works within one physical page and groups blank
+  line-delimited paragraphs up to a character limit. It carries only the most
+  recently observed final heading string. It does not retain heading level or
+  breadcrumb, chunk ordinal, paragraph IDs, table continuation, or explicit
+  cross-reference edges. Consequently, equal heading text cannot prove a
+  shared section and adjacency cannot be reconstructed safely from chunk IDs.
+- Current proposition evidence already resolves to immutable original chunk
+  IDs, pages, exact quotes, and offsets. A window should reference these chunks
+  rather than concatenate them into a new evidentiary source.
+- Current cross-document bundles pair one chunk per manual using lexical and
+  heading overlap. That is retrieval, not source-window construction, and
+  repeated generic headings can inflate its score.
+- The reference `build_reasoning_windows` unconditionally joins adjacent
+  retained pages in pairs. It preserves both chunk IDs and page range, but can
+  cross unrelated sections, misses more-than-two-chunk sections and
+  cross-references, and has no rendered-prompt budget. Its newer annealing
+  helper groups canonicalized headings with a character cap, but identical
+  heading labels and character estimates remain insufficient proof/budgeting.
+- Research consistently finds a trade-off: small fixed chunks lose semantic
+  completeness while large chunks introduce irrelevant context. Structure-
+  aware segmentation can improve retrieval, but no paper establishes a
+  universal chunk size for these procurement manuals.
+- Long advertised context does not guarantee reliable use of all positions.
+  Therefore the maximum server context must be treated as a hard ceiling, not
+  a target window size.
+- Hugging Face tokenizers can render chat templates directly to token IDs,
+  including model-specific control tokens. A raw text or `len(text)/4`
+  estimate cannot be the sole production check for the complete request.
+
+Research-supported design:
+
+- First enrich corpus chunks with immutable `document_order`, `page`,
+  `chunk_index`, and a heading stack derived from explicit Markdown headings.
+  OCR/PDF rows without reliable hierarchy use physical adjacency only and are
+  marked with lower boundary confidence; inferred plain-text headings cannot
+  silently become authoritative hierarchy.
+- Build a base window from consecutive chunks in one manual, source hash,
+  issuer, edition/as-of date, and policy scope. Continue while the reliable
+  section breadcrumb is unchanged. A page boundary is allowed; a manual,
+  authority, edition, or reliable section boundary is not.
+- Treat blank/generic/repeated headings as non-keys. Normalize headings only
+  for comparison while retaining exact heading text and level. Never join
+  non-adjacent chunks merely because their labels match.
+- Attach definitions, exceptions, and referenced provisions as explicit
+  support chunks only when a parsed reference resolves uniquely within the
+  same registered authority/edition. Record the edge type and target; preserve
+  unresolved or ambiguous references for audit instead of guessing.
+- Split oversized sections only between constituent chunks. Do not cut or
+  rewrite the source chunks. Every window stores ordered chunk IDs, page
+  ranges, source hashes, section breadcrumb, boundary confidence, support
+  edges, and a stable ID derived from this versioned structure.
+- Budget the fully rendered chat request, including system/user text,
+  structured-output/tool schema overhead, model control tokens, reserved
+  completion tokens, and a safety margin. Use the selected model tokenizer and
+  chat template when its tokenizer is locally available. Otherwise use a
+  configurable conservative estimator and label the estimate method; reject
+  or split before any provider call.
+- Keep one-to-many relationships at the path/window association layer. Do not
+  duplicate or merge evidence text to make a one-to-one pair.
+
+Alternatives rejected:
+
+- Fixed two-page windows: simple, but crosses sections and cannot express long
+  or referenced provisions.
+- Group all chunks with equal heading text: repeated “General”, “Note”, and
+  OCR headings create false, non-adjacent groups.
+- LLM-authored section boundaries: expensive and can fabricate structure;
+  it may later be evaluated as an explicitly uncertain enrichment, not source
+  truth.
+- Character count as the only context guard: model tokenization and chat/tool
+  wrappers vary.
+- Use the configured maximum context exactly: leaves no room for completion,
+  schemas, template overhead, or server-specific limits and worsens irrelevant
+  context exposure.
+- Copy referenced text into the anchor chunk: destroys source-specific offsets
+  and obscures which provision supplied each fact.
+
+Known risks and proposed validation:
+
+- OCR headings and split tables may lack reliable Markdown structure. Emit
+  boundary-confidence/reason fields and audit these separately.
+- Cross-reference syntax varies and may refer to annexures, clauses, tables,
+  chapters, or external instruments. Start with exact, tested patterns and
+  fail closed on multiple targets.
+- A local tokenizer may differ from the serving engine's exact revision or
+  chat template. Record tokenizer identity and retain a configurable safety
+  margin; an endpoint preflight remains required for newly configured models.
+- Section-coherent windows may still omit a definition outside the section or
+  include irrelevant boilerplate. Test fixtures and later user review must
+  measure both missing-support and excess-context errors.
+- Local tests will cover boundary isolation, page continuation, repeated
+  headings, ambiguous references, oversized splitting, stable IDs, provenance,
+  and budget rejection. Only the user will run model-backed validation.
+
+Primary and official sources:
+
+- Wang et al.,
+  [Document Segmentation Matters for Retrieval-Augmented
+  Generation](https://aclanthology.org/2025.findings-acl.422/), documents the
+  semantic-coherence versus irrelevant-context trade-off and evaluates
+  adaptive segmentation.
+- Liu et al.,
+  [Lost in the Middle](https://aclanthology.org/2024.tacl-1.9/), shows that
+  effective long-context use degrades with information position even for
+  long-context models.
+- Trivedi et al.,
+  [MuSiQue](https://aclanthology.org/2022.tacl-1.31/), supports preserving
+  explicit connected evidence structure for compositional QA.
+- [Hugging Face tokenizer documentation](https://huggingface.co/docs/transformers/main_classes/tokenizer)
+  documents chat-template rendering to token IDs including control tokens.
+- [CommonMark 0.31.2](https://spec.commonmark.org/0.31.2/) defines explicit ATX
+  and Setext heading syntax used as the reliable Markdown boundary source.
+- [Bespoke Curator repository](https://github.com/bespokelabsai/curator)
+  documents prompt/parse orchestration and caching but provides no
+  domain-specific section-window builder or universal safe context budget.
 
 ### 4. Generate questions from verified paths
 
