@@ -49,7 +49,14 @@ from path_qa import (
     build_missing_hop_contrasts,
     false_premise_quarantine,
 )
-from prompt_budget import configured_context_window, measure_rendered_request
+from prompt_budget import (
+    configured_context_window,
+    measure_rendered_request,
+    vllm_tokenize_chat,
+)
+from bespokelabs.curator.request_processor.online.litellm_online_request_processor import (
+    build_auto_tool_request,
+)
 from schemas import AblationTrialDraft, PathAnswerDraft, PathQuestionBatch
 from schemas import CandidateBatch, JudgeBatch, JudgedCandidate
 from validation import (
@@ -69,6 +76,7 @@ TAXONOMY = CONFIG.get("taxonomy", {})
 RUN_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 CACHE_ROOT = (PROJECT_ROOT / CONFIG["curator"]["cache_dir"]).resolve()
 OUTPUT_ROOT = (PROJECT_ROOT / PATHS["output_root"]).resolve()
+_TOKENIZE_UNAVAILABLE: dict[tuple[str, str], str] = {}
 
 
 def _run_layout(requested_run_id: str | None, now: datetime | None = None) -> tuple[str, Path]:
@@ -632,9 +640,52 @@ def _judge_prompt_budget(
 ) -> dict[str, Any]:
     """Measure one complete judge request against its served context limit."""
     source_window_config = CONFIG.get("source_windows", {})
-    return measure_rendered_request(
-        [{"role": "user", "content": judge.prompt(row)}],
-        judge.response_format.model_json_schema(),
+    messages = [{"role": "user", "content": judge.prompt(row)}]
+    response_schema = judge.response_format.model_json_schema()
+    mode = profile.get("structured_output_mode", "auto")
+    tools = None
+    include_response_schema = mode not in {"json_schema", "tools_auto"}
+    if mode == "tools_auto":
+        auto_request = build_auto_tool_request(
+            {"messages": messages},
+            judge.response_format,
+        )
+        messages = auto_request["messages"]
+        tools = auto_request["tools"]
+        include_response_schema = True
+    exact_tokens = None
+    server_context_window = None
+    measurement_error = None
+    try:
+        model, base_url, api_key = _model_settings(profile)
+        endpoint_key = (model, base_url)
+        measurement_error = _TOKENIZE_UNAVAILABLE.get(endpoint_key)
+        if measurement_error is None:
+            template_kwargs = (
+                profile.get("generation_params", {})
+                .get("extra_body", {})
+                .get("chat_template_kwargs")
+            )
+            endpoint_measurement = vllm_tokenize_chat(
+                messages,
+                model=model,
+                base_url=base_url,
+                api_key=api_key,
+                chat_template_kwargs=template_kwargs,
+                tools=tools,
+                timeout_seconds=float(
+                    profile.get("tokenize_timeout_seconds", 5.0)
+                ),
+            )
+            exact_tokens = endpoint_measurement["count"]
+            server_context_window = endpoint_measurement["max_model_len"]
+    except Exception as exc:
+        measurement_error = f"{type(exc).__name__}: {exc}"
+        if "endpoint_key" in locals():
+            _TOKENIZE_UNAVAILABLE[endpoint_key] = measurement_error
+    budget = measure_rendered_request(
+        messages,
+        response_schema,
         context_window=configured_context_window(profile),
         reserved_completion_tokens=int(
             profile["generation_params"].get("max_tokens", 1024)
@@ -645,7 +696,13 @@ def _judge_prompt_budget(
         conservative_chars_per_token=float(
             source_window_config.get("conservative_chars_per_token", 2.5)
         ),
+        include_response_schema=include_response_schema,
+        exact_prompt_tokens=exact_tokens,
+        server_context_window=server_context_window,
     )
+    budget["structured_output_mode"] = mode
+    budget["measurement_error"] = measurement_error
+    return budget
 
 
 def _budget_judge_rows(

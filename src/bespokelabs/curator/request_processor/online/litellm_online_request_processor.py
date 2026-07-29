@@ -35,6 +35,33 @@ _ANTHROPIC_IMAGE_TOKEN_ESTIMATE = 1024
 _ANTHROPIC_DOCUMENT_TOKEN_ESTIMATE = 2048
 
 
+def build_auto_tool_request(api_request: dict, response_model) -> dict:
+    """Build the exact single-tool request used by auto-only servers."""
+    tool_name = response_model.__name__
+    return {
+        **api_request,
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    f"You must call the {tool_name} tool exactly once. "
+                    "Return all requested fields as tool arguments and do "
+                    "not answer with ordinary assistant text."
+                ),
+            },
+            *api_request["messages"],
+        ],
+        "tools": [
+            pydantic_function_tool(
+                response_model,
+                name=tool_name,
+                description=f"Return one validated {tool_name} structured response.",
+            )
+        ],
+        "tool_choice": "auto",
+    }
+
+
 class LiteLLMOnlineRequestProcessor(BaseOnlineRequestProcessor):
     """LiteLLM implementation of the OnlineRequestProcessor for multi-provider LLM support.
 
@@ -94,32 +121,7 @@ class LiteLLMOnlineRequestProcessor(BaseOnlineRequestProcessor):
         response_model,
     ) -> dict:
         """Build a single-tool request for servers that support auto only."""
-        tool_name = response_model.__name__
-        request = {
-            **api_request,
-            "messages": [
-                {
-                    "role": "system",
-                    "content": (
-                        f"You must call the {tool_name} tool exactly once. "
-                        "Return all requested fields as tool arguments and do "
-                        "not answer with ordinary assistant text."
-                    ),
-                },
-                *api_request["messages"],
-            ],
-            "tools": [
-                pydantic_function_tool(
-                    response_model,
-                    name=tool_name,
-                    description=(
-                        f"Return one validated {tool_name} structured response."
-                    ),
-                )
-            ],
-            "tool_choice": "auto",
-        }
-        return request
+        return build_auto_tool_request(api_request, response_model)
 
     @staticmethod
     def _parse_auto_tool_completion(completion_obj, response_model):

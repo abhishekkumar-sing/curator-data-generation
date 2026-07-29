@@ -314,7 +314,7 @@ behavior remains provisional until a user-run judge pilot completes.
 - [x] Select Gemma as the default and active independent judge.
 - [x] Record the endpoint's verified 8,192-token runtime limit, reduce the
   output ceiling to 2,048, and use one record per judge request.
-- [ ] Add a model-aware preflight that estimates the complete rendered prompt,
+- [x] Add a model-aware preflight that estimates the complete rendered prompt,
   response schema, and output reserve against the selected profile's actual
   server context. A fixed batch size is conservative but cannot prove every
   future source record fits.
@@ -361,6 +361,19 @@ behavior remains provisional until a user-run judge pilot completes.
         https://docs.vllm.ai/en/latest/api/vllm/entrypoints/serve/tokenize/serving/
       - Hugging Face tokenizer/chat-template contract:
         https://huggingface.co/docs/transformers/main_classes/tokenizer
+    - Implemented 2026-07-29: judge preflight now calls the selected private
+      vLLM endpoint's `/tokenize` route with its served model, chat-template
+      kwargs, and exact auto-tool request where applicable. It reconciles the
+      configured context with the server-reported `max_model_len`, audits the
+      structured-output mode and measurement failure, and uses the smaller
+      limit. JSON-schema decoding constraints are no longer charged as
+      fabricated prompt text; tool schemas and the mandatory auto-tool system
+      message are rendered exactly. A five-second first-failure circuit
+      breaker prevents an unsupported tokenization route from stalling every
+      row and preserves the labeled conservative fallback for that run.
+    - Validation: 70 focused procurement and LiteLLM processor tests passed;
+      Ruff and Python compilation passed. No model-backed generation or judge
+      call was run.
 - [ ] Validate schema compliance, exact witness behavior, latency, and judge
   calibration with a user-run pilot before production-scale generation.
 

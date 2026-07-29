@@ -6,6 +6,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
+from pydantic import BaseModel
+
 PIPELINE = Path(__file__).resolve().parents[2] / "pipelines" / "nrl_procurement"
 sys.path.insert(0, str(PIPELINE))
 
@@ -57,6 +59,7 @@ from path_qa import (  # noqa: E402
 from prompt_budget import (  # noqa: E402
     configured_context_window,
     measure_rendered_request,
+    vllm_tokenize_chat,
 )
 from propositions import (  # noqa: E402
     PropositionExtractor,
@@ -561,6 +564,68 @@ def test_prompt_budget_fallback_is_labeled_and_exact_mode_fails() -> None:
         raise AssertionError("exact prompt counting must fail without tokenizer")
 
 
+def test_endpoint_prompt_budget_uses_smaller_server_context() -> None:
+    result = measure_rendered_request(
+        [{"role": "user", "content": "Question"}],
+        {"type": "object", "description": "not rendered"},
+        context_window=16_384,
+        reserved_completion_tokens=100,
+        safety_margin_tokens=20,
+        conservative_chars_per_token=2.5,
+        include_response_schema=False,
+        exact_prompt_tokens=900,
+        server_context_window=1_000,
+    )
+
+    assert result["method"] == "vllm_tokenize_endpoint"
+    assert result["prompt_tokens"] == 900
+    assert result["configured_context_window"] == 16_384
+    assert result["server_context_window"] == 1_000
+    assert result["context_window"] == 1_000
+    assert result["passed"] is False
+
+
+def test_vllm_tokenize_chat_uses_root_route_and_template_inputs(monkeypatch) -> None:
+    captured = {}
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self):
+            return b'{"count": 42, "max_model_len": 8192, "tokens": []}'
+
+    def fake_urlopen(request, timeout):
+        captured["url"] = request.full_url
+        captured["headers"] = dict(request.header_items())
+        captured["payload"] = json.loads(request.data)
+        captured["timeout"] = timeout
+        return Response()
+
+    monkeypatch.setattr("prompt_budget.urlopen", fake_urlopen)
+    result = vllm_tokenize_chat(
+        [{"role": "user", "content": "Question"}],
+        model="/models/judge",
+        base_url="http://127.0.0.1:8000/v1",
+        api_key="secret",
+        chat_template_kwargs={"enable_thinking": False},
+        tools=[{"type": "function", "function": {"name": "Result"}}],
+    )
+
+    assert result == {"count": 42, "max_model_len": 8192}
+    assert captured["url"] == "http://127.0.0.1:8000/tokenize"
+    assert captured["payload"]["model"] == "/models/judge"
+    assert captured["payload"]["chat_template_kwargs"] == {
+        "enable_thinking": False
+    }
+    assert captured["payload"]["tools"][0]["function"]["name"] == "Result"
+    assert captured["headers"]["Authorization"] == "Bearer secret"
+    assert captured["timeout"] == 30.0
+
+
 def test_model_context_window_is_explicit_and_profile_local() -> None:
     nemotron = generation_pipeline.CONFIG["model_profiles"]["nemotron"]
     source_windows = generation_pipeline.CONFIG["source_windows"]
@@ -625,6 +690,51 @@ def test_judge_prompt_budget_reserves_output_and_quarantines_overflow() -> None:
         "judge_prompt_exceeds_context_window"
     ]
     assert rejected[0]["judge_prompt_budget"] == budget
+
+
+def test_judge_prompt_budget_matches_selected_transport(monkeypatch) -> None:
+    class Response(BaseModel):
+        accepted: bool
+
+    judge = SimpleNamespace(
+        response_format=Response,
+        prompt=lambda row: row["review_text"],
+    )
+    captured = {}
+
+    def fake_tokenize(messages, **kwargs):
+        captured["messages"] = messages
+        captured.update(kwargs)
+        return {"count": 123, "max_model_len": 8_000}
+
+    monkeypatch.setattr(generation_pipeline, "vllm_tokenize_chat", fake_tokenize)
+    monkeypatch.setattr(
+        generation_pipeline,
+        "_model_settings",
+        lambda _profile: ("served-model", "http://127.0.0.1:8000/v1", "key"),
+    )
+    profile = {
+        "context_window": 10_000,
+        "structured_output_mode": "tools_auto",
+        "generation_params": {
+            "max_tokens": 200,
+            "extra_body": {"chat_template_kwargs": {"enable_thinking": False}},
+        },
+    }
+    budget = _judge_prompt_budget(
+        judge,
+        {"review_text": "review", "judge_items": []},
+        profile,
+    )
+
+    assert budget["method"] == "vllm_tokenize_endpoint"
+    assert budget["prompt_tokens"] == 123
+    assert budget["context_window"] == 8_000
+    assert budget["structured_output_mode"] == "tools_auto"
+    assert budget["measurement_error"] is None
+    assert captured["messages"][0]["role"] == "system"
+    assert captured["tools"][0]["function"]["name"] == "Response"
+    assert captured["chat_template_kwargs"] == {"enable_thinking": False}
 
 
 def test_validation_rejects_unsupported_number() -> None:
