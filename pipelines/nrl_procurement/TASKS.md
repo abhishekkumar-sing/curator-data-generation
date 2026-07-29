@@ -810,6 +810,71 @@ Rejected alternatives:
 - Mixing drafting rows into QA exports: rejected because their schemas and
   intended training behavior differ.
 
+### Drafting citation/detail integrity research addendum (2026-07-29)
+
+Status: research complete after pilot-009; implementation pending.
+
+Observed failure and verified cause:
+
+- Both accepted pilot-009 drafting records contain citation IDs with no
+  corresponding `citation_details` entry. For example, the NIT row lists the
+  page-72 chunk although its details resolve only page-94 evidence and the
+  tender seed.
+- `build_drafting_inputs()` currently labels every seed-provided manual chunk
+  plus the tender ID as `citations`. `TenderDraftingGenerator.parse()` instead
+  creates details only for exact evidence quotations the model declares.
+  Candidate context and used/quoted provenance are therefore being conflated.
+- The reference project also exports seed/input citation IDs without a
+  one-to-one detail structure. It does not solve traceability and is not a safe
+  implementation to copy.
+
+Research-supported design:
+
+- W3C PROV distinguishes general derivation/usage from quotation through
+  `prov:wasQuotedFrom`; provenance relations should identify the actual source
+  entity involved rather than imply derivation from every available entity:
+  https://www.w3.org/TR/prov-o/
+- Work on citation-generating QA evaluates citation correctness/precision
+  separately from answer correctness. A citation is not justified merely
+  because its document was available in context:
+  https://aclanthology.org/2024.acl-long.641/
+- Multi-source attribution research likewise treats claims and their supporting
+  citations as explicit mappings:
+  https://aclanthology.org/2024.naacl-long.216/
+
+Decision:
+
+- Treat `manual_chunk_ids` as candidate/source-input lineage and retain it in
+  canonical audit rows, but do not automatically present every candidate as an
+  answer citation.
+- Derive exported `citations` in first-use order from resolved
+  `citation_details`, followed by the tender-seed detail. Every exported
+  citation ID must have at least one matching detail, and every detail ID must
+  appear in `citations`.
+- Permit repeated details for multiple distinct quotations from the same chunk
+  while keeping the flat citation ID list unique and ordered.
+- Fail deterministic validation on unresolved evidence, dangling citation IDs,
+  detail IDs absent from the flat list, or missing tender-seed provenance.
+  Never silently synthesize a quote/detail for an unused candidate chunk.
+- Keep `citations` as the final compact-output field.
+
+Risks and alternatives:
+
+- Requiring every candidate chunk to be quoted would force irrelevant
+  citations and reward the model for copying unused context.
+- Dropping `manual_chunk_ids` entirely would lose input lineage needed for
+  reproducibility; retain it in full audit/canonical records.
+- One-to-one ID/detail integrity proves traceability, not that every material
+  response clause is cited. Atomic block-to-evidence completeness remains a
+  separate pending task.
+
+Validation plan:
+
+- Add tests for unused candidate chunks, repeated quotations from one chunk,
+  unique stable citation ordering, missing tender detail, and dangling IDs.
+- Re-audit pilot-009 locally and confirm its compact drafting rows would no
+  longer expose unresolvable citation IDs.
+
 ## Current baseline
 
 Implemented:
