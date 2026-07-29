@@ -35,6 +35,7 @@ from propositions import (
     read_cached_propositions,
     write_proposition_cache,
 )
+from reasoning_paths import build_reasoning_paths
 from schemas import CandidateBatch, JudgeBatch
 from validation import deduplicate, judge_quotes_are_grounded, validate_record
 
@@ -576,6 +577,7 @@ def _final_manifest(
     drafting_stats: dict[str, Any],
     duplicates: int,
     proposition_stats: dict[str, Any] | None = None,
+    reasoning_path_stats: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return {
         "run_id": run_id,
@@ -597,6 +599,7 @@ def _final_manifest(
         },
         "drafting": drafting_stats,
         "propositions": proposition_stats or {"enabled": False},
+        "reasoning_paths": reasoning_path_stats or {"enabled": False},
         "near_duplicates_removed": duplicates,
         "manuals": manuals,
     }
@@ -648,6 +651,8 @@ def main() -> None:
         _assert_independent_judge()
 
     proposition_stats: dict[str, Any] = {"enabled": False}
+    reasoning_path_stats: dict[str, Any] = {"enabled": False}
+    accepted_propositions: list[dict[str, Any]] = []
     proposition_config = CONFIG.get("propositions", {})
     if proposition_config.get("enabled", False):
         model_manifest = _non_secret_model_manifest(GENERATION)
@@ -702,6 +707,26 @@ def main() -> None:
             "schema_version": (accepted_propositions[0]["schema_version"] if accepted_propositions else None),
         }
 
+    reasoning_path_config = CONFIG.get("reasoning_paths", {})
+    cross_config = CONFIG.get("cross_document", {})
+    if reasoning_path_config.get("enabled", False):
+        accepted_paths, rejected_paths = build_reasoning_paths(
+            accepted_propositions,
+            cross_config,
+            int(reasoning_path_config.get("max_per_pair", 25)),
+        )
+        _write_audit(files_dir / "reasoning_paths.jsonl", accepted_paths)
+        _write_audit(
+            files_dir / "reasoning_paths_rejected.jsonl",
+            rejected_paths,
+        )
+        reasoning_path_stats = {
+            "enabled": True,
+            "accepted": len(accepted_paths),
+            "rejected": len(rejected_paths),
+            "schema_version": (accepted_paths[0]["schema_version"] if accepted_paths else None),
+        }
+
     os.environ["HOSTED_VLLM_API_KEY"] = _model_settings(GENERATION)[2]
     generated_audit = ProcurementGenerator(**_llm_kwargs(GENERATION))(
         Dataset.from_list(planned_single),
@@ -727,6 +752,7 @@ def main() -> None:
                 drafting_stats={},
                 duplicates=duplicates,
                 proposition_stats=proposition_stats,
+                reasoning_path_stats=reasoning_path_stats,
             ),
         )
         raise SystemExit("No records passed deterministic validation")
@@ -762,7 +788,6 @@ def main() -> None:
     cross_judged: list[dict[str, Any]] = []
     planned_cross: list[dict[str, Any]] = []
     cross_duplicates = 0
-    cross_config = CONFIG.get("cross_document", {})
     if cross_config.get("enabled", False) and not args.skip_cross_document:
         bundles = build_bundles(all_rows, cross_config)
         cross_limit = args.cross_document_limit if args.cross_document_limit is not None else args.limit
@@ -821,6 +846,7 @@ def main() -> None:
                 drafting_stats={},
                 duplicates=duplicates + cross_duplicates,
                 proposition_stats=proposition_stats,
+                reasoning_path_stats=reasoning_path_stats,
             ),
         )
         raise SystemExit("No records passed the quality judge")
@@ -911,6 +937,7 @@ def main() -> None:
                     drafting_stats=drafting_stats,
                     duplicates=duplicates + cross_duplicates,
                     proposition_stats=proposition_stats,
+                    reasoning_path_stats=reasoning_path_stats,
                 ),
             )
             raise SystemExit("No drafting records passed generation and quality checks")
@@ -943,6 +970,7 @@ def main() -> None:
         drafting_stats=drafting_stats,
         duplicates=duplicates + cross_duplicates,
         proposition_stats=proposition_stats,
+        reasoning_path_stats=reasoning_path_stats,
     )
     final_manifest["required_task_type_counts"] = task_counts
     final_manifest["missing_required_task_types"] = required_missing

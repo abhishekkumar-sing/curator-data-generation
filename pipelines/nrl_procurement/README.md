@@ -141,6 +141,9 @@ That `files/` directory contains:
 - `propositions_generated_audit.jsonl`: all proposition extractions, including
   deterministic rejections and explicit empty results
 - `propositions_rejected.jsonl`: proposition records that failed exact grounding
+- `reasoning_paths.jsonl`: accepted pre-question, two-source reasoning DAGs
+- `reasoning_paths_rejected.jsonl`: path candidates rejected by deterministic
+  connectivity, authority, temporal, or structural-ablation checks
 - `qa_sft.jsonl`: concise QA chat training data
 - `qa_cot_sft.jsonl`: QA with short evidence-based teaching rationales
 - `rag.jsonl`: questions, contexts, and answerability labels

@@ -42,6 +42,7 @@ from propositions import (  # noqa: E402
     read_cached_propositions,
     write_proposition_cache,
 )
+from reasoning_paths import build_reasoning_paths, validate_reasoning_path  # noqa: E402
 from schemas import (  # noqa: E402
     CandidateBatch,
     CrossCandidateBatch,
@@ -138,6 +139,8 @@ def test_proposition_materialization_preserves_authority_and_offsets() -> None:
     assert result["proposition_id"].startswith("prop-")
     assert result["authority"]["issuing_organization"] == "Numaligarh Refinery Limited"
     assert result["authority"]["policy_scope"] == "company_policy"
+    assert result["authority"]["revision_date"] == "16.03.2023"
+    assert result["authority"]["as_of_date"] == "16.03.2023"
     assert result["evidence"]["quote"] == row["passage"]
     assert result["evidence"]["start_char"] == 0
     assert result["evidence"]["end_char"] == len(row["passage"])
@@ -212,6 +215,194 @@ def test_proposition_cache_fingerprint_and_round_trip(tmp_path: Path) -> None:
     )
     assert empty_hits == {empty_fingerprint}
     assert cached_empty == [empty]
+
+
+def _path_proposition(
+    proposition_id: str,
+    manual_id: str,
+    title: str,
+    issuer: str,
+    as_of_date: str,
+    *,
+    subject: str = "procurement committee",
+    action: str = "evaluates",
+    object_: str = "technical bid",
+    conditions: list[str] | None = None,
+    exceptions: list[str] | None = None,
+    chunk_id: str | None = None,
+) -> dict:
+    return {
+        "proposition_id": proposition_id,
+        "subject": subject,
+        "authority": {
+            "manual_id": manual_id,
+            "manual_title": title,
+            "issuing_organization": issuer,
+            "policy_scope": "government_reference",
+            "revision_date": as_of_date,
+            "as_of_date": as_of_date,
+        },
+        "action": action,
+        "object": object_,
+        "modality": "stated",
+        "polarity": "positive",
+        "conditions": conditions or [],
+        "exceptions": exceptions or [],
+        "threshold": {"value": "", "unit": ""},
+        "temporal_scope": "",
+        "evidence": {
+            "source_file": f"{manual_id}.md",
+            "source_sha256": "a" * 64,
+            "chunk_id": chunk_id or f"chunk-{proposition_id}",
+            "page": 1,
+            "section": "Evaluation",
+            "quote": "Source evidence.",
+            "start_char": 0,
+            "end_char": 16,
+        },
+        "schema_version": "2",
+        "cache_fingerprint": "b" * 64,
+        "deterministic_checks": {"passed": True, "issues": []},
+    }
+
+
+def test_reasoning_paths_are_connected_stable_and_source_distinct() -> None:
+    left = _path_proposition(
+        "prop-left",
+        "goods_2017",
+        "Goods 2017",
+        "Government of India",
+        "2017",
+    )
+    right = _path_proposition(
+        "prop-right",
+        "goods_2024",
+        "Goods 2024",
+        "Government of India",
+        "2024",
+        conditions=["when technical evaluation is complete"],
+    )
+    config = {
+        "pairs": [
+            {
+                "pair_id": "goods-temporal",
+                "left_manual": "goods_2017",
+                "right_manual": "goods_2024",
+                "relationship_type": "same_authority_temporal",
+            }
+        ]
+    }
+
+    first, rejected = build_reasoning_paths([right, left], config, 5)
+    second, _ = build_reasoning_paths([left, right], config, 5)
+
+    assert rejected == []
+    assert first == second
+    assert len(first) == 1
+    path = first[0]
+    assert path["relationship_type"] == "exception_condition_interaction"
+    assert path["input_claim_ids"] == ["prop-left", "prop-right"]
+    assert len(set(path["required_source_ids"])) == 2
+    assert path["output_claim_id"] == path["output_claim"]["claim_id"]
+    assert path["operation_steps"][0]["output_claim_id"] == "prop-left"
+    assert path["operation_steps"][1]["output_claim_id"] == "prop-right"
+    assert path["operation_steps"][-1]["output_claim_id"] == path["output_claim_id"]
+    assert path["deterministic_checks"]["passed"] is True
+    assert all(result["complete"] is False for result in path["structural_ablation"].values())
+
+
+def test_reasoning_paths_reject_unrelated_and_unsafe_relationship_claims() -> None:
+    left = _path_proposition(
+        "prop-left",
+        "goods_2017",
+        "Goods 2017",
+        "Government of India",
+        "2017",
+    )
+    unrelated = _path_proposition(
+        "prop-other",
+        "goods_2024",
+        "Goods 2024",
+        "Government of India",
+        "2024",
+        subject="contract manager",
+        action="closes",
+        object_="purchase order",
+    )
+    pair = {
+        "pair_id": "goods-temporal",
+        "left_manual": "goods_2017",
+        "right_manual": "goods_2024",
+        "relationship_type": "same_authority_temporal",
+    }
+    accepted, rejected = build_reasoning_paths(
+        [left, unrelated],
+        {"pairs": [pair]},
+        5,
+    )
+    assert accepted == []
+    assert rejected == []
+
+    right = _path_proposition(
+        "prop-right",
+        "goods_2024",
+        "Goods 2024",
+        "Government of India",
+        "2024",
+    )
+    accepted, _ = build_reasoning_paths([left, right], {"pairs": [pair]}, 5)
+    path = accepted[0]
+    path["output_claim"]["statement"] = "Goods 2024 supersedes Goods 2017."
+    issues = validate_reasoning_path(
+        path,
+        {"prop-left": left, "prop-right": right},
+        pair,
+    )
+    assert "unsupported_legal_relationship_claim" in issues
+
+    path["operation_steps"][-1]["input_claim_ids"] = ["unknown"]
+    issues = validate_reasoning_path(
+        path,
+        {"prop-left": left, "prop-right": right},
+        pair,
+    )
+    assert "invalid_operation_graph" in issues
+
+
+def test_reasoning_bridge_requires_an_exact_non_generic_entity() -> None:
+    left = _path_proposition(
+        "prop-left",
+        "manual_a",
+        "Manual A",
+        "Government of India",
+        "2024",
+        object_="technical evaluation report",
+    )
+    right = _path_proposition(
+        "prop-right",
+        "manual_b",
+        "Manual B",
+        "Government of India",
+        "2024",
+        subject="technical evaluation report",
+        action="supports",
+        object_="award recommendation",
+    )
+    pair = {
+        "pair_id": "procedure",
+        "left_manual": "manual_a",
+        "right_manual": "manual_b",
+        "relationship_type": "complementary_procedure",
+    }
+    accepted, rejected = build_reasoning_paths(
+        [left, right],
+        {"pairs": [pair]},
+        5,
+    )
+    assert rejected == []
+    assert accepted[0]["relationship_type"] == "complementary_procedure"
+    assert "technical" in accepted[0]["connection_anchors"]
+    assert "evaluation" in accepted[0]["connection_anchors"]
 
 
 def test_validation_uses_qualifier_tokens_and_modality_equivalence() -> None:

@@ -16,8 +16,8 @@ from bespokelabs import curator
 
 from schemas import PropositionBatch
 
-PROPOSITION_SCHEMA_VERSION = "1"
-PROPOSITION_VALIDATOR_VERSION = "1"
+PROPOSITION_SCHEMA_VERSION = "2"
+PROPOSITION_VALIDATOR_VERSION = "2"
 
 MODALITY_PATTERNS: dict[str, tuple[re.Pattern[str], ...]] = {
     "mandatory": (re.compile(r"\b(?:must|shall|required|mandatory)\b", re.IGNORECASE),),
@@ -147,6 +147,8 @@ def materialize_proposition(
             "manual_title": row["title"],
             "issuing_organization": row["issuing_organization"],
             "policy_scope": row["policy_scope"],
+            "revision_date": row["revision_date"],
+            "as_of_date": row["as_of_date"],
         },
         "action": draft["action"],
         "object": draft["object"],

@@ -122,6 +122,10 @@ propositions:
   enabled: true
   max_per_window: 8
 
+reasoning_paths:
+  enabled: true
+  max_per_pair: 25
+
 # Orthogonal dataset axes:
 # - task: underlying procurement work
 # - persona: actor represented by the user request

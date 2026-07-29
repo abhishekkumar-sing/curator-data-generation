@@ -1045,7 +1045,8 @@ Acceptance criteria:
 
 #### Grounded atomic-proposition research record (2026-07-29)
 
-Status: research gate complete; production implementation has not started.
+Status: research and deterministic implementation complete; model-backed
+validation remains a user-run gate.
 
 Questions researched:
 
@@ -1206,17 +1207,17 @@ Implementation result:
 
 ### 2. Construct connected reasoning paths before questions
 
-- [ ] Build explicit two-hop path types:
+- [x] Build explicit two-hop path types:
   - comparison;
   - bridge;
   - temporal transition;
   - complementary procedure;
   - exception/condition interaction;
   - cross-domain comparison.
-- [ ] Require compatible subjects or an explicit bridge entity.
-- [ ] Store the path independently of its natural-language question.
-- [ ] Reject paths that merely contain two unrelated facts.
-- [ ] Do not treat similarity as adoption, equivalence, precedence,
+- [x] Require compatible subjects or an explicit bridge entity.
+- [x] Store the path independently of its natural-language question.
+- [x] Reject paths that merely contain two unrelated facts.
+- [x] Do not treat similarity as adoption, equivalence, precedence,
   supersession, deletion, or current applicability.
 
 Required path fields:
@@ -1240,7 +1241,8 @@ Acceptance criteria:
 
 #### Connected reasoning-path research record (2026-07-29)
 
-Status: research gate complete; production implementation has not started.
+Status: research and deterministic implementation complete; model-backed
+validation remains a user-run gate.
 
 Questions researched:
 
@@ -1362,6 +1364,36 @@ Primary and official sources:
 - Ho et al.,
   [2WikiMultiHopQA](https://aclanthology.org/2020.coling-main.580/), includes
   evidence information containing reasoning paths for multi-hop questions.
+
+Implementation result:
+
+- [x] Added a versioned, model-independent path builder that consumes only
+  accepted propositions and explicitly configured manual pairs.
+- [x] Added all six typed path forms, stable path/output-claim IDs, two
+  distinct source IDs, ordered input claim IDs, typed operations, exact
+  non-generic connection anchors, explicit per-operation input/output graph
+  nodes, a separately attributed output claim, and structural removal results
+  for both required inputs.
+- [x] Added fail-closed checks for unknown or ungrounded inputs, same-source
+  paths, pair mismatch, unsupported anchors, incompatible signatures, missing
+  bridges, authority/family/date errors, cross-domain errors, missing
+  conditions/exceptions, malformed outputs, unsafe legal-relationship language,
+  invalid operations, and invalid structural ablation.
+- [x] Preserved immutable proposition revision/as-of metadata and bumped the
+  proposition schema/cache validator version so temporal paths never substitute
+  page numbers or model-authored dates for registered manifest dates.
+- [x] Added `reasoning_paths.jsonl` and
+  `reasoning_paths_rejected.jsonl` before the existing question-generation
+  stages, plus manifest statistics and configurable per-pair bounds.
+- [x] Added deterministic regression tests for stability, connectivity,
+  source separation, unrelated-pair rejection, unsafe supersession claims,
+  temporal attribution, exact bridges, cache-schema invalidation, and
+  structural ablation. Thirty local procurement tests, Ruff, compilation, and
+  YAML parsing pass.
+- [ ] Validate path yield, false connections, proposition completeness, and
+  path-type coverage through a bounded user-run pilot. Existing legacy
+  question generation remains isolated until P0.4 makes verified paths its
+  required input.
 
 ### 3. Use bounded multi-chunk source windows
 
