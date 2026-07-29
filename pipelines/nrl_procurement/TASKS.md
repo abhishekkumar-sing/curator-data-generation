@@ -3529,3 +3529,62 @@ Implementation result:
   invoking a configured model endpoint.
 - [ ] Confirm accepted yield, fragment rejection, claim/citation completeness,
   and judge behavior in the next bounded user-run pilot.
+
+## Optional proposition arguments and structured-output retries (2026-07-29)
+
+Status: researched; implementation pending.
+
+Problem:
+
+- Pilot 010 showed Nemotron returning otherwise grounded propositions for
+  copular and intransitive clauses with `object: ""`.
+- `PropositionDraft.object` requires at least one character, so Instructor
+  retried the same semantically valid response four times and ultimately
+  discarded the request.
+- The repeated failures increase latency and reduce source coverage; they are
+  not Curator throttling or model-endpoint failures.
+
+Official and primary-source findings:
+
+- vLLM's official structured-output guidance says the prompt should align with
+  the enforced schema and optional values must be represented explicitly in
+  the schema. A schema must not require content that the underlying semantic
+  structure does not always contain:
+  https://docs.vllm.ai/en/stable/features/tool_calling/
+- Pydantic's official field documentation defines `min_length` as a string
+  length constraint. `Field(min_length=1)` therefore rejects the pipeline's
+  existing empty-string sentinel before application-level validation can
+  assess the proposition:
+  https://docs.pydantic.dev/latest/concepts/fields/
+- Universal Dependencies treats the nonverbal predicate, rather than an
+  invented object, as the head of a copular clause and explicitly distinguishes
+  intransitive predication. Forcing every proposition into a
+  subject-action-object triple is therefore linguistically invalid:
+  https://universaldependencies.org/en/dep/cop.html
+- Instructor's documented retry mechanism feeds validation errors back to the
+  model. It is useful for genuinely malformed results, but schema/semantics
+  mismatches cause repeated generation rather than repair:
+  https://python.useinstructor.com/concepts/retrying/
+
+Design decision:
+
+- Keep `subject` and `action` mandatory, because together they must express a
+  complete proposition.
+- Permit `object` to be the existing empty-string sentinel only when the source
+  clause has no separate grammatical object; never ask the model to invent one.
+- Preserve `object` as a string in materialized records for Arrow, cache, and
+  reasoning-path compatibility instead of changing stored records to nullable
+  values.
+- Clarify the extraction prompt and retain all exact-substring, evidence,
+  modality, polarity, condition, exception, and threshold validation.
+- Bump proposition schema/validator versions so incompatible cached
+  extractions are not silently reused.
+
+Validation plan:
+
+- Unit-test schema acceptance and materialization of a grounded proposition
+  with an empty object.
+- Assert that subject and action remain non-empty and that fabricated
+  non-verbatim objects still fail deterministic validation.
+- Run focused tests, Ruff, and compilation without invoking model endpoints.
+- Confirm the retry failure disappears in the next user-run pilot.
