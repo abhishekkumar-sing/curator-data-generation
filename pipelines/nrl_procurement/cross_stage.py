@@ -11,7 +11,11 @@ from typing import Any
 from cross_document import evidence_location
 from schemas import CrossCandidateBatch, CrossJudgeBatch
 from settings import CONFIG
-from validation import judge_quotes_are_grounded, validate_cross_record
+from validation import (
+    judge_quotes_are_grounded,
+    quarantine_invalid_judge_batch,
+    validate_cross_record,
+)
 
 from bespokelabs import curator
 
@@ -288,6 +292,13 @@ and consistency among booleans, ablation list, score, and issues.
 
     def parse(self, row: dict, response: CrossJudgeBatch) -> list[dict]:
         """Accept only records that require every declared source."""
+        quarantined = quarantine_invalid_judge_batch(
+            row["judge_items"],
+            [judgment.record_id for judgment in response.judgments],
+            self.model_name,
+        )
+        if quarantined is not None:
+            return quarantined
         originals = {item["record_id"]: item["record"] for item in row["judge_items"]}
         results = []
         for judgment in response.judgments:

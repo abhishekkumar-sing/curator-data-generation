@@ -27,7 +27,7 @@ from drafting import (  # noqa: E402
     normalize_drafting_response,
     read_drafting_seeds,
 )
-from export import assign_splits, export_records  # noqa: E402
+from export import assert_unique_record_ids, assign_splits, export_records  # noqa: E402
 from generate import (  # noqa: E402
     ProcurementGenerator,
     ProcurementJudge,
@@ -53,6 +53,7 @@ from reasoning_paths import build_reasoning_paths, validate_reasoning_path  # no
 from schemas import (  # noqa: E402
     CandidateBatch,
     CrossCandidateBatch,
+    CrossJudgeBatch,
     DraftingBlock,
     DraftingResult,
     JudgeBatch,
@@ -63,10 +64,112 @@ from source_windows import (  # noqa: E402
 )
 from validation import (  # noqa: E402
     deduplicate,
+    judge_batch_identity_issues,
     judge_quotes_are_grounded,
     validate_cross_record,
     validate_record,
 )
+
+
+def _judge_decision(**overrides):
+    decision = {
+        "supported": True,
+        "relevant": True,
+        "preserves_qualifications": True,
+        "authority_correct": True,
+        "reasoning_valid": True,
+        "recommended_task": "general_reference",
+        "recommended_persona": "general_user",
+        "answer_found_in_source": True,
+        "answer_quotes": ["Supported text."],
+        "score": 5,
+        "issues": [],
+    }
+    decision.update(overrides)
+    return decision
+
+
+def test_judge_batch_identity_reports_duplicate_missing_and_unexpected_ids() -> None:
+    issues = judge_batch_identity_issues(
+        ["record-a", "record-b"],
+        ["record-a", "record-a", "record-c"],
+    )
+    assert "duplicate_judge_record_ids:record-a" in issues
+    assert "missing_judge_record_ids:record-b" in issues
+    assert "unexpected_judge_record_ids:record-c" in issues
+    assert "judge_cardinality_mismatch:expected=2,returned=3" in issues
+
+
+def test_cross_judge_quarantines_entire_batch_when_model_duplicates_an_id() -> None:
+    records = [
+        {"record_id": "record-a"},
+        {"record_id": "record-b"},
+    ]
+    row = {
+        "judge_items": [
+            {"record_id": record["record_id"], "record": record}
+            for record in records
+        ]
+    }
+    response = CrossJudgeBatch.model_validate(
+        {
+            "judgments": [
+                {
+                    "record_id": "record-a",
+                    "decision": _judge_decision(
+                        full_context_supported=True,
+                        unsupported_without_source_ids=["source_a", "source_b"],
+                        connected_reasoning=True,
+                        relationship_correct=True,
+                    ),
+                },
+                {
+                    "record_id": "record-a",
+                    "decision": _judge_decision(
+                        full_context_supported=True,
+                        unsupported_without_source_ids=["source_a", "source_b"],
+                        connected_reasoning=True,
+                        relationship_correct=True,
+                    ),
+                },
+            ]
+        }
+    )
+    judged = CrossDocumentJudge.parse(
+        SimpleNamespace(model_name="judge-model"),
+        row,
+        response,
+    )
+    assert [record["record_id"] for record in judged] == ["record-a", "record-b"]
+    assert all(record["judge"]["accepted"] is False for record in judged)
+    assert all(record["judge"]["batch_integrity_passed"] is False for record in judged)
+    assert all(
+        "duplicate_judge_record_ids:record-a" in record["judge"]["issues"]
+        for record in judged
+    )
+    assert all(
+        "missing_judge_record_ids:record-b" in record["judge"]["issues"]
+        for record in judged
+    )
+
+
+def test_export_identity_gate_rejects_duplicate_and_missing_stable_ids() -> None:
+    try:
+        assert_unique_record_ids(
+            [{"record_id": "record-a"}, {"record_id": "record-a"}],
+            dataset_name="test records",
+        )
+    except ValueError as exc:
+        assert "duplicate record_id values" in str(exc)
+    else:
+        raise AssertionError("duplicate stable IDs must fail closed")
+
+    try:
+        assert_unique_record_ids([{"record_id": ""}], dataset_name="test records")
+    except ValueError as exc:
+        assert "missing record_id" in str(exc)
+    else:
+        raise AssertionError("missing stable IDs must fail closed")
 
 
 def test_manifest_metadata_and_stable_chunk(tmp_path: Path) -> None:

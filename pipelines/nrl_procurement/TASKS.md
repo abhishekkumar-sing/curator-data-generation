@@ -2870,15 +2870,33 @@ Research conclusions before implementation:
 
 Required implementation:
 
-- [ ] Add a reusable exact-ID-set/cardinality validator for all batched judges.
-- [ ] Quarantine malformed judge batches with duplicate, missing, and unexpected
+- [x] Add a reusable exact-ID-set/cardinality validator for all batched judges.
+- [x] Quarantine malformed judge batches with duplicate, missing, and unexpected
   ID diagnostics; do not accept a subset from an invalid batch.
-- [ ] Enforce unique stable record IDs before canonical, SFT, RAG, evaluation,
+- [x] Enforce unique stable record IDs before canonical, SFT, RAG, evaluation,
   and drafting export.
-- [ ] Count unique accepted records in the manifest and report duplicate
+- [x] Count unique accepted records in the manifest and report duplicate
   rejection counts explicitly.
-- [ ] Add regressions reproducing Pilot-008's triplicated judgment and covering
+- [x] Add regressions reproducing Pilot-008's triplicated judgment and covering
   missing and unexpected IDs.
+
+Implementation status:
+
+- Single-document and cross-document judge parsers now compare the returned ID
+  multiset with the exact expected batch before reading any decision. Any
+  duplicate, missing, unexpected, or cardinality mismatch quarantines every
+  expected original as rejected with stable diagnostic reason codes.
+- Quarantine preserves one audit row per expected input, so malformed model
+  output cannot inflate coverage or make unrelated records silently disappear.
+- Accepted procurement and drafting records pass a stable-ID uniqueness gate
+  before any canonical or task-specific export is written.
+- The terminal manifest reports quarantined record counts separately for
+  single-document and cross-document judges. Since invalid batches cannot enter
+  `accepted`, exported statistics count unique accepted identities.
+- Regression coverage reproduces Pilot-008's duplicated cross-judge ID and
+  verifies duplicate, missing, unexpected, cardinality, and export-gate
+  behavior. Complete local procurement verification: 42 tests passed; Ruff
+  passed. No model-backed pipeline was run.
 
 Research basis:
 

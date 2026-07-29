@@ -27,7 +27,7 @@ from drafting import (
     read_drafting_seeds,
     write_jsonl,
 )
-from export import assign_splits, export_records, write_manifest
+from export import assert_unique_record_ids, assign_splits, export_records, write_manifest
 from jsonl_io import write_jsonl_rows
 from propositions import (
     PropositionExtractor,
@@ -46,7 +46,12 @@ from path_qa import (
 from prompt_budget import measure_rendered_request
 from schemas import PathAnswerDraft, PathQuestionBatch
 from schemas import CandidateBatch, JudgeBatch
-from validation import deduplicate, judge_quotes_are_grounded, validate_record
+from validation import (
+    deduplicate,
+    judge_quotes_are_grounded,
+    quarantine_invalid_judge_batch,
+    validate_record,
+)
 
 # settings enforces local-only mode before Curator is imported.
 from bespokelabs import curator
@@ -473,6 +478,13 @@ and issues, and rejection of every unsupported claim or lost qualification.
 
     def parse(self, row: dict, response: JudgeBatch) -> list[dict]:
         """Attach judge decisions and enforce the configured threshold."""
+        quarantined = quarantine_invalid_judge_batch(
+            row["judge_items"],
+            [judgment.record_id for judgment in response.judgments],
+            self.model_name,
+        )
+        if quarantined is not None:
+            return quarantined
         original = {item["record_id"]: item["record"] for item in row["judge_items"]}
         results = []
         for judgment in response.judgments:
@@ -573,6 +585,11 @@ def _rejected_records(generated: list[dict[str, Any]], judged: list[dict[str, An
     return rejected
 
 
+def _batch_integrity_rejections(rows: list[dict[str, Any]]) -> int:
+    """Count expected records quarantined because their judge batch was malformed."""
+    return sum(row.get("judge", {}).get("batch_integrity_passed") is False for row in rows)
+
+
 def _final_manifest(
     *,
     run_id: str,
@@ -589,6 +606,7 @@ def _final_manifest(
     reasoning_path_stats: dict[str, Any] | None = None,
     source_window_stats: dict[str, Any] | None = None,
     path_qa_stats: dict[str, Any] | None = None,
+    judge_batch_integrity_rejections: dict[str, int] | None = None,
 ) -> dict[str, Any]:
     return {
         "run_id": run_id,
@@ -613,6 +631,8 @@ def _final_manifest(
         "reasoning_paths": reasoning_path_stats or {"enabled": False},
         "source_windows": source_window_stats or {"enabled": False},
         "path_qa": path_qa_stats or {"enabled": False},
+        "judge_batch_integrity_rejections": judge_batch_integrity_rejections
+        or {"single_document": 0, "cross_document": 0},
         "near_duplicates_removed": duplicates,
         "manuals": manuals,
     }
@@ -1033,6 +1053,7 @@ def main() -> None:
         raise SystemExit("No records passed the quality judge")
     for record in accepted:
         record.pop("_source_passage", None)
+    assert_unique_record_ids(accepted, key="record_id", dataset_name="accepted procurement records")
     train_fraction = float(SPLITS.get("train", 0.8))
     validation_fraction = float(SPLITS.get("validation", 0.1))
     test_fraction = float(SPLITS.get("test", 0.1))
@@ -1124,6 +1145,7 @@ def main() -> None:
                 ),
             )
             raise SystemExit("No drafting records passed generation and quality checks")
+        assert_unique_record_ids(drafting_accepted, key="id", dataset_name="accepted drafting records")
         write_jsonl(
             files_dir / "drafting.jsonl",
             [compact_drafting(row) for row in drafting_accepted],
@@ -1156,6 +1178,10 @@ def main() -> None:
         reasoning_path_stats=reasoning_path_stats,
         source_window_stats=source_window_stats,
         path_qa_stats=path_qa_stats,
+        judge_batch_integrity_rejections={
+            "single_document": _batch_integrity_rejections(judged),
+            "cross_document": _batch_integrity_rejections(cross_judged),
+        },
     )
     final_manifest["required_task_type_counts"] = task_counts
     final_manifest["missing_required_task_types"] = required_missing

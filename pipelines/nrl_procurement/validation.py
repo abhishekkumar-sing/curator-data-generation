@@ -3,10 +3,60 @@
 from __future__ import annotations
 
 import re
+from collections import Counter
 from collections.abc import Iterable
 from typing import Any
 
 from rapidfuzz.fuzz import token_set_ratio
+
+
+def judge_batch_identity_issues(
+    expected_ids: list[str],
+    returned_ids: list[str],
+) -> list[str]:
+    """Report exact one-to-one identity failures in a batched judge response."""
+    expected_counts = Counter(map(str, expected_ids))
+    returned_counts = Counter(map(str, returned_ids))
+    issues: list[str] = []
+    duplicate_expected = sorted(record_id for record_id, count in expected_counts.items() if count > 1)
+    duplicate_returned = sorted(record_id for record_id, count in returned_counts.items() if count > 1)
+    missing = sorted(expected_counts.keys() - returned_counts.keys())
+    unexpected = sorted(returned_counts.keys() - expected_counts.keys())
+    if duplicate_expected:
+        issues.append(f"duplicate_expected_record_ids:{','.join(duplicate_expected)}")
+    if duplicate_returned:
+        issues.append(f"duplicate_judge_record_ids:{','.join(duplicate_returned)}")
+    if missing:
+        issues.append(f"missing_judge_record_ids:{','.join(missing)}")
+    if unexpected:
+        issues.append(f"unexpected_judge_record_ids:{','.join(unexpected)}")
+    if len(returned_ids) != len(expected_ids):
+        issues.append(f"judge_cardinality_mismatch:expected={len(expected_ids)},returned={len(returned_ids)}")
+    return issues
+
+
+def quarantine_invalid_judge_batch(
+    judge_items: list[dict[str, Any]],
+    returned_ids: list[str],
+    model_name: str,
+) -> list[dict[str, Any]] | None:
+    """Return one rejected original per expected ID when batch identity is invalid."""
+    expected_ids = [str(item["record_id"]) for item in judge_items]
+    issues = judge_batch_identity_issues(expected_ids, returned_ids)
+    if not issues:
+        return None
+    return [
+        {
+            **item["record"],
+            "judge": {
+                "accepted": False,
+                "batch_integrity_passed": False,
+                "model": model_name,
+                "issues": issues,
+            },
+        }
+        for item in judge_items
+    ]
 
 # Keep the numeric core separate from prose. The previous ``\s+\w+`` suffix
 # swallowed arbitrary words (for example, ``2019 Manual``), turning ordinary

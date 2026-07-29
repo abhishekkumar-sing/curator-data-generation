@@ -11,6 +11,28 @@ from typing import Any
 from jsonl_io import write_jsonl_rows
 
 
+def assert_unique_record_ids(
+    rows: list[dict[str, Any]],
+    *,
+    key: str = "record_id",
+    dataset_name: str = "records",
+) -> None:
+    """Fail closed when stable record identities are absent or duplicated."""
+    missing = [index for index, row in enumerate(rows) if not str(row.get(key, "")).strip()]
+    counts: dict[str, int] = defaultdict(int)
+    for row in rows:
+        if str(row.get(key, "")).strip():
+            counts[str(row[key])] += 1
+    duplicates = sorted(record_id for record_id, count in counts.items() if count > 1)
+    issues = []
+    if missing:
+        issues.append(f"missing {key} at row indexes {missing}")
+    if duplicates:
+        issues.append(f"duplicate {key} values: {duplicates}")
+    if issues:
+        raise ValueError(f"Invalid {dataset_name}: {'; '.join(issues)}")
+
+
 def _components(manuals: list[dict[str, Any]], records: list[dict[str, Any]]) -> dict[str, str]:
     parent = {manual["manual_id"]: manual["manual_id"] for manual in manuals}
 
@@ -78,6 +100,7 @@ def export_records(
     run_id: str,
 ) -> dict[str, int]:
     """Write canonical and task-specific datasets plus their manifest."""
+    assert_unique_record_ids(records)
     output_dir.mkdir(parents=True, exist_ok=True)
     _write(output_dir / "canonical.jsonl", records)
     qa, cot, rag, evaluation = [], [], [], []
