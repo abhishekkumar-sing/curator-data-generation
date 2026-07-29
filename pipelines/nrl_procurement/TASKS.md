@@ -1428,6 +1428,65 @@ Implementation progress:
 - [ ] Add selected-tokenizer rendered-chat budgeting; the current conservative
   estimator is recorded explicitly and remains the fallback.
 
+##### Cross-reference and rendered-token-budget research addendum (2026-07-29)
+
+Status: focused research complete; implementation has not started.
+
+Verified findings and decision:
+
+- OASIS Akoma Ntoso models legal cross-references through explicit,
+  referenceable component identities. This supports resolving a printed
+  procurement reference such as “para 5.6.8” to a uniquely indexed component,
+  not to a fuzzy text/heading match.
+- The current Markdown/OCR corpus has no authored component IDs. The pipeline
+  must extract conservative paragraph/annexure identifiers from source text,
+  retain their exact spelling and chunk location, and resolve references only
+  within the same manual/version unless the source explicitly identifies
+  another registered document.
+- One-to-many is valid only for an explicit enumeration/range whose individual
+  targets all resolve uniquely. Missing, duplicated, malformed, external, and
+  ambiguous references remain audit records and never become support edges.
+- Hugging Face documents that `apply_chat_template(..., tokenize=True)` returns
+  token IDs with the tokenizer's chat template and control tokens applied.
+  This is more faithful than counting raw source text.
+- Unknown OpenAI-compatible hosted-vLLM names can make LiteLLM use generic
+  token counting. The pipeline must not treat that estimate as exact.
+- Add optional tokenizer identity/revision to each model profile. Load only
+  from an already available local path/cache during a run; never download
+  corpus-adjacent model assets implicitly. Record tokenizer identity, revision,
+  template hash, count method, reserved completion, and safety margin.
+- The complete rendered request—not the source window alone—is the enforcement
+  boundary. A reusable counter may be added now, but P0.4 must invoke it after
+  constructing the actual messages and structured-output schema and before
+  Curator/provider submission.
+- When no exact local tokenizer/template exists, use the configured
+  conservative fallback and mark it approximate. If a profile requires exact
+  counting, fail before any request.
+
+Rejected alternatives and risks:
+
+- Fuzzy section/reference matching can attach the wrong legal provision.
+- Resolving across editions by paragraph number can silently mix temporal
+  states.
+- `len(text)/4`, advertised context size, or LiteLLM's generic counter alone
+  does not include reliable model-template/schema overhead.
+- A local tokenizer with a different revision/template can still disagree with
+  the server. Pin and record revisions and retain a safety margin; endpoint
+  preflight remains necessary.
+
+Official sources:
+
+- [OASIS Akoma Ntoso 1.0 vocabulary](https://docs.oasis-open.org/legaldocml/akn-core/v1.0/akn-core-v1.0-part1-vocabulary.html)
+  specifies referenceable legal-document components and cross-reference
+  mechanisms.
+- [OASIS Akoma Ntoso naming convention](https://docs.oasis-open.org/legaldocml/akn-nc/v1.0/csd02/akn-nc-v1.0-csd02.html)
+  separates the reference point from the identified target resource.
+- [Hugging Face chat-template documentation](https://huggingface.co/docs/transformers/en/chat_templating_writing)
+  documents tokenizer-owned templates, generation prompts, special tokens, and
+  tool-schema template inputs.
+- [Hugging Face tokenizer API](https://huggingface.co/docs/transformers/main_classes/tokenizer)
+  documents tokenized chat-template output including control tokens.
+
 Acceptance criteria:
 
 - A source window never crosses manual, issuer, edition, or policy scope.
