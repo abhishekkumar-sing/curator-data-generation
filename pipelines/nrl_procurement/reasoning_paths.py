@@ -109,9 +109,28 @@ def _bridge_entities(
     left: dict[str, Any],
     right: dict[str, Any],
 ) -> list[str]:
+    generic = {
+        "bidder",
+        "buyer",
+        "consultant",
+        "contractor",
+        "department",
+        "entity",
+        "government",
+        "manual",
+        "materials",
+        "officer",
+        "payment",
+        "procurement",
+        "project",
+        "provider",
+        "service",
+        "supplier",
+        "tender",
+    }
     forward = _terms(left["object"]) & (_terms(right["subject"]) | _terms(right["object"]))
     reverse = _terms(right["object"]) & (_terms(left["subject"]) | _terms(left["object"]))
-    return sorted(forward | reverse)
+    return sorted((forward | reverse) - generic)
 
 
 def _compatible_signature(

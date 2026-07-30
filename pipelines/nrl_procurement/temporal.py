@@ -90,6 +90,7 @@ class TemporalConfig(BaseModel):
     schedule: list[ScheduleWeights]
     holdout_rule_family_fraction: float = Field(default=0.2, ge=0.0, lt=1.0)
     split_seed: str = Field(default="nrl-temporal-v1", min_length=1)
+    pilot_pairs_per_edge: int = Field(default=2, ge=0, le=10)
 
     @model_validator(mode="after")
     def validate_collections(self) -> "TemporalConfig":
@@ -280,6 +281,79 @@ def build_temporal_alignments(
                 }
             )
     return candidates, rejected
+
+
+def ensure_temporal_pair_rows(
+    selected: list[dict[str, Any]],
+    corpus_rows: list[dict[str, Any]],
+    config: TemporalConfig,
+    *,
+    limit: int | None,
+    seed: str,
+    pairs_per_edge: int = 2,
+) -> list[dict[str, Any]]:
+    """Reserve deterministic, topically matched pilot rows for temporal edges."""
+    if limit is None or pairs_per_edge < 1 or not config.pairs:
+        return selected
+    by_manual: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in corpus_rows:
+        if (
+            len(str(row.get("generation_passage", ""))) >= 200
+            and row.get("content_class") != "front_matter"
+        ):
+            by_manual[str(row["manual_id"])].append(row)
+
+    def row_terms(row: dict[str, Any]) -> set[str]:
+        return _terms(
+            f"{row.get('section', '')} "
+            f"{str(row.get('generation_passage', ''))[:1600]}"
+        )
+
+    mandatory: list[dict[str, Any]] = []
+    for pair in config.pairs:
+        historical = by_manual.get(pair.historical_manual_id, [])
+        target = by_manual.get(pair.target_manual_id, [])
+        scored: list[tuple[int, str, dict[str, Any], dict[str, Any]]] = []
+        historical_terms = {
+            str(row["chunk_id"]): row_terms(row) for row in historical
+        }
+        target_terms = {
+            str(row["chunk_id"]): row_terms(row) for row in target
+        }
+        for left in historical:
+            left_id = str(left["chunk_id"])
+            for right in target:
+                right_id = str(right["chunk_id"])
+                shared = historical_terms[left_id] & target_terms[right_id]
+                if len(shared) < pair.minimum_shared_terms:
+                    continue
+                tie = hashlib.sha256(
+                    f"{seed}:{pair.pair_id}:{left_id}:{right_id}".encode()
+                ).hexdigest()
+                scored.append((len(shared), tie, left, right))
+        used: set[str] = set()
+        for _, _, left, right in sorted(
+            scored,
+            key=lambda item: (-item[0], item[1]),
+        ):
+            ids = {str(left["chunk_id"]), str(right["chunk_id"])}
+            if ids & used:
+                continue
+            mandatory.extend((left, right))
+            used.update(ids)
+            if len(used) >= pairs_per_edge * 2:
+                break
+
+    unique_mandatory = {
+        str(row["chunk_id"]): row for row in mandatory
+    }
+    capacity = max(0, limit - len(unique_mandatory))
+    retained = [
+        row
+        for row in selected
+        if str(row["chunk_id"]) not in unique_mandatory
+    ][:capacity]
+    return [*unique_mandatory.values(), *retained][:limit]
 
 
 def _proposition_state(proposition: dict[str, Any]) -> dict[str, Any]:
@@ -750,7 +824,15 @@ def write_temporal_artifacts(
         "changes_rejected": len(change_rejected),
         "record_counts": {name: len(rows) for name, rows in exports.items()},
         "validation_rejected": len(validation_rejected),
-        "judge_status": ("complete" if len(judged_alignments) == len(candidates) else "incomplete"),
+        "judge_status": (
+            "not_run_no_candidates"
+            if not candidates
+            else (
+                "complete"
+                if len(judged_alignments) == len(candidates)
+                else "incomplete"
+            )
+        ),
         "missing_judge_responses": len(missing_judgments),
         "schedule_status": curriculum["schedule_status"],
     }

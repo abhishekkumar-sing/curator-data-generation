@@ -111,6 +111,71 @@ def build_auto_tool_request(
     }
 
 
+def _decode_json_container(value):
+    """Decode one model-produced JSON container without accepting prose."""
+    if not isinstance(value, str):
+        return value
+    text = value.strip()
+    if not text or text[0] not in "[{":
+        return value
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        try:
+            decoded, end = json.JSONDecoder().raw_decode(text)
+        except json.JSONDecodeError:
+            return value
+        # qwen3_coder occasionally appends only redundant JSON/Python closers
+        # after a valid nested container. Never discard lexical prose.
+        if text[end:].strip().strip(")]},"):
+            return value
+        return decoded
+
+
+def normalize_tool_arguments(value, schema):
+    """Conservatively repair qwen tool-parser container coercion defects.
+
+    The affected vLLM parser can return nested arrays/objects as JSON strings
+    even when the transmitted schema is fully dereferenced. Repairs are
+    schema-directed: arbitrary strings are never decoded or rewritten.
+    """
+    expected_type = schema.get("type") if isinstance(schema, dict) else None
+    if expected_type in {"array", "object"}:
+        value = _decode_json_container(value)
+    if expected_type == "array":
+        if not isinstance(value, list):
+            return value
+        item_schema = schema.get("items", {})
+        return [normalize_tool_arguments(item, item_schema) for item in value]
+    if expected_type == "object":
+        if isinstance(value, str):
+            properties = schema.get("properties", {})
+            required = schema.get("required", [])
+            # EvidenceDraft-like one-field objects are frequently emitted as
+            # their quote string. This lossless wrapper does not invent data.
+            if (
+                len(required) == 1
+                and required[0] in properties
+                and properties[required[0]].get("type") == "string"
+            ):
+                value = {required[0]: value}
+        if not isinstance(value, dict):
+            return value
+        properties = schema.get("properties", {})
+        return {
+            key: normalize_tool_arguments(item, properties.get(key, {}))
+            for key, item in value.items()
+        }
+    if expected_type == "string" and isinstance(value, dict):
+        # Path rationale models sometimes emit {"step": "..."} despite a
+        # string item schema. Accept only an unambiguous single string value.
+        if len(value) == 1:
+            only = next(iter(value.values()))
+            if isinstance(only, str):
+                return only
+    return value
+
+
 class LiteLLMOnlineRequestProcessor(BaseOnlineRequestProcessor):
     """LiteLLM implementation of the OnlineRequestProcessor for multi-provider LLM support.
 
@@ -195,7 +260,10 @@ class LiteLLMOnlineRequestProcessor(BaseOnlineRequestProcessor):
         arguments = function.arguments
         if not isinstance(arguments, str):
             arguments = json.dumps(arguments)
-        return response_model.model_validate_json(arguments)
+        parsed = json.loads(arguments)
+        schema = dereference_json_schema(response_model.model_json_schema())
+        normalized = normalize_tool_arguments(parsed, schema)
+        return response_model.model_validate(normalized)
 
     def _ensure_rate_limits(self):
         """Lazily initialize rate limits from API headers on first access."""

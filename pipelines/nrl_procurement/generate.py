@@ -47,6 +47,7 @@ from temporal import (
     TemporalAlignmentJudge,
     build_temporal_alignments,
     build_temporal_judge_inputs,
+    ensure_temporal_pair_rows,
     load_temporal_config,
     resolve_manifest_pairs,
     write_temporal_artifacts,
@@ -79,6 +80,7 @@ from validation import (
     deduplicate,
     judge_quotes_are_grounded,
     quarantine_invalid_judge_batch,
+    recover_grounded_judge_quotes,
     validate_record,
 )
 
@@ -358,6 +360,41 @@ def request_coverage(planned: list[dict[str, Any]], records: list[dict[str, Any]
         "missing_request_ids": [request_id for request_id in expected if request_id not in materialized],
         "records_by_request": dict(sorted(materialized.items())),
     }
+
+
+def materialize_terminal_failures(
+    planned: list[dict[str, Any]],
+    records: list[dict[str, Any]],
+    *,
+    planned_id,
+    record_id,
+    stage: str,
+    base_fields=None,
+) -> list[dict[str, Any]]:
+    """Represent every post-retry omission as an explicit terminal audit row."""
+    materialized = {
+        str(record_id(row))
+        for row in records
+        if record_id(row)
+    }
+    terminal = list(records)
+    for row in planned:
+        identity = str(planned_id(row))
+        if not identity or identity in materialized:
+            continue
+        fields = base_fields(row) if base_fields is not None else {}
+        terminal.append(
+            {
+                **fields,
+                "terminal_state": "model_failure_after_retries",
+                "terminal_stage": stage,
+                "deterministic_checks": {
+                    "passed": False,
+                    "issues": ["model_failure_after_retries"],
+                },
+            }
+        )
+    return terminal
 
 
 def _write_audit(path: Path, rows: list[dict[str, Any]]) -> None:
@@ -693,12 +730,23 @@ and issues, and rejection of every unsupported claim or lost qualification.
             task_correct = decision["recommended_task"] == record["task"]
             persona_correct = decision["recommended_persona"] == record["persona"]
             quotes = decision["answer_quotes"]
+            evidence_quotes = [
+                item["quote"] for item in record.get("evidence", [])
+            ]
+            quotes, quotes_recovered = recover_grounded_judge_quotes(
+                quotes,
+                answer_found_in_source=decision["answer_found_in_source"],
+                supported=decision["supported"],
+                source_text=record["_source_passage"],
+                evidence_quotes=evidence_quotes,
+            )
+            decision["answer_quotes"] = quotes
             quote_consistent = (
                 decision["answer_found_in_source"]
                 and judge_quotes_are_grounded(
                     quotes,
                     record["_source_passage"],
-                    [item["quote"] for item in record.get("evidence", [])],
+                    evidence_quotes,
                 )
                 if record["answerable"]
                 else (not decision["answer_found_in_source"] and not quotes)
@@ -708,6 +756,7 @@ and issues, and rejection of every unsupported claim or lost qualification.
                 "task_correct": task_correct,
                 "persona_correct": persona_correct,
                 "answerability_correct": quote_consistent,
+                "answer_quotes_recovered": quotes_recovered,
                 "model": self.model_name,
                 "accepted": all(
                     decision[field]
@@ -1053,6 +1102,21 @@ def main() -> None:
         }
     seed = str(SPLITS.get("seed", "nrl-procurement-v1"))
     rows = representative_rows(all_rows, args.limit, seed)
+    temporal_config = CONFIG.get("temporal", {})
+    resolved_temporal = None
+    if temporal_config.get("enabled", False):
+        resolved_temporal = resolve_manifest_pairs(
+            load_temporal_config(temporal_config),
+            manuals,
+        )
+        rows = ensure_temporal_pair_rows(
+            rows,
+            all_rows,
+            resolved_temporal,
+            limit=args.limit,
+            seed=seed,
+            pairs_per_edge=resolved_temporal.pilot_pairs_per_edge,
+        )
     planned_single = plan_single_document_requests(rows, seed)
     if not planned_single:
         write_manifest(
@@ -1151,12 +1215,8 @@ def main() -> None:
             "schema_version": (accepted_paths[0]["schema_version"] if accepted_paths else None),
         }
 
-    temporal_config = CONFIG.get("temporal", {})
     if temporal_config.get("enabled", False):
-        resolved_temporal = resolve_manifest_pairs(
-            load_temporal_config(temporal_config),
-            manuals,
-        )
+        assert resolved_temporal is not None
         temporal_candidates, _ = build_temporal_alignments(
             accepted_propositions,
             resolved_temporal,
@@ -1233,6 +1293,18 @@ def main() -> None:
                 question_generator,
                 budgeted_inputs,
             )
+        path_questions_audit = materialize_terminal_failures(
+            budgeted_inputs,
+            path_questions_audit,
+            planned_id=lambda row: row["path"]["path_id"],
+            record_id=lambda row: row.get("path_id"),
+            stage="path_questions",
+            base_fields=lambda row: {
+                "path_id": row["path"]["path_id"],
+                "path": row["path"],
+                "propositions": row["propositions"],
+            },
+        )
         _write_audit(
             files_dir / "path_questions_generated_audit.jsonl",
             path_questions_audit,
@@ -1291,6 +1363,20 @@ def main() -> None:
                 answer_generator,
                 budgeted_answer_inputs,
             )
+        path_answers_audit = materialize_terminal_failures(
+            budgeted_answer_inputs,
+            path_answers_audit,
+            planned_id=lambda row: row["question_id"],
+            record_id=lambda row: row.get("question_id"),
+            stage="path_answers",
+            base_fields=lambda row: {
+                "question_id": row["question_id"],
+                "path_id": row["path_id"],
+                "path": row["path"],
+                "propositions": row["propositions"],
+                "task_type": row["task_type"],
+            },
+        )
         _write_audit(
             files_dir / "path_answers_generated_audit.jsonl",
             path_answers_audit,
@@ -1340,6 +1426,18 @@ def main() -> None:
                 ablation_generator,
                 budgeted_ablation_inputs,
             )
+        ablation_trials_audit = materialize_terminal_failures(
+            budgeted_ablation_inputs,
+            ablation_trials_audit,
+            planned_id=lambda row: row["trial_id"],
+            record_id=lambda row: row.get("trial_id"),
+            stage="path_ablation_trials",
+            base_fields=lambda row: {
+                "trial_id": row["trial_id"],
+                "record_id": row["record_id"],
+                "variant": row["variant"],
+            },
+        )
         _write_audit(
             files_dir / "path_ablation_trials_audit.jsonl",
             ablation_trials_audit,
@@ -1386,6 +1484,20 @@ def main() -> None:
                 SourceAblationJudge(**_llm_kwargs(JUDGE)),
                 ablation_judge_inputs,
             )
+        ablation_judged = materialize_terminal_failures(
+            ablation_judge_inputs,
+            ablation_judged,
+            planned_id=lambda row: row["record_id"],
+            record_id=lambda row: row.get("record_id"),
+            stage="path_ablation_judge",
+            base_fields=lambda row: {
+                **row,
+                "judge": {
+                    "accepted": False,
+                    "issues": ["model_failure_after_retries"],
+                },
+            },
+        )
         _write_audit(
             files_dir / "path_ablation_judged.jsonl",
             ablation_judged,
@@ -1396,16 +1508,16 @@ def main() -> None:
         path_question_missing = sorted(
             {row["path"]["path_id"] for row in path_question_inputs}
             - {
-                row["path_id"]
-                for row in path_questions_audit
-                if row.get("path_id")
+                row.get("path_id") or row.get("path", {}).get("path_id")
+                for row in [*path_questions_audit, *prompt_budget_rejected]
+                if row.get("path_id") or row.get("path", {}).get("path_id")
             }
         )
         path_answer_missing = sorted(
             {row["question_id"] for row in path_questions}
             - {
                 row["question_id"]
-                for row in path_answers_audit
+                for row in [*path_answers_audit, *answer_prompt_budget_rejected]
                 if row.get("question_id")
             }
         )
@@ -1426,6 +1538,7 @@ def main() -> None:
             }
         )
         answers_by_id = {row["record_id"]: row for row in path_answers}
+        promoted_path_rejected: list[dict[str, Any]] = []
         for judgment in accepted_ablation_judgments:
             answer = {
                 **answers_by_id[judgment["record_id"]],
@@ -1435,10 +1548,18 @@ def main() -> None:
                     "actual_trials": judgment["actual_trials"],
                 },
             }
-            promoted_path_records.append(promote_path_answer(answer))
+            promoted = promote_path_answer(answer)
+            if promoted["deterministic_checks"]["passed"]:
+                promoted_path_records.append(promoted)
+            else:
+                promoted_path_rejected.append(promoted)
         _write_audit(
             files_dir / "path_promoted_canonical.jsonl",
             promoted_path_records,
+        )
+        _write_audit(
+            files_dir / "path_promoted_rejected.jsonl",
+            promoted_path_rejected,
         )
         _write_audit(
             files_dir / "path_missing_hop_contrasts.jsonl",
@@ -1456,6 +1577,7 @@ def main() -> None:
             "questions_accepted": len(path_questions),
             "answers_accepted": len(path_answers),
             "accepted_for_training": len(promoted_path_records),
+            "promotion_validation_rejected": len(promoted_path_rejected),
             "real_source_ablation_passed": len(ablation_passed_ids),
             "real_source_ablation_failed": len(path_answers)
             - len(ablation_passed_ids),
@@ -1488,6 +1610,20 @@ def main() -> None:
         "generation",
         ProcurementGenerator(**_llm_kwargs(GENERATION)),
         planned_single,
+    )
+    generated_audit = materialize_terminal_failures(
+        planned_single,
+        generated_audit,
+        planned_id=lambda row: row["planned_request_id"],
+        record_id=lambda row: row.get("parent_request_id"),
+        stage="generation",
+        base_fields=lambda row: {
+            "parent_request_id": row["planned_request_id"],
+            "planned_task_type": row["planned_task_type"],
+            "task_type": row["planned_task_type"],
+            "answerable": row["planned_answerable"],
+            "manual_id": row["manual_id"],
+        },
     )
     _write_audit(files_dir / "qa_generated_audit.jsonl", generated_audit)
     single_generation_coverage = request_coverage(planned_single, generated_audit)
@@ -1594,6 +1730,20 @@ def main() -> None:
                 "generation",
                 CrossDocumentGenerator(**_llm_kwargs(GENERATION)),
                 planned_cross,
+            )
+            cross_generated_audit = materialize_terminal_failures(
+                planned_cross,
+                cross_generated_audit,
+                planned_id=lambda row: row["planned_request_id"],
+                record_id=lambda row: row.get("parent_request_id"),
+                stage="cross_generation",
+                base_fields=lambda row: {
+                    "parent_request_id": row["planned_request_id"],
+                    "planned_task_type": row["planned_task_type"],
+                    "task_type": row["planned_task_type"],
+                    "answerable": row["planned_answerable"],
+                    "source_bundle_id": row["source_bundle_id"],
+                },
             )
             _write_audit(
                 files_dir / "cross_generated_audit.jsonl",
@@ -1757,33 +1907,16 @@ def main() -> None:
             "accepted": len(drafting_accepted),
             "rejected": len(drafting_rejected),
         }
-        if not drafting_accepted:
-            write_manifest(
-                files_dir,
-                _final_manifest(
-                    run_id=run_id,
-                    status="failed",
-                    stats=stats,
-                    manuals=manuals,
-                    corpus_report=corpus_report,
-                    selected_rows=rows,
-                    single_coverage=single_coverage,
-                    cross_coverage=cross_coverage,
-                    drafting_stats=drafting_stats,
-                    duplicates=duplicates + cross_duplicates,
-                    proposition_stats=proposition_stats,
-                    reasoning_path_stats=reasoning_path_stats,
-                    source_window_stats=source_window_stats,
-                    path_qa_stats=path_qa_stats,
-                    temporal_stats=temporal_stats,
-                ),
+        if drafting_accepted:
+            assert_unique_record_ids(
+                drafting_accepted,
+                key="id",
+                dataset_name="accepted drafting records",
             )
-            raise SystemExit("No drafting records passed generation and quality checks")
-        assert_unique_record_ids(drafting_accepted, key="id", dataset_name="accepted drafting records")
-        write_jsonl(
-            files_dir / "drafting.jsonl",
-            [compact_drafting(row) for row in drafting_accepted],
-        )
+            write_jsonl(
+                files_dir / "drafting.jsonl",
+                [compact_drafting(row) for row in drafting_accepted],
+            )
     else:
         drafting_stats = {
             "planned": 0,

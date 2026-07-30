@@ -13,6 +13,7 @@ from temporal import (  # noqa: E402
     assign_temporal_splits,
     build_temporal_alignments,
     build_temporal_records,
+    ensure_temporal_pair_rows,
     extract_temporal_changes,
     load_temporal_config,
     resolve_manifest_pairs,
@@ -112,6 +113,36 @@ def test_manifest_driven_pairs_and_secret_free_fingerprint():
     fingerprint = temporal_config_fingerprint(config)
     assert len(fingerprint) == 64
     assert "token" not in json.dumps(config.model_dump(mode="json"))
+
+
+def test_temporal_pilot_selection_reserves_matched_manual_pairs():
+    config = resolve_manifest_pairs(load_temporal_config(_config()), _manuals())
+
+    def row(manual_id: str, chunk_id: str, text: str) -> dict:
+        return {
+            "manual_id": manual_id,
+            "chunk_id": chunk_id,
+            "generation_passage": text * 8,
+            "section": "Bid security requirements",
+            "content_class": "policy",
+        }
+
+    corpus = [
+        row("goods_2017", "old-1", "Bid security shall be furnished. "),
+        row("goods_2024", "new-1", "Bid security must be furnished. "),
+        row("other", "other-1", "Unrelated contract administration. "),
+    ]
+    selected = ensure_temporal_pair_rows(
+        [corpus[-1]],
+        corpus,
+        config,
+        limit=3,
+        seed="test",
+        pairs_per_edge=1,
+    )
+    assert {"old-1", "new-1"}.issubset(
+        {item["chunk_id"] for item in selected}
+    )
 
 
 def test_schedule_is_strictly_validated():

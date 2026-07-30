@@ -44,6 +44,7 @@ from generate import (  # noqa: E402
     _budget_judge_rows,
     _judge_prompt_budget,
     _singular_judge_batch_size,
+    materialize_terminal_failures,
     plan_cross_document_requests,
     plan_single_document_requests,
     request_coverage,
@@ -98,6 +99,7 @@ from validation import (  # noqa: E402
     deduplicate,
     judge_batch_identity_issues,
     judge_quotes_are_grounded,
+    recover_grounded_judge_quotes,
     semantic_support_issues,
     validate_cross_record,
     validate_record,
@@ -1456,6 +1458,26 @@ def test_judge_witness_accepts_only_lossless_grounded_forms() -> None:
     )
 
 
+def test_empty_judge_quotes_recover_only_from_supported_exact_evidence() -> None:
+    source = "Before. Exact supported sentence. After."
+    quotes, recovered = recover_grounded_judge_quotes(
+        [],
+        answer_found_in_source=True,
+        supported=True,
+        source_text=source,
+        evidence_quotes=["Exact supported sentence."],
+    )
+    assert quotes == ["Exact supported sentence."]
+    assert recovered is True
+    assert recover_grounded_judge_quotes(
+        [],
+        answer_found_in_source=True,
+        supported=False,
+        source_text=source,
+        evidence_quotes=["Exact supported sentence."],
+    ) == ([], False)
+
+
 def test_cross_validation_accepts_typed_quantities_and_metadata_dates() -> None:
     documents = [
         {
@@ -1754,7 +1776,10 @@ def test_cross_document_bundle_and_source_attribution() -> None:
             {
                 "operation": "combine",
                 "statement": "Combine it with the submission method.",
-                "evidence": [{"source_id": "source_b", "quote": right_quote}],
+                "evidence": [
+                    {"source_id": "source_a", "quote": left_quote},
+                    {"source_id": "source_b", "quote": right_quote},
+                ],
             },
         ],
     }
@@ -1838,7 +1863,10 @@ def test_deterministic_rejections_are_materialized_for_audit() -> None:
                         {
                             "operation": "combine",
                             "statement": "Combine with source B.",
-                            "evidence": [{"source_id": "source_b", "quote": passage}],
+                            "evidence": [
+                                {"source_id": "source_a", "quote": passage},
+                                {"source_id": "source_b", "quote": passage},
+                            ],
                         },
                     ],
                 }
@@ -2243,6 +2271,32 @@ def test_explicit_task_planning_and_request_coverage(monkeypatch) -> None:
         "cross_document_qa",
         "cross_document_qa_cot",
     }
+
+
+def test_post_retry_omissions_become_terminal_audit_rows() -> None:
+    planned = [
+        {"planned_request_id": "request-a", "planned_task_type": "qa"},
+        {"planned_request_id": "request-b", "planned_task_type": "qa_cot"},
+    ]
+    rows = [{"parent_request_id": "request-a", "record_id": "record-a"}]
+    terminal = materialize_terminal_failures(
+        planned,
+        rows,
+        planned_id=lambda row: row["planned_request_id"],
+        record_id=lambda row: row.get("parent_request_id"),
+        stage="generation",
+        base_fields=lambda row: {
+            "parent_request_id": row["planned_request_id"],
+            "task_type": row["planned_task_type"],
+        },
+    )
+    assert request_coverage(planned, terminal)["missing_request_ids"] == []
+    failure = next(
+        row
+        for row in terminal
+        if row.get("parent_request_id") == "request-b"
+    )
+    assert failure["terminal_state"] == "model_failure_after_retries"
 
 
 def test_judge_rejects_false_abstention_and_taxonomy_acquiescence() -> None:
@@ -2879,7 +2933,7 @@ def test_completed_stage_survives_pipeline_source_change(
     )
 
 
-def test_v1_completed_checkpoint_is_reused_after_resume_contract_upgrade(
+def test_v1_completed_checkpoint_is_invalidated_after_resume_contract_upgrade(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -2920,17 +2974,16 @@ def test_v1_completed_checkpoint_is_reused_after_resume_contract_upgrade(
         encoding="utf-8",
     )
 
+    llm = _FakeStageLLM([{"record_id": "fresh"}], [])
     result = manager.execute_llm_stage(
         stage="generation",
         role="generation",
-        llm=_FakeStageLLM([], [], fail=True),
+        llm=llm,
         inputs=inputs,
     )
-    assert result == [{"record_id": "legacy"}]
-    assert (
-        manager.summary()["stage_events"]["generation"]["compatibility"]
-        == "source_independent_completed_artifact"
-    )
+    assert result == [{"record_id": "fresh"}]
+    assert len(llm.calls) == 1
+    assert manager.summary()["stage_events"]["generation"]["status"] == "executed"
 
 
 def test_refresh_stage_preserves_checkpoint_history_and_redacts_secrets(

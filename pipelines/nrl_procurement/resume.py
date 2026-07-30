@@ -13,6 +13,15 @@ from datasets import Dataset
 from jsonl_io import write_jsonl_rows
 
 RESUME_SCHEMA_VERSION = "nrl-resume-v2"
+STAGE_CONTRACT_VERSIONS = {
+    # Increment only when persisted response semantics change. Source-only
+    # edits remain reusable, while parser/judge contract changes cannot reuse
+    # stale completed checkpoints.
+    "cross_generation": "2",
+    "cross_judge": "2",
+    "generation": "2",
+    "judge": "2",
+}
 
 
 def _canonical_hash(value: Any) -> str:
@@ -180,6 +189,10 @@ class ResumeManager:
                 "schema_version": RESUME_SCHEMA_VERSION,
                 "stage": stage,
                 "config_sha256": self.config_hash,
+                "stage_contract_version": STAGE_CONTRACT_VERSIONS.get(
+                    stage,
+                    "1",
+                ),
             }
         )
 
@@ -224,6 +237,8 @@ class ResumeManager:
                 metadata.get("status") == "complete"
                 and metadata.get("stage") == stage
                 and metadata.get("input_sha256") == logical_input_hash
+                and metadata.get("contract_sha256")
+                == self._contract_hash(stage)
             ):
                 return checkpoint_dir, metadata
         return None

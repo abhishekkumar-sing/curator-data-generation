@@ -10,6 +10,7 @@ from bespokelabs.curator.request_processor.online.base_online_request_processor 
 from bespokelabs.curator.request_processor.online.litellm_online_request_processor import (
     LiteLLMOnlineRequestProcessor,
     dereference_json_schema,
+    normalize_tool_arguments,
 )
 from bespokelabs.curator.types.generic_request import GenericRequest
 from bespokelabs.curator.types.prompt import File, _MultiModalPrompt
@@ -187,6 +188,56 @@ def test_dereference_json_schema_rejects_recursive_refs():
 
     with pytest.raises(ValueError, match="Recursive schema"):
         dereference_json_schema(schema)
+
+
+def test_normalize_tool_arguments_repairs_nested_json_strings():
+    schema = {
+        "type": "object",
+        "properties": {
+            "claims": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "statement": {"type": "string"},
+                        "evidence": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "quote": {"type": "string"},
+                                },
+                                "required": ["quote"],
+                            },
+                        },
+                    },
+                },
+            },
+        },
+    }
+    value = {
+        "claims": (
+            '[{"statement":"Supported statement","evidence":'
+            '["Exact source quotation."]}]'
+        )
+    }
+
+    normalized = normalize_tool_arguments(value, schema)
+
+    assert normalized["claims"][0]["evidence"] == [
+        {"quote": "Exact source quotation."}
+    ]
+
+
+def test_normalize_tool_arguments_does_not_decode_ordinary_strings():
+    schema = {
+        "type": "object",
+        "properties": {"answer": {"type": "string"}},
+    }
+
+    assert normalize_tool_arguments({"answer": "[not JSON]"}, schema) == {
+        "answer": "[not JSON]"
+    }
 
 
 def test_multimodal_support_falls_back_for_claude_aliases(monkeypatch):

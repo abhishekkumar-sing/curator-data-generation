@@ -148,6 +148,7 @@ temporal:
   enabled: true
   verification_cutoff: "2026-07-30"
   discover_pairs_from_manifest: true
+  pilot_pairs_per_edge: 2
   holdout_rule_family_fraction: 0.2
   split_seed: nrl-temporal-v1
   pairs: []

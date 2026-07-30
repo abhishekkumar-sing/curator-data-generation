@@ -14,6 +14,7 @@ from settings import CONFIG
 from validation import (
     judge_quotes_are_grounded,
     quarantine_invalid_judge_batch,
+    recover_grounded_judge_quotes,
     validate_cross_record,
 )
 
@@ -344,6 +345,14 @@ and consistency among booleans, ablation list, score, and issues.
             source_text = "\n\n".join(document["passage"] for document in record["source_documents"])
             quotes = decision["answer_quotes"]
             evidence_quotes = [evidence["quote"] for claim in record.get("claims", []) for evidence in claim.get("evidence", [])]
+            quotes, quotes_recovered = recover_grounded_judge_quotes(
+                quotes,
+                answer_found_in_source=decision["answer_found_in_source"],
+                supported=decision["supported"],
+                source_text=source_text,
+                evidence_quotes=evidence_quotes,
+            )
+            decision["answer_quotes"] = quotes
             answerability_correct = (
                 decision["answer_found_in_source"] and judge_quotes_are_grounded(quotes, source_text, evidence_quotes)
                 if record["answerable"]
@@ -365,6 +374,7 @@ and consistency among booleans, ablation list, score, and issues.
                 "task_correct": task_correct,
                 "persona_correct": persona_correct,
                 "answerability_correct": answerability_correct,
+                "answer_quotes_recovered": quotes_recovered,
                 "model": self.model_name,
                 "accepted": all(decision[field] for field in required)
                 and ablation_passed

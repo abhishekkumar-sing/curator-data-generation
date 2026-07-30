@@ -34,11 +34,30 @@ def _jsonl_count(path: Path) -> int:
     return sum(bool(line.strip()) for line in path.read_text(encoding="utf-8").splitlines())
 
 
-def _failure_distribution(working_dir: Path) -> dict[str, int]:
+def _failure_distribution(
+    working_dir: Path,
+    manifest: dict[str, Any] | None = None,
+) -> dict[str, int]:
+    """Count failures for the latest manifest attempt, not historical caches."""
     counts: Counter[str] = Counter()
     if not working_dir.is_dir():
         return {}
-    for path in working_dir.rglob("failed_requests.jsonl"):
+    roots: list[Path] = []
+    stage_events = (manifest or {}).get("resume", {}).get("stage_events", {})
+    for stage, event in stage_events.items():
+        if event.get("status") not in {"executed", "resumed_partial_cache"}:
+            continue
+        fingerprint = event.get("producer", {}).get("stage_fingerprint")
+        if fingerprint:
+            root = working_dir / stage / fingerprint
+            if root.is_dir():
+                roots.append(root)
+    paths = (
+        [path for root in roots for path in root.rglob("failed_requests.jsonl")]
+        if roots
+        else list(working_dir.rglob("failed_requests.jsonl"))
+    )
+    for path in paths:
         for line in path.read_text(
             encoding="utf-8", errors="replace"
         ).splitlines():
@@ -108,7 +127,11 @@ def validate_run(
     else:
         issues.append("human_review_not_supplied")
 
-    failures = _failure_distribution(working_dir) if working_dir else {}
+    failures = (
+        _failure_distribution(working_dir, manifest)
+        if working_dir
+        else {}
+    )
     report = {
         "passed": not issues,
         "issues": sorted(set(issues)),

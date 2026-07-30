@@ -14,6 +14,7 @@ from schemas import (
     PathQuestionBatch,
 )
 from settings import CONFIG
+from validation import validate_cross_record
 
 from bespokelabs import curator
 
@@ -343,6 +344,75 @@ Return record_id exactly as supplied.
         ]
 
 
+_PATH_TERM = re.compile(r"[a-z][a-z0-9-]{3,}")
+_PATH_STOP = {
+    "according",
+    "action",
+    "authority",
+    "document",
+    "government",
+    "manual",
+    "procurement",
+    "provision",
+    "shall",
+    "source",
+}
+_UNSUPPORTED_CONTINUITY = re.compile(
+    r"\b(remain(?:s|ed)? applicable|still applies|does not (?:alter|amend|"
+    r"change|modify)|continues? to apply)\b",
+    re.IGNORECASE,
+)
+
+
+def promoted_path_issues(
+    record: dict[str, Any],
+    propositions: list[dict[str, Any]],
+) -> list[str]:
+    """Apply normal cross checks plus path-specific semantic safeguards."""
+    issues = validate_cross_record(record, record["source_documents"])
+    proposition_ids = {
+        str(proposition["proposition_id"]) for proposition in propositions
+    }
+    for step in record.get("reasoning_steps", []):
+        mentioned = set(
+            re.findall(r"prop-[a-z0-9]+", str(step.get("statement", "")))
+        )
+        evidenced = {
+            str(item.get("proposition_id", ""))
+            for item in step.get("evidence", [])
+        }
+        if mentioned and (
+            not mentioned.issubset(proposition_ids) or mentioned != evidenced
+        ):
+            issues.append("reasoning_proposition_reference_mismatch")
+    text = (
+        f"{record.get('question', '')} {record.get('answer', '')} "
+        + " ".join(
+            str(step.get("statement", ""))
+            for step in record.get("reasoning_steps", [])
+        )
+    )
+    if _UNSUPPORTED_CONTINUITY.search(text):
+        issues.append("unsupported_currentness_or_supersession")
+    if len(propositions) >= 2:
+        term_sets = []
+        for proposition in propositions[:2]:
+            proposition_text = " ".join(
+                str(proposition.get(field, ""))
+                for field in ("subject", "action", "object")
+            ).casefold()
+            term_sets.append(
+                {
+                    term
+                    for term in _PATH_TERM.findall(proposition_text)
+                    if term not in _PATH_STOP
+                }
+            )
+        if not term_sets[0].intersection(term_sets[1]):
+            issues.append("unrelated_path_inputs")
+    return sorted(set(issues))
+
+
 def promote_path_answer(row: dict[str, Any]) -> dict[str, Any]:
     """Convert a judged path answer into the canonical cross-document contract."""
     propositions = row["propositions"]
@@ -427,7 +497,7 @@ def promote_path_answer(row: dict[str, Any]) -> dict[str, Any]:
         "complementary_procedure": "complementary_procedure",
         "exception_condition_interaction": "complementary_procedure",
     }.get(row["path"]["relationship_type"], "complementary_procedure")
-    return {
+    promoted = {
         "record_id": row["record_id"],
         "task_type": row["task_type"],
         "task": row["task"],
@@ -452,6 +522,12 @@ def promote_path_answer(row: dict[str, Any]) -> dict[str, Any]:
         "generation_model": row.get("generation_model", ""),
         "deterministic_checks": {"passed": True, "issues": []},
     }
+    issues = promoted_path_issues(promoted, propositions)
+    promoted["deterministic_checks"] = {
+        "passed": not issues,
+        "issues": issues,
+    }
+    return promoted
 
 
 class SourceAblationAnswerGenerator(curator.LLM):

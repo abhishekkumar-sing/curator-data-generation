@@ -230,6 +230,36 @@ def judge_quotes_are_grounded(
     return True
 
 
+def recover_grounded_judge_quotes(
+    judge_quotes: list[str],
+    *,
+    answer_found_in_source: bool,
+    supported: bool,
+    source_text: str,
+    evidence_quotes: list[str],
+    maximum: int = 3,
+) -> tuple[list[str], bool]:
+    """Recover omitted judge witnesses from already-validated exact evidence.
+
+    This is intentionally unavailable when the independent judge did not find
+    or support the answer. It repairs only an empty witness list and retains
+    exact, source-grounded evidence; it never repairs a substantive verdict.
+    """
+    if judge_quotes or not answer_found_in_source or not supported:
+        return judge_quotes, False
+    recovered: list[str] = []
+    for quote in evidence_quotes:
+        if (
+            quote
+            and quote not in recovered
+            and judge_quotes_are_grounded([quote], source_text, evidence_quotes)
+        ):
+            recovered.append(quote)
+        if len(recovered) >= maximum:
+            break
+    return recovered, bool(recovered)
+
+
 def _has_pattern(text: str, patterns: tuple[str, ...]) -> bool:
     return any(re.search(pattern, text, flags=re.IGNORECASE) for pattern in patterns)
 
@@ -495,6 +525,30 @@ def validate_cross_record(record: dict[str, Any], documents: list[dict[str, Any]
     is_cot = record["task_type"] == "cross_document_qa_cot"
     if is_cot and (len(record.get("reasoning_steps", [])) < 2 or used_reasoning_sources != {"source_a", "source_b"}):
         reasons.append("cot_is_not_connected_to_both_sources")
+    if is_cot:
+        synthesis_steps = [
+            step
+            for step in steps
+            if step.get("operation")
+            in {
+                "compare",
+                "apply_condition",
+                "resolve_authority",
+                "resolve_time",
+                "combine",
+                "calculate",
+                "conclude",
+            }
+        ]
+        if not any(
+            {
+                str(evidence.get("source_id", ""))
+                for evidence in step.get("evidence", [])
+            }
+            == {"source_a", "source_b"}
+            for step in synthesis_steps
+        ):
+            reasons.append("cot_missing_two_source_synthesis_step")
     if not is_cot and record.get("reasoning_steps"):
         reasons.append("qa_must_not_include_reasoning_steps")
     return sorted(set(reasons))
