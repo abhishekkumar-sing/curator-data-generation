@@ -186,6 +186,62 @@ def ablation_trial_validation_issues(
     return sorted(set(issues))
 
 
+def adjudicate_ablation_trials(
+    answers: list[dict[str, Any]],
+    trials: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Require full claim coverage and loss of completeness for both single sources."""
+    trials_by_record: dict[str, dict[str, dict[str, Any]]] = {}
+    for trial in trials:
+        trials_by_record.setdefault(str(trial.get("record_id", "")), {})[
+            str(trial.get("variant", ""))
+        ] = trial
+    results = []
+    for answer in answers:
+        record_id = str(answer["record_id"])
+        variants = trials_by_record.get(record_id, {})
+        issues = []
+        if set(variants) != {"full", "source_a_only", "source_b_only"}:
+            issues.append("incomplete_ablation_variant_set")
+        required_ids = {
+            evidence["proposition_id"]
+            for claim in answer.get("claims", [])
+            for evidence in claim.get("evidence", [])
+        }
+        coverage: dict[str, list[str]] = {}
+        for variant in ("full", "source_a_only", "source_b_only"):
+            trial = variants.get(variant)
+            if trial is None:
+                coverage[variant] = []
+                continue
+            if not trial.get("deterministic_checks", {}).get("passed", False):
+                issues.append(f"{variant}_trial_invalid")
+            output = trial.get("trial_output", {})
+            covered = {
+                evidence["proposition_id"]
+                for claim in output.get("claims", [])
+                for evidence in claim.get("evidence", [])
+            }
+            coverage[variant] = sorted(covered)
+            if variant == "full":
+                if not output.get("answerable", False):
+                    issues.append("full_context_not_answerable")
+                if not required_ids.issubset(covered):
+                    issues.append("full_context_missing_required_claim_coverage")
+            elif output.get("answerable", False) and required_ids.issubset(covered):
+                issues.append(f"{variant}_fully_covers_answer")
+        results.append(
+            {
+                "record_id": record_id,
+                "required_proposition_ids": sorted(required_ids),
+                "covered_proposition_ids": coverage,
+                "passed": not issues,
+                "issues": sorted(set(issues)),
+            }
+        )
+    return results
+
+
 class SourceAblationAnswerGenerator(curator.LLM):
     """Run one blind answer attempt with only the declared visible evidence."""
 

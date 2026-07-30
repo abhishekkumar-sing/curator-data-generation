@@ -2218,9 +2218,9 @@ Implementation progress:
 - [x] Answer each candidate with both sources.
 - [x] Answer it again with only source A.
 - [x] Answer it again with only source B.
-- [ ] Measure required-claim coverage for all three outputs.
+- [x] Measure required-claim coverage for all three outputs.
 - [x] Store the actual ablation outputs and decisions.
-- [ ] Reject answerable records when either single-source output fully covers
+- [x] Reject answerable records when either single-source output fully covers
   the canonical answer.
 
 Acceptance criteria:
@@ -2229,6 +2229,18 @@ Acceptance criteria:
 - A-only misses at least one required source-B claim.
 - B-only misses at least one required source-A claim.
 - The judge reviews actual ablated outputs rather than predicting the result.
+
+Implementation addendum (2026-07-30):
+
+- Added deterministic three-variant adjudication keyed by stable record and
+  proposition IDs. It requires a valid full/A-only/B-only set, complete
+  required-claim coverage in the full trial, and rejects a single-source trial
+  that still covers the complete answer.
+- Persisted `path_ablation_adjudications.jsonl` and separate pass/fail counts.
+  Passing path answers remain pending an independent judge over the actual
+  trials; they are not silently added to training exports.
+- Offline application to Pilot 014 accepts 4/7 path answers and rejects 3/7
+  because their full-context trial abstained or missed required claims.
 
 #### Real source-ablation research record (2026-07-29)
 
@@ -4090,12 +4102,12 @@ Next research gates:
 - [x] Research and implement vLLM auto-tool `strict: true`; retain the
   exactly-one-call validator until forced named/required tool calling becomes
   available. Model-level yield remains a next-pilot validation item.
-- [ ] Research exact Gemma prompt counting and adaptive completion reservation;
+- [x] Research exact Gemma prompt counting and adaptive completion reservation;
   replace the over-conservative judge fallback without allowing API overflow.
-- [ ] Research Curator retry/failure-file semantics and persist only permanent
+- [x] Research Curator retry/failure-file semantics and persist only permanent
   failures in `failed_requests.jsonl`, while retaining attempt history
   separately.
-- [ ] Separate manifest terminal-request completeness from accepted-record
+- [x] Separate manifest terminal-request completeness from accepted-record
   yield and required-task coverage.
 
 ### Strict auto-tool schema research (2026-07-29)
@@ -4183,111 +4195,27 @@ Implementation result:
 - [ ] Run the next bounded Nemotron pilot and compare initial validation
   retries, permanent failures, and accepted yield with Pilot 012.
 
-## Capability research — local Ragas shadow evaluation
+## Pilot 014 core-dataset release remediation (2026-07-30)
 
-Status: research complete and approved for a bounded shadow implementation on
-2026-07-30. Ragas scores must not affect export acceptance until calibrated
-against deterministic checks and human review.
+Status: implemented and locally verified; the next model-backed run remains
+user-controlled.
 
-Research questions:
-
-- Can Ragas evaluate the existing QA and QA-with-rationale exports through the
-  private OpenAI-compatible Gemma endpoint without cloud services?
-- Which metrics add information beyond exact evidence, provenance, modality,
-  taxonomy, and source-ablation validation?
-- How should privacy, latency, caching, version drift, and score calibration be
-  controlled?
-
-Verified findings:
-
-- Ragas is Apache-2.0 and supports an explicitly supplied OpenAI-compatible
-  client and local `base_url`. Its current LLM factory uses Instructor-backed
-  structured output and supports persistent disk caching.
-- Source inspection used upstream commit
-  `298b68274234c060deacab3cf5fb52aa3a20e885` and the latest published release,
-  v0.4.3. Current Ragas requires `datasets>=4.0.0`, while Curator pins
-  `datasets^3.0.2`; installing Ragas into Curator's environment would therefore
-  create an unsafe dependency upgrade. The evaluator must be an isolated
-  project that communicates only through immutable JSONL artifacts.
-- The pipeline's `rag.jsonl` already provides question, answer, and contexts;
-  `eval.jsonl` provides question, reference answer, evidence, and metadata.
-  These map directly to Ragas response/retrieval/reference evaluation inputs
-  without discarding the existing record ID or provenance.
-- Faithfulness and factual correctness add useful model-based signals.
-  Ragas v0.4.3 `AnswerRelevancy` additionally requires an embeddings model, but
-  the configured private Gemma service is a chat-completions endpoint and no
-  private embedding endpoint has been verified. Do not silently call a public
-  embedding service. Use the LLM-only `AnswerAccuracy` metric initially and
-  add answer relevancy only after a separate private embedding profile is
-  configured and probed. Context precision/recall describe retrieval behavior and should not
-  be presented as generator-quality metrics when the contexts are curated
-  source passages rather than live ranked retrieval results.
-- Ragas metrics are primarily LLM-as-judge. Running several metrics through
-  the same Gemma endpoint does not create independent adjudication and cannot
-  replace exact-quote membership, offsets, proposition/source IDs, deontic
-  modality, deterministic numeric checks, real source ablation, or human
-  review.
-- Pilot-014 Gemma judge latency was high (QA median 246 seconds, p95 380).
-  A bounded stratified sample, persistent cache, explicit concurrency/timeout,
-  and at most three initial metrics are required.
-- Ragas enables anonymized usage tracking by default. Local-only operation
-  requires `RAGAS_DO_NOT_TRACK=true`; no hosted tracing or external embedding
-  service may be enabled.
-- DeepEval provides stronger pytest/CI ergonomics but substantially overlaps
-  Ragas for these initial metrics. Adding both now would duplicate judge calls
-  and dependencies without establishing independent evidence. Defer DeepEval
-  until a concrete regression-test requirement remains after the Ragas pilot.
-
-Pilot-014 baseline for calibration:
-
-- QA: 96 generated, 68 deterministic passes, and 59 final accepts (61.5%
-  end-to-end yield; 86.8% judge acceptance after deterministic validation).
-- QA-with-rationale: 27 generated, 12 deterministic passes, and 11 final
-  accepts (40.7% end-to-end yield; 91.7% judge acceptance after deterministic
-  validation).
-- All final QA and QA-with-rationale records received Gemma score 5, so the
-  existing judge score has no useful ranking resolution among accepted data.
-- Manual review found strong 3-4-step procedural rationales, but 3/11 accepted
-  rationale records cite identical evidence in every step and largely split a
-  single lookup into repetitive paraphrases. Ragas generic faithfulness may
-  confirm grounding but will not by itself detect this instructional
-  redundancy; retain/add a deterministic step-diversity metric.
-- The shortest accepted answer is the supported binary answer `No`; answer
-  length alone is therefore not a safe quality threshold.
-
-Decision:
-
-- [ ] Add Ragas as an optional evaluation dependency rather than a Curator
-  runtime dependency.
-- [ ] Implement a separate local-only shadow-evaluation command. It reads an
-  immutable completed run, never invokes generation, and never modifies
-  canonical/export files.
-- [ ] Evaluate a deterministic stratified sample containing QA and
-  QA-with-rationale plus accepted, deterministic-rejected, and judge-rejected
-  examples when compatible fields are available.
-- [ ] Start with faithfulness, factual correctness, and answer accuracy.
-  `AnswerRelevancy` remains disabled unless a separately configured private
-  embeddings endpoint passes preflight.
-  Persist per-record metric scores, reasons/errors, evaluator model/profile,
-  metric/version configuration, cache identity, and aggregate summaries.
-- [ ] Enforce `RAGAS_DO_NOT_TRACK=true`, private endpoint validation, explicit
-  Gemma profile selection, bounded concurrency/timeouts, and fail-closed
-  handling of missing or malformed metric results.
-- [ ] Add deterministic rationale step-diversity reporting alongside Ragas so
-  repetitive single-evidence “CoT” is visible.
-- [ ] Keep results shadow-only until a human-labelled calibration sample
-  establishes thresholds, disagreement behavior, and incremental value over
-  current validators.
-
-Primary sources accessed 2026-07-30:
-
-- Ragas repository and Apache-2.0 license:
-  https://github.com/vibrantlabsai/ragas
-- OpenAI-compatible local model configuration:
-  https://docs.ragas.io/en/stable/getstarted/quickstart/
-- Current metric catalogue:
-  https://docs.ragas.io/en/latest/concepts/metrics/available_metrics/
-- LLM factory and structured-output interface:
-  https://docs.ragas.io/en/stable/references/llms/
-- Persistent caching:
-  https://docs.ragas.io/en/stable/howtos/customizations/_caching/
+- Permanent `failed_requests.jsonl` construction now uses the terminal
+  `GenericResponse` state rather than application parse-row presence. Valid
+  zero-row responses and recovered retries are not mislabeled as provider
+  failures.
+- Single- and cross-document generators materialize an explicit
+  `empty_generation` terminal lineage row when a schema-valid batch contains
+  no examples.
+- The final manifest now reports `terminal_request_completeness` separately
+  from `quality_acceptance`. Deterministic and judge rejections reduce yield
+  without masquerading as missing requests.
+- QA-with-CoT and cross-document QA-with-CoT reject exact repeated reasoning
+  steps and cases where every step reuses the identical evidence set. Ordinary
+  QA behavior is unchanged.
+- Real source-ablation adjudication measures proposition-level material-claim
+  coverage over full, A-only, and B-only outputs. Passing path records still
+  require independent review of the actual trials before export.
+- Local verification passed 83 focused tests and Ruff checks without model
+  calls. A user-run full pipeline must confirm all four required task types,
+  terminal completeness, model yield, and human-reviewed quality.

@@ -555,14 +555,29 @@ class BaseRequestProcessor(ABC):
             logger.info("Creating a file with all failed requests")
             failed_requests_file = os.path.join(self.working_dir, "failed_requests.jsonl")
 
-            # Read the arrow dataset file to get all successful request indices
-            successful_indices = set()
-            try:
-                dataset = Dataset.from_file(dataset_file)
-                # Extract all the original row indices that were successfully processed
-                successful_indices = set(dataset["__original_row_idx"])
-            except Exception as e:
-                logger.warning(f"Error reading dataset file to extract successful indices: {e}")
+            # Classify terminal provider responses, not application parse output.
+            # A successful response may intentionally parse to zero rows, while
+            # a recovered retry must not remain in the permanent-failure file.
+            terminal_successful_indices = set()
+            response_files = glob.glob(os.path.join(self.working_dir, "responses_*.jsonl"))
+            terminal_by_index = {}
+            for response_file in sorted(response_files):
+                with open(response_file, "r") as f:
+                    for line in f:
+                        try:
+                            response_data = json.loads(line)
+                            request_data = response_data.get("generic_request", {})
+                            original_idx = request_data.get("original_row_idx")
+                            if original_idx is not None:
+                                terminal_by_index[original_idx] = response_data
+                        except (json.JSONDecodeError, AttributeError):
+                            continue
+            for original_idx, response_data in terminal_by_index.items():
+                if (
+                    response_data.get("response_errors") is None
+                    and response_data.get("response_message") is not None
+                ):
+                    terminal_successful_indices.add(original_idx)
 
             # Get all request files
             request_files = glob.glob(os.path.join(self.working_dir, "requests_*.jsonl"))
@@ -575,7 +590,10 @@ class BaseRequestProcessor(ABC):
                             try:
                                 request_data = json.loads(line.strip())
                                 original_idx = request_data.get("original_row_idx")
-                                if original_idx is not None and original_idx not in successful_indices:
+                                if (
+                                    original_idx is not None
+                                    and original_idx not in terminal_successful_indices
+                                ):
                                     failed_file.write(line)
                             except json.JSONDecodeError:
                                 continue

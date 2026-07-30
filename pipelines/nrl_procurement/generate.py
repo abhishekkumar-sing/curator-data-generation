@@ -45,6 +45,7 @@ from path_qa import (
     SourceAblationAnswerGenerator,
     VerifiedPathAnswerGenerator,
     VerifiedPathQuestionGenerator,
+    adjudicate_ablation_trials,
     build_ablation_trial_inputs,
     build_missing_hop_contrasts,
     false_premise_quarantine,
@@ -447,7 +448,20 @@ rationale shape, and every unanswerable record uses the required exact answer.
                     },
                 }
             )
-        return records
+        if records:
+            return records
+        return [
+            {
+                "parent_request_id": row["planned_request_id"],
+                "planned_task_type": row["planned_task_type"],
+                "terminal_state": "empty_generation",
+                "generation_model": self.model_name,
+                "deterministic_checks": {
+                    "passed": False,
+                    "issues": ["generator_returned_no_examples"],
+                },
+            }
+        ]
 
 
 class ProcurementJudge(curator.LLM):
@@ -1130,6 +1144,17 @@ def main() -> None:
                 if not row.get("deterministic_checks", {}).get("passed", False)
             ],
         )
+        ablation_adjudications = adjudicate_ablation_trials(
+            path_answers,
+            valid_ablation_trials,
+        )
+        _write_audit(
+            files_dir / "path_ablation_adjudications.jsonl",
+            ablation_adjudications,
+        )
+        ablation_passed_ids = {
+            row["record_id"] for row in ablation_adjudications if row["passed"]
+        }
         _write_audit(
             files_dir / "path_missing_hop_contrasts.jsonl",
             build_missing_hop_contrasts(path_questions),
@@ -1146,7 +1171,10 @@ def main() -> None:
             "questions_accepted": len(path_questions),
             "answers_accepted": len(path_answers),
             "accepted_for_training": 0,
-            "pending_source_ablation_and_judge": len(path_answers),
+            "real_source_ablation_passed": len(ablation_passed_ids),
+            "real_source_ablation_failed": len(path_answers)
+            - len(ablation_passed_ids),
+            "pending_independent_judge": len(ablation_passed_ids),
             "ablation_trials_planned": len(ablation_inputs),
             "ablation_prompt_rejected": len(ablation_prompt_rejected),
             "ablation_trials_valid": len(valid_ablation_trials),
@@ -1217,10 +1245,7 @@ def main() -> None:
         "judged": request_coverage(planned_single, generated if args.skip_judge else judged),
         "accepted": request_coverage(planned_single, single_accepted),
     }
-    _write_audit(
-        files_dir / "qa_rejected.jsonl",
-        deterministic_rejected
-        + (
+    qa_rejected = deterministic_rejected + (
             []
             if args.skip_judge
             else judge_prompt_rejected
@@ -1236,8 +1261,8 @@ def main() -> None:
                 ],
                 judged,
             )
-        ),
-    )
+        )
+    _write_audit(files_dir / "qa_rejected.jsonl", qa_rejected)
 
     cross_accepted: list[dict[str, Any]] = []
     cross_generated: list[dict[str, Any]] = []
@@ -1302,10 +1327,7 @@ def main() -> None:
         "judged": request_coverage(planned_cross, cross_generated if args.skip_judge else cross_judged),
         "accepted": request_coverage(planned_cross, cross_accepted),
     }
-    _write_audit(
-        files_dir / "cross_rejected.jsonl",
-        cross_deterministic_rejected
-        + (
+    cross_rejected = cross_deterministic_rejected + (
             []
             if args.skip_judge
             else cross_judge_prompt_rejected
@@ -1321,8 +1343,8 @@ def main() -> None:
                 ],
                 cross_judged,
             )
-        ),
-    )
+        )
+    _write_audit(files_dir / "cross_rejected.jsonl", cross_rejected)
 
     accepted.extend(cross_accepted)
     if not accepted:
@@ -1456,7 +1478,14 @@ def main() -> None:
 
     task_counts = {task_type: sum(row["task_type"] == task_type for row in accepted) for task_type in QUALITY.get("required_task_types", [])}
     required_missing = [task_type for task_type, count in task_counts.items() if count == 0]
-    incomplete_requests = single_coverage["accepted"].get("missing_request_ids", []) or cross_coverage["accepted"].get("missing_request_ids", [])
+    incomplete_requests = [
+        *single_coverage["generated"].get("missing_request_ids", []),
+        *cross_coverage["generated"].get("missing_request_ids", []),
+    ]
+    missing_judge_responses = sum(
+        "missing_judge_response" in row.get("judge", {}).get("issues", [])
+        for row in [*qa_rejected, *cross_rejected]
+    )
     status = "complete" if not required_missing and not incomplete_requests else "partial"
     final_manifest = _final_manifest(
         run_id=run_id,
@@ -1480,6 +1509,17 @@ def main() -> None:
     )
     final_manifest["required_task_type_counts"] = task_counts
     final_manifest["missing_required_task_types"] = required_missing
+    final_manifest["terminal_request_completeness"] = {
+        "complete": not incomplete_requests and missing_judge_responses == 0,
+        "missing_generation_request_ids": incomplete_requests,
+        "missing_judge_responses": missing_judge_responses,
+    }
+    final_manifest["quality_acceptance"] = {
+        "accepted_records": len(accepted),
+        "required_task_types_complete": not required_missing,
+    }
+    if missing_judge_responses:
+        final_manifest["status"] = "partial"
     write_manifest(files_dir, final_manifest)
 
     print(

@@ -50,6 +50,7 @@ from generate import (  # noqa: E402
 from path_qa import (  # noqa: E402
     SourceAblationAnswerGenerator,
     ablation_trial_validation_issues,
+    adjudicate_ablation_trials,
     answer_validation_issues,
     build_ablation_trial_inputs,
     build_missing_hop_contrasts,
@@ -356,6 +357,98 @@ def test_ablation_trial_validation_rejects_withheld_or_inexact_evidence() -> Non
         invalid_abstention,
         row,
     )
+
+
+def test_real_ablation_adjudication_requires_full_claim_coverage() -> None:
+    answer = {
+        "record_id": "record-1",
+        "claims": [
+            {"evidence": [{"proposition_id": "p1"}]},
+            {"evidence": [{"proposition_id": "p2"}]},
+        ],
+    }
+
+    def trial(variant: str, answerable: bool, proposition_ids: list[str]) -> dict:
+        return {
+            "record_id": "record-1",
+            "variant": variant,
+            "trial_output": {
+                "answerable": answerable,
+                "claims": (
+                    [
+                        {
+                            "evidence": [
+                                {"proposition_id": proposition_id}
+                                for proposition_id in proposition_ids
+                            ]
+                        }
+                    ]
+                    if proposition_ids
+                    else []
+                ),
+            },
+            "deterministic_checks": {"passed": True},
+        }
+
+    valid = [
+        trial("full", True, ["p1", "p2"]),
+        trial("source_a_only", False, []),
+        trial("source_b_only", True, ["p2"]),
+    ]
+    assert adjudicate_ablation_trials([answer], valid)[0]["passed"] is True
+
+    incomplete = [*valid]
+    incomplete[0] = trial("full", True, ["p1"])
+    result = adjudicate_ablation_trials([answer], incomplete)[0]
+    assert result["passed"] is False
+    assert "full_context_missing_required_claim_coverage" in result["issues"]
+
+
+def test_cot_rejects_repeated_steps_with_identical_evidence() -> None:
+    passage = "The buyer shall publish the notice and retain the record."
+    record = {
+        "task_type": "qa_cot",
+        "answerable": True,
+        "answer": "The buyer shall publish the notice and retain the record.",
+        "claims": [
+            {
+                "statement": "The buyer shall publish the notice and retain the record.",
+                "evidence": [{"quote": passage}],
+            }
+        ],
+        "evidence": [{"quote": passage}],
+        "reasoning_steps": [
+            {"statement": "Apply the stated rule.", "evidence_quotes": [passage]},
+            {"statement": "Apply the stated rule.", "evidence_quotes": [passage]},
+        ],
+    }
+    issues = validate_record(record, passage)
+    assert "cot_repeats_reasoning_step" in issues
+    assert "cot_reuses_identical_evidence_for_all_steps" in issues
+
+
+def test_empty_generation_materializes_terminal_lineage() -> None:
+    row = {
+        "planned_request_id": "single-request",
+        "planned_task_type": "qa",
+    }
+    result = ProcurementGenerator.parse(
+        SimpleNamespace(model_name="generator"),
+        row,
+        CandidateBatch(examples=[]),
+    )
+    assert result == [
+        {
+            "parent_request_id": "single-request",
+            "planned_task_type": "qa",
+            "terminal_state": "empty_generation",
+            "generation_model": "generator",
+            "deterministic_checks": {
+                "passed": False,
+                "issues": ["generator_returned_no_examples"],
+            },
+        }
+    ]
 
 
 def test_manifest_metadata_and_stable_chunk(tmp_path: Path) -> None:

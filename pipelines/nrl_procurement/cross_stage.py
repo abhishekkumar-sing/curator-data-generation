@@ -208,7 +208,20 @@ preserved authority and qualifications, and task_type-consistent rationale struc
                     },
                 }
             )
-        return results
+        if results:
+            return results
+        return [
+            {
+                "parent_request_id": row["planned_request_id"],
+                "planned_task_type": row["planned_task_type"],
+                "terminal_state": "empty_generation",
+                "generation_model": self.model_name,
+                "deterministic_checks": {
+                    "passed": False,
+                    "issues": ["generator_returned_no_examples"],
+                },
+            }
+        ]
 
 
 class CrossDocumentJudge(curator.LLM):

@@ -337,6 +337,19 @@ def validate_record(record: dict[str, Any], passage: str) -> list[str]:
         reasons.append("cot_requires_multiple_steps")
     if record["task_type"] == "qa" and steps:
         reasons.append("qa_must_not_include_reasoning_steps")
+    if len(steps) > 1:
+        normalized_steps = {
+            " ".join(str(step.get("statement", "")).lower().split())
+            for step in steps
+        }
+        if len(normalized_steps) != len(steps):
+            reasons.append("cot_repeats_reasoning_step")
+        evidence_sets = {
+            tuple(sorted(str(quote).strip() for quote in step.get("evidence_quotes", [])))
+            for step in steps
+        }
+        if len(evidence_sets) == 1:
+            reasons.append("cot_reuses_identical_evidence_for_all_steps")
     for step in steps:
         if any(quote not in passage for quote in step.get("evidence_quotes", [])):
             reasons.append("reasoning_uses_non_verbatim_evidence")
@@ -429,6 +442,28 @@ def validate_cross_record(record: dict[str, Any], documents: list[dict[str, Any]
             if _is_incomplete_evidence_fragment(quote):
                 reasons.append("incomplete_reasoning_evidence_fragment")
             used_reasoning_sources.add(source_id)
+    steps = record.get("reasoning_steps", [])
+    if len(steps) > 1:
+        normalized_steps = {
+            " ".join(str(step.get("statement", "")).lower().split())
+            for step in steps
+        }
+        if len(normalized_steps) != len(steps):
+            reasons.append("cot_repeats_reasoning_step")
+        evidence_sets = {
+            tuple(
+                sorted(
+                    (
+                        str(evidence.get("source_id", "")),
+                        str(evidence.get("quote", "")).strip(),
+                    )
+                    for evidence in step.get("evidence", [])
+                )
+            )
+            for step in steps
+        }
+        if len(evidence_sets) == 1:
+            reasons.append("cot_reuses_identical_evidence_for_all_steps")
     if record["answerable"] and used_claim_sources != {"source_a", "source_b"}:
         reasons.append("claims_do_not_require_both_sources")
     is_cot = record["task_type"] == "cross_document_qa_cot"
