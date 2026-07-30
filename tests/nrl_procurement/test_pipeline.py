@@ -1885,6 +1885,97 @@ def test_deterministic_rejections_are_materialized_for_audit() -> None:
     }
 
 
+def test_qa_evidence_offsets_resolve_against_original_source_chunk() -> None:
+    quote = "The buyer shall retain the record for 5 years."
+    row = {
+        **_cross_row("manual", "chunk-1", quote),
+        "source_passage": f"![page image](image.png)\n\n{quote}",
+        "planned_request_id": "single-request",
+        "planned_task_type": "qa",
+        "planned_answerable": True,
+    }
+    response = CandidateBatch.model_validate(
+        {
+            "examples": [
+                {
+                    "task_type": "qa",
+                    "task": "compliance_and_audit",
+                    "persona": "auditor",
+                    "question_type": "threshold",
+                    "question": "How long must the record be retained?",
+                    "answer": "The record must be retained for 5 years.",
+                    "answerable": True,
+                    "evidence": [{"quote": quote}],
+                    "claims": [
+                        {
+                            "statement": "The record must be retained for 5 years.",
+                            "evidence": [{"quote": quote}],
+                        }
+                    ],
+                    "reasoning_steps": [],
+                }
+            ]
+        }
+    )
+    result = ProcurementGenerator.parse(
+        SimpleNamespace(model_name="generator"),
+        row,
+        response,
+    )
+    assert len(result) == 1
+    record = result[0]
+    assert record["deterministic_checks"]["passed"] is True
+    evidence = record["evidence"][0]
+    assert evidence["start_char"] == len("![page image](image.png)\n\n")
+    assert row["source_passage"][evidence["start_char"] : evidence["end_char"]] == quote
+    assert record["citations"][0]["start_char"] == evidence["start_char"]
+
+
+def test_qa_evidence_rejects_unresolvable_citation_offset() -> None:
+    quote = "The buyer shall retain the record for 5 years."
+    row = {
+        **_cross_row("manual", "chunk-1", quote),
+        "source_passage": "This chunk text no longer contains the quoted sentence at all.",
+        "planned_request_id": "single-request",
+        "planned_task_type": "qa",
+        "planned_answerable": True,
+    }
+    response = CandidateBatch.model_validate(
+        {
+            "examples": [
+                {
+                    "task_type": "qa",
+                    "task": "compliance_and_audit",
+                    "persona": "auditor",
+                    "question_type": "threshold",
+                    "question": "How long must the record be retained?",
+                    "answer": "The record must be retained for 5 years.",
+                    "answerable": True,
+                    "evidence": [{"quote": quote}],
+                    "claims": [
+                        {
+                            "statement": "The record must be retained for 5 years.",
+                            "evidence": [{"quote": quote}],
+                        }
+                    ],
+                    "reasoning_steps": [],
+                }
+            ]
+        }
+    )
+    result = ProcurementGenerator.parse(
+        SimpleNamespace(model_name="generator"),
+        row,
+        response,
+    )
+    assert len(result) == 1
+    record = result[0]
+    assert record["deterministic_checks"]["passed"] is False
+    assert "citation_offset_unresolvable" in record["deterministic_checks"]["issues"]
+    assert record["evidence"][0]["start_char"] == -1
+    assert record["evidence"][0]["end_char"] == -1
+
+
 def test_drafting_seed_resolution_validation_and_compact_output(tmp_path: Path) -> None:
     seed_path = tmp_path / "drafting.jsonl"
     seed_path.write_text(

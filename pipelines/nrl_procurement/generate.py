@@ -539,11 +539,13 @@ rationale shape, and every unanswerable record uses the required exact answer.
             if draft["task"] not in TAXONOMY.get("tasks", []) or draft["persona"] not in TAXONOMY.get("personas", []):
                 reasons.append("unsupported_taxonomy_value")
             reasons.extend(validate_record(draft, row["passage"]))
-            reasons = sorted(set(reasons))
             evidence = []
+            source_text = row.get("source_passage", row["passage"])
             for item in draft["evidence"]:
                 quote = item["quote"]
-                start = row["passage"].find(quote)
+                start = source_text.find(quote)
+                if start < 0:
+                    reasons.append("citation_offset_unresolvable")
                 evidence.append(
                     {
                         "quote": quote,
@@ -551,9 +553,10 @@ rationale shape, and every unanswerable record uses the required exact answer.
                         "page": row["page"],
                         "section": row["section"],
                         "start_char": start,
-                        "end_char": start + len(quote),
+                        "end_char": start + len(quote) if start >= 0 else -1,
                     }
                 )
+            reasons = sorted(set(reasons))
             located_by_quote = {item["quote"]: item for item in evidence}
             draft["claims"] = [
                 {
