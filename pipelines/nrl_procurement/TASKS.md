@@ -2322,11 +2322,22 @@ Implementation progress (three-trial execution):
 
 Remaining P0.5 work:
 
-- Derive stable required-claim coverage from the canonical verified answer.
-- Independently adjudicate the three actual outputs and enforce the full/A/B
+- [x] Derive stable required-claim coverage from the canonical verified answer.
+- [x] Independently adjudicate the three actual outputs and enforce the full/A/B
   coverage decision.
-- Store the final coverage decision and promote only passing path records from
-  `accepted_for_training: 0`.
+- [x] Store the final coverage decision and promote only passing path records
+  into canonical cross-document exports.
+
+Implementation completion (2026-07-30):
+
+- The independent judge receives the persisted full/A-only/B-only outputs,
+  canonical claims, and grounded propositions. It is deliberately not shown
+  the deterministic pass/fail decision.
+- Promotion requires complete deterministic adjudication, identity-preserving
+  independent judgment, four required judge booleans, and the configured score
+  threshold. Missing, invalid, or rejected trials remain audit-only.
+- Promoted path answers use the same canonical contract and leakage-safe export
+  path as the original cross-document generator.
 
 Primary sources:
 
@@ -2352,13 +2363,13 @@ Primary sources:
 
 ### 6. Create a replayable claim and reasoning graph
 
-- [ ] Give every material answer claim a stable ID.
-- [ ] Give every evidence item a stable ID.
-- [ ] Add `input_claim_ids`, `output_claim_id`, and `evidence_refs` to each
+- [x] Give every material answer claim a stable ID.
+- [x] Give every evidence item a stable ID.
+- [x] Add `input_claim_ids`, `output_claim_id`, and `evidence_refs` to each
   reasoning step.
-- [ ] Verify that the graph is connected and acyclic.
-- [ ] Verify that the final answer is covered by terminal claims.
-- [ ] Derive QA and QA-with-rationale views from one canonical record.
+- [x] Verify that the graph is connected and acyclic.
+- [x] Verify that the final answer is covered by terminal claims.
+- [x] Derive QA and QA-with-rationale views from one canonical record.
 
 #### Release-gate research record (2026-07-30)
 
@@ -2584,8 +2595,8 @@ The manifest must report:
 - [ ] Add explicit held-out validation and test manuals to `config.yaml`.
 - [ ] Keep source chunks, section windows, path families, QA/CoT views, RAG
   variants, and distractor variants together.
-- [ ] Prevent question paraphrases from crossing splits.
-- [ ] Generate a leakage audit by source hash, manual, section, chunk, path,
+- [x] Prevent question paraphrases from crossing splits.
+- [x] Generate a leakage audit by source hash, manual, section, chunk, path,
   and normalized question.
 - [ ] Support multiple evaluation folds because the corpus contains only 19
   manuals.
@@ -2650,8 +2661,11 @@ Acceptance criteria:
 ### 14. Run and review a controlled pilot
 
 - [ ] Generate a stratified pilot across every relationship type.
-- [ ] Sample at least 100 accepted records for human review.
-- [ ] Review rejected samples to find overly strict gates.
+- [ ] Sample at least 100 accepted records for human review. A deterministic
+  review-template command is implemented; completion requires a run with at
+  least 100 accepted records and actual reviewer labels.
+- [ ] Review rejected samples to find overly strict gates. Rejected-record
+  sampling is implemented; completion requires actual reviewer labels.
 - [ ] Record inter-reviewer agreement where multiple reviewers are available.
 - [ ] Adjust thresholds only from recorded pilot evidence.
 
@@ -2997,7 +3011,7 @@ Observed under `data/`:
 - [ ] Assign `qa_cot` only to evidence windows with at least two connected
   material claims or operations. Never force a decorative rationale onto a
   direct lookup.
-- [ ] Validate every rationale step for an explicit operation, grounded inputs,
+- [x] Validate every rationale step for an explicit operation, grounded inputs,
   supported output, connectivity to adjacent steps, and contribution to the
   final answer.
 - [x] Keep single-document QA/CoT exports distinct from cross-document QA/CoT

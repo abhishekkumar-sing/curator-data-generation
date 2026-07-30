@@ -49,9 +49,11 @@ from generate import (  # noqa: E402
 )
 from path_qa import (  # noqa: E402
     SourceAblationAnswerGenerator,
+    SourceAblationJudge,
     ablation_trial_validation_issues,
     adjudicate_ablation_trials,
     answer_validation_issues,
+    build_ablation_judge_inputs,
     build_ablation_trial_inputs,
     build_missing_hop_contrasts,
     false_premise_quarantine,
@@ -71,7 +73,9 @@ from propositions import (  # noqa: E402
     read_cached_propositions,
     write_proposition_cache,
 )
+from provenance import build_reasoning_graph, leakage_audit  # noqa: E402
 from reasoning_paths import build_reasoning_paths, validate_reasoning_path  # noqa: E402
+from review import REVIEW_DIMENSIONS, prepare_review, validate_reviews  # noqa: E402
 from schemas import (  # noqa: E402
     CandidateBatch,
     CrossCandidateBatch,
@@ -87,6 +91,7 @@ from source_windows import (  # noqa: E402
     build_source_windows,
     resolve_component_references,
 )
+from validate_run import validate_run  # noqa: E402
 from validation import (  # noqa: E402
     deduplicate,
     judge_batch_identity_issues,
@@ -418,8 +423,16 @@ def test_cot_rejects_repeated_steps_with_identical_evidence() -> None:
         ],
         "evidence": [{"quote": passage}],
         "reasoning_steps": [
-            {"statement": "Apply the stated rule.", "evidence_quotes": [passage]},
-            {"statement": "Apply the stated rule.", "evidence_quotes": [passage]},
+            {
+                "operation": "lookup",
+                "statement": "Apply the stated rule.",
+                "evidence_quotes": [passage],
+            },
+            {
+                "operation": "lookup",
+                "statement": "Apply the stated rule.",
+                "evidence_quotes": [passage],
+            },
         ],
     }
     issues = validate_record(record, passage)
@@ -1732,10 +1745,12 @@ def test_cross_document_bundle_and_source_attribution() -> None:
         ],
         "reasoning_steps": [
             {
+                "operation": "lookup",
                 "statement": "Identify the tender requirement.",
                 "evidence": [{"source_id": "source_a", "quote": left_quote}],
             },
             {
+                "operation": "combine",
                 "statement": "Combine it with the submission method.",
                 "evidence": [{"source_id": "source_b", "quote": right_quote}],
             },
@@ -2402,8 +2417,36 @@ def test_exports_keep_qa_and_rationale_task_files_disjoint(tmp_path: Path) -> No
                 "question": "What is required?",
                 "answer": "The stated action is required.",
                 "answerable": True,
-                "reasoning_steps": ([{"statement": "Apply the stated rule."}] if task_type.endswith("_cot") else []),
-                "evidence": [],
+                "reasoning_steps": (
+                    [
+                        {
+                            "operation": "lookup",
+                            "statement": "Apply the stated rule.",
+                            "evidence_quotes": ["The stated action is required."],
+                        }
+                    ]
+                    if task_type.endswith("_cot")
+                    else []
+                ),
+                "claims": [
+                    {
+                        "statement": "The stated action is required.",
+                        "evidence": [
+                            {
+                                "manual_id": "manual",
+                                "chunk_id": f"chunk-{index}",
+                                "quote": "The stated action is required.",
+                            }
+                        ],
+                    }
+                ],
+                "evidence": [
+                    {
+                        "manual_id": "manual",
+                        "chunk_id": f"chunk-{index}",
+                        "quote": "The stated action is required.",
+                    }
+                ],
                 "question_type": "direct_fact",
                 **(
                     {
@@ -2434,7 +2477,163 @@ def test_exports_keep_qa_and_rationale_task_files_disjoint(tmp_path: Path) -> No
         assert text.count("\n") == 1
         assert list(json.loads(text))[-1] == "citations"
     for line in (tmp_path / "canonical.jsonl").read_text(encoding="utf-8").splitlines():
-        assert list(json.loads(line))[-1] == "citations"
+        assert json.loads(line)["reasoning_graph"]["validation"]["passed"]
+
+
+def test_reasoning_graph_is_stable_connected_and_terminal() -> None:
+    record = {
+        "record_id": "record-graph",
+        "answer": "Rule A and Rule B apply together.",
+        "claims": [
+            {
+                "statement": "Rule A applies.",
+                "evidence": [{"source_id": "source_a", "quote": "Rule A applies."}],
+            },
+            {
+                "statement": "Rule B applies.",
+                "evidence": [{"source_id": "source_b", "quote": "Rule B applies."}],
+            },
+        ],
+        "reasoning_steps": [
+            {
+                "operation": "combine",
+                "statement": "Combine both rules.",
+                "evidence": [
+                    {"source_id": "source_a", "quote": "Rule A applies."},
+                    {"source_id": "source_b", "quote": "Rule B applies."},
+                ],
+            }
+        ],
+    }
+    first = build_reasoning_graph(record)
+    second = build_reasoning_graph(record)
+    assert first == second
+    assert first["validation"] == {"passed": True, "issues": []}
+    assert len(first["terminal_claim_ids"]) == 1
+
+
+def test_leakage_audit_detects_question_and_chunk_across_splits() -> None:
+    rows = [
+        {
+            "record_id": "one",
+            "split": "train",
+            "question": "What rule applies?",
+            "source_chunk_ids": ["chunk-a"],
+        },
+        {
+            "record_id": "two",
+            "split": "test",
+            "question": "What rule applies!",
+            "source_chunk_ids": ["chunk-a"],
+        },
+    ]
+    audit = leakage_audit(rows)
+    assert not audit["passed"]
+    assert audit["collisions"]["chunk"]
+    assert audit["collisions"]["normalized_question"]
+
+
+def test_ablation_judge_reviews_only_complete_actual_trial_bundles() -> None:
+    answer = {
+        "record_id": "record-a",
+        "question": "How do A and B apply?",
+        "answer": "A and B apply.",
+        "propositions": [
+            {"proposition_id": "prop-a"},
+            {"proposition_id": "prop-b"},
+        ],
+        "claims": [
+            {
+                "statement": "A",
+                "evidence": [{"proposition_id": "prop-a", "quote": "A policy text."}],
+            },
+            {
+                "statement": "B",
+                "evidence": [{"proposition_id": "prop-b", "quote": "B policy text."}],
+            },
+        ],
+    }
+    trials = [
+        {
+            "record_id": "record-a",
+            "variant": variant,
+            "trial_output": {"answerable": variant == "full", "claims": []},
+        }
+        for variant in ("full", "source_a_only", "source_b_only")
+    ]
+    inputs = build_ablation_judge_inputs(
+        [answer],
+        trials,
+        [{"record_id": "record-a", "passed": True}],
+    )
+    assert len(inputs) == 1
+    assert set(inputs[0]["actual_trials"]) == {
+        "full",
+        "source_a_only",
+        "source_b_only",
+    }
+    prompt = object.__new__(SourceAblationJudge).prompt(inputs[0])
+    assert "ACTUAL OUTPUTS" in prompt
+
+
+def test_human_review_template_is_reproducible_and_never_self_certifies(
+    tmp_path: Path,
+) -> None:
+    files_dir = tmp_path / "files"
+    files_dir.mkdir()
+    (files_dir / "canonical.jsonl").write_text(
+        json.dumps({"record_id": "record-a", "question": "Question?"}) + "\n",
+        encoding="utf-8",
+    )
+    first = tmp_path / "first.jsonl"
+    second = tmp_path / "second.jsonl"
+    prepare_review(files_dir, first, accepted_count=1, rejected_count=0)
+    prepare_review(files_dir, second, accepted_count=1, rejected_count=0)
+    assert first.read_bytes() == second.read_bytes()
+    result = validate_reviews(first)
+    assert not result["passed"]
+    assert result["frozen_evaluation_complete"] is False
+    row = json.loads(first.read_text(encoding="utf-8"))
+    assert set(row["dimensions"]) == set(REVIEW_DIMENSIONS)
+    assert row["overall_accept"] is None
+
+
+def test_release_validation_requires_all_four_exports_and_human_review(
+    tmp_path: Path,
+) -> None:
+    files_dir = tmp_path / "files"
+    files_dir.mkdir()
+    (files_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "run_id": "run",
+                "status": "complete",
+                "terminal_request_completeness": {"complete": True},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (files_dir / "leakage_audit.json").write_text(
+        json.dumps({"passed": True}),
+        encoding="utf-8",
+    )
+    for filename in (
+        "qa_sft.jsonl",
+        "qa_cot_sft.jsonl",
+        "cross_document_qa_sft.jsonl",
+        "cross_document_qa_cot_sft.jsonl",
+    ):
+        (files_dir / filename).write_text("{}\n", encoding="utf-8")
+    (files_dir / "canonical.jsonl").write_text("{}\n" * 4, encoding="utf-8")
+    report = validate_run(files_dir)
+    assert not report["passed"]
+    assert report["export_counts"] == {
+        "qa": 1,
+        "qa_cot": 1,
+        "cross_document_qa": 1,
+        "cross_document_qa_cot": 1,
+    }
+    assert report["issues"] == ["human_review_not_supplied"]
 
 
 def test_run_layout_and_curator_cache_are_project_local(tmp_path: Path, monkeypatch) -> None:

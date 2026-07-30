@@ -9,6 +9,8 @@ import hashlib
 import json
 import os
 import re
+import subprocess
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -43,12 +45,15 @@ from reasoning_paths import build_reasoning_paths
 from source_windows import build_source_windows
 from path_qa import (
     SourceAblationAnswerGenerator,
+    SourceAblationJudge,
     VerifiedPathAnswerGenerator,
     VerifiedPathQuestionGenerator,
     adjudicate_ablation_trials,
+    build_ablation_judge_inputs,
     build_ablation_trial_inputs,
     build_missing_hop_contrasts,
     false_premise_quarantine,
+    promote_path_answer,
 )
 from prompt_budget import (
     configured_context_window,
@@ -78,6 +83,37 @@ RUN_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 CACHE_ROOT = (PROJECT_ROOT / CONFIG["curator"]["cache_dir"]).resolve()
 OUTPUT_ROOT = (PROJECT_ROOT / PATHS["output_root"]).resolve()
 _TOKENIZE_UNAVAILABLE: dict[tuple[str, str], str] = {}
+_RUN_STARTED_MONOTONIC: float | None = None
+_RUN_STARTED_AT: str | None = None
+
+
+def _code_revision() -> dict[str, Any]:
+    """Return reproducible revision metadata without failing outside Git."""
+    try:
+        revision = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=PROJECT_ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        dirty = bool(
+            subprocess.run(
+                ["git", "status", "--porcelain", "--untracked-files=no"],
+                cwd=PROJECT_ROOT,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+        )
+        return {"commit": revision, "dirty": dirty}
+    except (OSError, subprocess.CalledProcessError):
+        return {"commit": None, "dirty": None}
+
+
+def _configuration_fingerprint() -> str:
+    payload = json.dumps(CONFIG, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode()).hexdigest()
 
 
 def _run_layout(requested_run_id: str | None, now: datetime | None = None) -> tuple[str, Path]:
@@ -314,8 +350,10 @@ CONSTRAINTS
   evidence-linked operations for a scenario, temporal rule, condition, exception,
   procedure, or multi-section synthesis.
 - For qa_cot, return two to four concise teaching-rationale steps. Each step must
-  state an observable evidence-based inference and list the exact passage quotes
-  used in evidence_quotes. Do not expose private hidden chain-of-thought.
+  declare an operation, state an observable evidence-based inference, and list
+  the exact passage quotes used in evidence_quotes. Each step must add grounded
+  information used by a later step or the final answer.
+- Never provide private hidden chain-of-thought.
 - When planned answerable=false, generate a plausible question whose required
   fact is absent and choose its natural question_type from the allowed taxonomy.
   Set answerable=false, answer exactly
@@ -331,7 +369,8 @@ Return CandidateBatch.examples under the enforced response schema. Every example
 must contain task_type, task, persona, question_type, question, answer, answerable,
 claims, evidence, and reasoning_steps. Each claim contains one material statement
 and its exact evidence. Top-level evidence repeats the exact union of claim evidence
-for backward-compatible export. Rationale steps contain a concise statement and the
+for backward-compatible export. Rationale steps contain an explicit operation,
+concise statement, and the
 verbatim evidence_quotes supporting that statement.
 
 UNTRUSTED SOURCE METADATA
@@ -826,11 +865,31 @@ def _final_manifest(
         or {"single_document": 0, "cross_document": 0},
         "near_duplicates_removed": duplicates,
         "manuals": manuals,
+        "reproducibility": {
+            "code_revision": _code_revision(),
+            "configuration_sha256": _configuration_fingerprint(),
+            "started_at": _RUN_STARTED_AT,
+            "elapsed_seconds": (
+                round(time.monotonic() - _RUN_STARTED_MONOTONIC, 3)
+                if _RUN_STARTED_MONOTONIC is not None
+                else None
+            ),
+        },
+        "human_review": {
+            "required_accepted_records": 100,
+            "reviewed_accepted_records": 0,
+            "reviewed_rejected_records": 0,
+            "complete": False,
+            "note": "Human labels are external release evidence and are never inferred.",
+        },
     }
 
 
 def main() -> None:
     """Run single- and cross-document generation through verified exports."""
+    global _RUN_STARTED_AT, _RUN_STARTED_MONOTONIC
+    _RUN_STARTED_MONOTONIC = time.monotonic()
+    _RUN_STARTED_AT = datetime.now(timezone.utc).isoformat()
     parser = argparse.ArgumentParser()
     parser.add_argument("--source-dir", type=Path, default=PROJECT_ROOT / PATHS["source_dir"])
     parser.add_argument("--ocr-dir", type=Path, default=PROJECT_ROOT / PATHS["ocr_dir"])
@@ -895,6 +954,7 @@ def main() -> None:
     proposition_stats: dict[str, Any] = {"enabled": False}
     reasoning_path_stats: dict[str, Any] = {"enabled": False}
     path_qa_stats: dict[str, Any] = {"enabled": False}
+    promoted_path_records: list[dict[str, Any]] = []
     accepted_propositions: list[dict[str, Any]] = []
     accepted_paths: list[dict[str, Any]] = []
     proposition_config = CONFIG.get("propositions", {})
@@ -1155,6 +1215,40 @@ def main() -> None:
         ablation_passed_ids = {
             row["record_id"] for row in ablation_adjudications if row["passed"]
         }
+        ablation_judge_inputs = build_ablation_judge_inputs(
+            path_answers,
+            valid_ablation_trials,
+            ablation_adjudications,
+        )
+        ablation_judged: list[dict[str, Any]] = []
+        if ablation_judge_inputs and not args.skip_judge:
+            os.environ["HOSTED_VLLM_API_KEY"] = _model_settings(JUDGE)[2]
+            ablation_judged = SourceAblationJudge(**_llm_kwargs(JUDGE))(
+                Dataset.from_list(ablation_judge_inputs),
+                working_dir=_working_dir(run_id, "path_ablation_judge"),
+            ).dataset.to_list()
+        _write_audit(
+            files_dir / "path_ablation_judged.jsonl",
+            ablation_judged,
+        )
+        accepted_ablation_judgments = [
+            row for row in ablation_judged if row.get("judge", {}).get("accepted", False)
+        ]
+        answers_by_id = {row["record_id"]: row for row in path_answers}
+        for judgment in accepted_ablation_judgments:
+            answer = {
+                **answers_by_id[judgment["record_id"]],
+                "ablation": {
+                    "deterministic": judgment["deterministic_adjudication"],
+                    "independent_judge": judgment["judge"],
+                    "actual_trials": judgment["actual_trials"],
+                },
+            }
+            promoted_path_records.append(promote_path_answer(answer))
+        _write_audit(
+            files_dir / "path_promoted_canonical.jsonl",
+            promoted_path_records,
+        )
         _write_audit(
             files_dir / "path_missing_hop_contrasts.jsonl",
             build_missing_hop_contrasts(path_questions),
@@ -1170,11 +1264,15 @@ def main() -> None:
             "answer_prompt_budget_rejected": len(answer_prompt_budget_rejected),
             "questions_accepted": len(path_questions),
             "answers_accepted": len(path_answers),
-            "accepted_for_training": 0,
+            "accepted_for_training": len(promoted_path_records),
             "real_source_ablation_passed": len(ablation_passed_ids),
             "real_source_ablation_failed": len(path_answers)
             - len(ablation_passed_ids),
-            "pending_independent_judge": len(ablation_passed_ids),
+            "pending_independent_judge": len(ablation_passed_ids)
+            - len(accepted_ablation_judgments),
+            "independent_judge_accepted": len(accepted_ablation_judgments),
+            "independent_judge_rejected": len(ablation_judged)
+            - len(accepted_ablation_judgments),
             "ablation_trials_planned": len(ablation_inputs),
             "ablation_prompt_rejected": len(ablation_prompt_rejected),
             "ablation_trials_valid": len(valid_ablation_trials),
@@ -1347,6 +1445,7 @@ def main() -> None:
     _write_audit(files_dir / "cross_rejected.jsonl", cross_rejected)
 
     accepted.extend(cross_accepted)
+    accepted.extend(promoted_path_records)
     if not accepted:
         write_manifest(
             files_dir,

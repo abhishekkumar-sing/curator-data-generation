@@ -7,7 +7,12 @@ import json
 import re
 from typing import Any
 
-from schemas import AblationTrialDraft, PathAnswerDraft, PathQuestionBatch
+from schemas import (
+    AblationJudgeDecision,
+    AblationTrialDraft,
+    PathAnswerDraft,
+    PathQuestionBatch,
+)
 from settings import CONFIG
 
 from bespokelabs import curator
@@ -240,6 +245,213 @@ def adjudicate_ablation_trials(
             }
         )
     return results
+
+
+def build_ablation_judge_inputs(
+    answers: list[dict[str, Any]],
+    trials: list[dict[str, Any]],
+    adjudications: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Bundle only deterministically complete trials for independent review."""
+    answers_by_id = {str(row["record_id"]): row for row in answers}
+    trials_by_id: dict[str, dict[str, dict[str, Any]]] = {}
+    for row in trials:
+        trials_by_id.setdefault(str(row["record_id"]), {})[str(row["variant"])] = row
+    inputs = []
+    for adjudication in adjudications:
+        record_id = str(adjudication["record_id"])
+        if not adjudication.get("passed", False) or record_id not in answers_by_id:
+            continue
+        variants = trials_by_id.get(record_id, {})
+        if set(variants) != {"full", "source_a_only", "source_b_only"}:
+            continue
+        inputs.append(
+            {
+                "record_id": record_id,
+                "answer": answers_by_id[record_id],
+                "deterministic_adjudication": adjudication,
+                "actual_trials": {
+                    variant: variants[variant]["trial_output"]
+                    for variant in ("full", "source_a_only", "source_b_only")
+                },
+            }
+        )
+    return inputs
+
+
+class SourceAblationJudge(curator.LLM):
+    """Independently judge actual three-context outputs, never predicted removals."""
+
+    response_format = AblationJudgeDecision
+
+    def prompt(self, row: dict[str, Any]) -> str:
+        """Render the immutable actual-output review bundle."""
+        review = {
+            "record_id": row["record_id"],
+            "question": row["answer"]["question"],
+            "canonical_answer": row["answer"]["answer"],
+            "canonical_claims": row["answer"]["claims"],
+            "grounded_propositions": row["answer"]["propositions"],
+            "actual_outputs": row["actual_trials"],
+        }
+        return f"""TASK
+Review one completed source-ablation experiment. Judge only the immutable canonical
+answer, grounded propositions, and the three ACTUAL OUTPUTS. Do not predict what a
+model might have answered and do not use outside knowledge.
+
+Set full_context_supported=true only if the full output completely supports the
+canonical material claims. Set each source-only incomplete flag true only if that
+actual output fails to provide the complete canonical answer because the other
+proposition is unavailable. A refusal, malformed output, or generic limitation is
+not evidence of source necessity. Set comparison_valid=false for inconsistent
+standards, invalid trials, leaked withheld evidence, or any other confound.
+Score 4-5 only for a valid experiment satisfying all four booleans.
+
+Return record_id exactly as supplied.
+
+---BEGIN UNTRUSTED ABLATION BUNDLE---
+{json.dumps(review, ensure_ascii=False)}
+---END UNTRUSTED ABLATION BUNDLE---
+"""
+
+    def parse(
+        self,
+        row: dict[str, Any],
+        response: AblationJudgeDecision,
+    ) -> list[dict[str, Any]]:
+        """Attach an identity-checked, thresholded independent decision."""
+        decision = response.model_dump()
+        identity_ok = decision["record_id"] == row["record_id"]
+        accepted = (
+            identity_ok
+            and decision["full_context_supported"]
+            and decision["source_a_only_incomplete"]
+            and decision["source_b_only_incomplete"]
+            and decision["comparison_valid"]
+            and decision["score"] >= int(CONFIG.get("quality", {}).get("minimum_judge_score", 4))
+        )
+        return [
+            {
+                **row,
+                "judge": {
+                    **decision,
+                    "identity_preserved": identity_ok,
+                    "accepted": accepted,
+                    "model": self.model_name,
+                },
+            }
+        ]
+
+
+def promote_path_answer(row: dict[str, Any]) -> dict[str, Any]:
+    """Convert a judged path answer into the canonical cross-document contract."""
+    propositions = row["propositions"]
+    source_ids = {
+        proposition["proposition_id"]: f"source_{chr(97 + index)}"
+        for index, proposition in enumerate(propositions)
+    }
+    documents = []
+    for index, proposition in enumerate(propositions):
+        authority = proposition["authority"]
+        evidence = proposition["evidence"]
+        documents.append(
+            {
+                "source_id": f"source_{chr(97 + index)}",
+                "manual_id": authority["manual_id"],
+                "title": authority["manual_title"],
+                "issuing_organization": authority["issuing_organization"],
+                "as_of_date": authority["as_of_date"],
+                "chunk_id": evidence["chunk_id"],
+                "page": evidence.get("page", ""),
+                "section": evidence.get("section", ""),
+                "passage": evidence["quote"],
+            }
+        )
+    claims = []
+    evidence_rows = []
+    citations = []
+    for claim in row["claims"]:
+        claim_evidence = []
+        for evidence in claim["evidence"]:
+            proposition = next(
+                item
+                for item in propositions
+                if item["proposition_id"] == evidence["proposition_id"]
+            )
+            source_id = source_ids[evidence["proposition_id"]]
+            located = {
+                "source_id": source_id,
+                "proposition_id": evidence["proposition_id"],
+                "quote": evidence["quote"],
+            }
+            claim_evidence.append(located)
+            if located not in evidence_rows:
+                evidence_rows.append(located)
+            citations.append(
+                {
+                    "manual_id": proposition["authority"]["manual_id"],
+                    "manual_title": proposition["authority"]["manual_title"],
+                    "page": proposition["evidence"].get("page", ""),
+                    "section": proposition["evidence"].get("section", ""),
+                    "chunk_id": proposition["evidence"]["chunk_id"],
+                    "quote": evidence["quote"],
+                }
+            )
+        claims.append({"statement": claim["statement"], "evidence": claim_evidence})
+    reasoning_steps = []
+    if row["task_type"] == "cross_document_qa_cot":
+        for index, statement in enumerate(row.get("rationale_steps", [])):
+            proposition = propositions[min(index, len(propositions) - 1)]
+            reasoning_steps.append(
+                {
+                    "operation": (
+                        "lookup"
+                        if index < len(propositions)
+                        else "combine"
+                    ),
+                    "statement": statement,
+                    "evidence": [
+                        {
+                            "source_id": source_ids[proposition["proposition_id"]],
+                            "proposition_id": proposition["proposition_id"],
+                            "quote": proposition["evidence"]["quote"],
+                        }
+                    ],
+                }
+            )
+    relationship = {
+        "temporal_transition": "same_authority_temporal",
+        "comparison": "government_company_comparison",
+        "cross_domain_comparison": "company_cross_domain",
+        "bridge": "complementary_procedure",
+        "complementary_procedure": "complementary_procedure",
+        "exception_condition_interaction": "complementary_procedure",
+    }.get(row["path"]["relationship_type"], "complementary_procedure")
+    return {
+        "record_id": row["record_id"],
+        "task_type": row["task_type"],
+        "task": row["task"],
+        "persona": row["persona"],
+        "question_type": row["question_type"],
+        "question": row["question"],
+        "answer": row["answer"],
+        "answerable": True,
+        "claims": claims,
+        "evidence": evidence_rows,
+        "reasoning_steps": reasoning_steps,
+        "relationship_type": relationship,
+        "source_bundle_id": row["path_id"],
+        "path_id": row["path_id"],
+        "pair_id": row["path"].get("pair_id", ""),
+        "hop_count": 2,
+        "required_source_ids": ["source_a", "source_b"],
+        "source_documents": documents,
+        "source_chunk_ids": [document["chunk_id"] for document in documents],
+        "citations": citations,
+        "ablation": row["ablation"],
+        "generation_model": row.get("generation_model", ""),
+        "deterministic_checks": {"passed": True, "issues": []},
+    }
 
 
 class SourceAblationAnswerGenerator(curator.LLM):

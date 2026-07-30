@@ -351,6 +351,19 @@ def validate_record(record: dict[str, Any], passage: str) -> list[str]:
         if len(evidence_sets) == 1:
             reasons.append("cot_reuses_identical_evidence_for_all_steps")
     for step in steps:
+        if step.get("operation") not in {
+            "lookup",
+            "compare",
+            "apply_condition",
+            "resolve_authority",
+            "resolve_time",
+            "combine",
+            "calculate",
+            "conclude",
+        }:
+            reasons.append("cot_step_missing_or_invalid_operation")
+        if not step.get("evidence_quotes"):
+            reasons.append("cot_step_has_no_grounded_input")
         if any(quote not in passage for quote in step.get("evidence_quotes", [])):
             reasons.append("reasoning_uses_non_verbatim_evidence")
     return sorted(set(reasons))
@@ -425,6 +438,19 @@ def validate_cross_record(record: dict[str, Any], documents: list[dict[str, Any]
     for number in _unsupported_quantities(record["answer"], f"{claim_support}\n{metadata_support}"):
         reasons.append(f"unsupported_number:{number}")
     for step in record.get("reasoning_steps", []):
+        if step.get("operation") not in {
+            "lookup",
+            "compare",
+            "apply_condition",
+            "resolve_authority",
+            "resolve_time",
+            "combine",
+            "calculate",
+            "conclude",
+        }:
+            reasons.append("cot_step_missing_or_invalid_operation")
+        if not step.get("evidence"):
+            reasons.append("cot_step_has_no_grounded_input")
         step_support = " ".join(
             evidence.get("quote", "") for evidence in step.get("evidence", [])
         )

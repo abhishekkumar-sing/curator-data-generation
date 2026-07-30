@@ -115,6 +115,16 @@ class AnswerClaimDraft(BaseModel):
 
 
 class ReasoningStepDraft(BaseModel):
+    operation: Literal[
+        "lookup",
+        "compare",
+        "apply_condition",
+        "resolve_authority",
+        "resolve_time",
+        "combine",
+        "calculate",
+        "conclude",
+    ]
     statement: str = Field(min_length=8)
     evidence_quotes: list[str] = Field(default_factory=list)
 
@@ -207,6 +217,18 @@ class AblationTrialDraft(BaseModel):
     answer: str = ""
     claims: list[PathAnswerClaimDraft] = Field(default_factory=list)
     limitation_reason: str = ""
+
+
+class AblationJudgeDecision(BaseModel):
+    """Independent review of persisted full/A-only/B-only answer attempts."""
+
+    record_id: str
+    full_context_supported: bool
+    source_a_only_incomplete: bool
+    source_b_only_incomplete: bool
+    comparison_valid: bool
+    score: int = Field(ge=1, le=5)
+    issues: list[str] = Field(default_factory=list)
 
 
 class JudgeDecision(BaseModel):

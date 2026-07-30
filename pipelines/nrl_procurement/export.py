@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from jsonl_io import write_jsonl_rows
+from provenance import build_reasoning_graph, leakage_audit
 
 
 def assert_unique_record_ids(
@@ -145,6 +146,29 @@ def export_records(
     """Write canonical and task-specific datasets plus their manifest."""
     assert_unique_record_ids(records)
     output_dir.mkdir(parents=True, exist_ok=True)
+    graph_rejected = []
+    for row in records:
+        graph = build_reasoning_graph(row)
+        row["reasoning_graph"] = graph
+        if not graph["validation"]["passed"]:
+            graph_rejected.append(
+                {
+                    "record_id": row["record_id"],
+                    "issues": graph["validation"]["issues"],
+                }
+            )
+    if graph_rejected:
+        _write(output_dir / "reasoning_graph_rejected.jsonl", graph_rejected)
+        raise ValueError(
+            f"{len(graph_rejected)} accepted records have invalid reasoning graphs"
+        )
+    leakage = leakage_audit(records)
+    (output_dir / "leakage_audit.json").write_text(
+        json.dumps(leakage, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    if not leakage["passed"]:
+        raise ValueError("Cross-split leakage detected; see leakage_audit.json")
     _write(output_dir / "canonical.jsonl", records)
     qa, cot, rag, evaluation = [], [], [], []
     cross_qa, cross_cot = [], []
@@ -238,6 +262,8 @@ def export_records(
         for manual_id in [document["manual_id"] for document in row.get("source_documents", [])] or [row["manual_id"]]:
             counts[f"manual_{manual_id}"] += 1
     stats = {"records": len(records), **dict(sorted(counts.items()))}
+    stats["reasoning_graphs_valid"] = len(records)
+    stats["leakage_audit_passed"] = leakage["passed"]
     write_manifest(
         output_dir,
         {
