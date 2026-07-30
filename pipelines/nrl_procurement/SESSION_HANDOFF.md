@@ -49,6 +49,10 @@ At this handoff:
   configured through ignored `.env` variables rather than tracked files. The
   supplied endpoint was updated on 2026-07-30; verify `/models` before a live
   pilot because its initial probe was reset by the server.
+- OCR: Chandra uses the private vLLM endpoint configured through ignored
+  `OCR_MODEL`, `OCR_BASE_URL`, and `OCR_API_KEY` variables. The OCR command is
+  `chandra`; source PDFs are written to `data/interim/ocr` and that OCR output,
+  not direct PDF extraction, is what the generation pipeline consumes.
 
 Endpoint relocation may reuse a checkpoint only when the explicit deployment
 identity and semantic stage contract are unchanged. A model, prompt, schema,
