@@ -99,11 +99,11 @@ Research-gate acceptance criteria:
     --max-passes 0
   ```
 
-- [ ] Keep model identities, endpoints, credentials, generation parameters,
+- [x] Keep model identities, endpoints, credentials, generation parameters,
   structured-output modes, concurrency, retry counts, and rate limits in
   `.env`/`config.yaml`. CLI model/profile switches select configuration; they
   must not require code changes or expose API keys in manifests or logs.
-- [ ] Preserve independent generation and judge selection. If a shorthand such
+- [x] Preserve independent generation and judge selection. If a shorthand such
   as `--model nemotron120b` is supported, define whether it selects generation
   only or a named paired profile; never silently use the same endpoint as its
   own judge when independent judging is required.
@@ -118,9 +118,9 @@ Research-gate acceptance criteria:
   is exhausted; and record the exact stopping reason and pass metrics in the
   manifest. Resume must continue from persisted saturation state rather than
   reset the evidence window.
-- [ ] Generate a safe dynamic run ID when `--run-id` is omitted, while allowing
+- [x] Generate a safe dynamic run ID when `--run-id` is omitted, while allowing
   an explicit run ID for reproducible pilots and resumptions.
-- [ ] Preserve local-only operation: Curator Viewer and telemetry remain off,
+- [x] Preserve local-only operation: Curator Viewer and telemetry remain off,
   source content goes only to configured private endpoints, caches remain under
   `.curator_working/<run-id>/<stage>`, and outputs remain under
   `outputs/<run-id>/files`.
@@ -2569,13 +2569,13 @@ Acceptance criteria:
 ### 8. Add complete rejection and lineage auditing
 
 - [ ] Write source bundles and proposition sets.
-- [ ] Write reasoning-path candidates.
-- [ ] Write raw generation candidates.
-- [ ] Write deterministic rejections.
-- [ ] Write source-ablation rejections.
-- [ ] Write judge rejections.
+- [x] Write reasoning-path candidates.
+- [x] Write raw generation candidates.
+- [x] Write deterministic rejections.
+- [x] Write source-ablation rejections.
+- [x] Write judge rejections.
 - [ ] Write duplicate and best-of-N rejections.
-- [ ] Write accepted canonical audit records.
+- [x] Write accepted canonical audit records.
 - [ ] Write forward lineage from source bundle to every derived record.
 - [ ] Produce pair-level coverage statistics.
 
@@ -2614,8 +2614,8 @@ Acceptance criteria:
 
 - [ ] Add an independent procurement task-classification judge.
 - [ ] Add an independent grounding and qualification judge.
-- [ ] Keep the specialized cross-document and source-ablation judge.
-- [ ] Prefer a judge model distinct from the generator.
+- [x] Keep the specialized cross-document and source-ablation judge.
+- [x] Prefer a judge model distinct from the generator.
 - [ ] Record when the same model is reused for a pilot.
 - [ ] Add bounded rescue behavior for incomplete structured outputs.
 
@@ -3006,7 +3006,7 @@ Observed under `data/`:
 
 #### QA and rationale contracts
 
-- [ ] Plan `qa` and `qa_cot` separately. Do not depend on the generator to
+- [x] Plan `qa` and `qa_cot` separately. Do not depend on the generator to
   choose the run's task distribution.
 - [ ] Assign `qa_cot` only to evidence windows with at least two connected
   material claims or operations. Never force a decorative rationale onto a
@@ -3042,7 +3042,7 @@ Observed under `data/`:
 
 #### Completeness, recovery, and judging
 
-- [ ] Track expected request IDs through generation, parse, deterministic
+- [x] Track expected request IDs through generation, parse, deterministic
   validation, judge, and export. No requested row may silently disappear.
 - [ ] Quarantine malformed/missing outputs with exact failure class and raw
   cache lineage.
@@ -4298,3 +4298,40 @@ user-controlled.
 - Local verification passed 83 focused tests and Ruff checks without model
   calls. A user-run full pipeline must confirm all four required task types,
   terminal completeness, model yield, and human-reviewed quality.
+
+### Stale-checkbox reconciliation (2026-07-30)
+
+The following previously unchecked requirements are now marked complete from
+direct implementation and regression-test evidence rather than pilot yield:
+
+- Configuration-backed generation/judge profiles, secret-free manifests, and
+  enforced generator/judge independence.
+- Safe generated or explicit run IDs, private-endpoint enforcement, disabled
+  viewer/telemetry, project-local caches, and immutable run output layout.
+- Deterministic separate planning for QA versus QA-with-rationale, including
+  cross-document variants.
+- Raw single/cross generation audits, deterministic rejection files,
+  source-ablation rejection/adjudication files, judge rejection files, and
+  accepted canonical audit records.
+- Expected request lineage through generation, validation, judging, and
+  export, including path-question, path-answer, ablation-trial, and
+  ablation-judge terminal accounting.
+- Content-addressed record/claim/evidence/step identities, canonical reasoning
+  graphs, leakage audits, connected-component splitting, task-specific export
+  reconciliation, and post-retry failure classification.
+
+Items deliberately left open because their wording exceeds the current
+implementation:
+
+- Representative selection is deterministic and diversity-first, but is not
+  the requested strict round-robin algorithm and does not yet guarantee every
+  section/content stratum.
+- Proposition, reasoning-path, and ablation artifacts exist, but a dedicated
+  persisted source-bundle file and one complete forward-lineage table still do
+  not.
+- Duplicate removal is implemented, but best-of-N ranking and its rejection
+  artifact are not.
+- Connected split assignment and leakage auditing exist, but authored held-out
+  manuals, all derived RAG/distractor variants, and multiple folds do not.
+- Terminal-lineage code is complete, while the acceptance checkbox requiring
+  every request to be terminal remains an empirical run gate.
