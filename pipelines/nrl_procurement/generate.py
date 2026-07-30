@@ -244,6 +244,10 @@ def _llm_kwargs(profile: dict[str, Any]) -> dict[str, Any]:
             "max_tokens_per_minute": profile["max_tokens_per_minute"],
             "require_all_responses": False,
             "structured_output_mode": profile.get("structured_output_mode", "auto"),
+            "dereference_tool_schema": profile.get(
+                "dereference_tool_schema",
+                False,
+            ),
         },
     }
 

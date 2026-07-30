@@ -7,7 +7,10 @@ from bespokelabs.curator.request_processor.online import (
     litellm_online_request_processor,
 )
 from bespokelabs.curator.request_processor.online.base_online_request_processor import TokenLimitStrategy
-from bespokelabs.curator.request_processor.online.litellm_online_request_processor import LiteLLMOnlineRequestProcessor
+from bespokelabs.curator.request_processor.online.litellm_online_request_processor import (
+    LiteLLMOnlineRequestProcessor,
+    dereference_json_schema,
+)
 from bespokelabs.curator.types.generic_request import GenericRequest
 from bespokelabs.curator.types.prompt import File, _MultiModalPrompt
 from bespokelabs.curator.types.token_usage import _TokenUsage
@@ -67,7 +70,14 @@ def test_auto_tool_mode_builds_and_validates_one_schema_tool():
         "messages": [{"role": "user", "content": "return a probe"}],
         "temperature": 1.0,
     }
-    request = LiteLLMOnlineRequestProcessor._auto_tool_request(
+    processor = LiteLLMOnlineRequestProcessor(
+        OnlineRequestProcessorConfig(
+            model="hosted_vllm/private-model",
+            structured_output_mode="tools_auto",
+            dereference_tool_schema=True,
+        )
+    )
+    request = processor._auto_tool_request(
         api_request,
         ProbeResponse,
     )
@@ -79,8 +89,11 @@ def test_auto_tool_mode_builds_and_validates_one_schema_tool():
     assert function["strict"] is True
     assert parameters["additionalProperties"] is False
     assert parameters["required"] == ["value", "count", "nested"]
-    assert parameters["$defs"]["NestedProbe"]["additionalProperties"] is False
-    assert parameters["$defs"]["NestedProbe"]["required"] == ["label", "notes"]
+    assert "$defs" not in parameters
+    nested = parameters["properties"]["nested"]
+    assert "$ref" not in nested
+    assert nested["additionalProperties"] is False
+    assert nested["required"] == ["label", "notes"]
     assert request["messages"][0]["role"] == "system"
     assert api_request["messages"] == [
         {"role": "user", "content": "return a probe"}
@@ -136,6 +149,44 @@ def test_auto_tool_mode_builds_and_validates_one_schema_tool():
             completion,
             ProbeResponse,
         )
+
+
+def test_auto_tool_schema_dereference_is_opt_in():
+    class NestedProbe(BaseModel):
+        label: str
+
+    class ProbeResponse(BaseModel):
+        nested: NestedProbe
+
+    processor = LiteLLMOnlineRequestProcessor(
+        OnlineRequestProcessorConfig(
+            model="hosted_vllm/private-model",
+            structured_output_mode="tools_auto",
+        )
+    )
+    request = processor._auto_tool_request(
+        {"messages": [{"role": "user", "content": "probe"}]},
+        ProbeResponse,
+    )
+
+    parameters = request["tools"][0]["function"]["parameters"]
+    assert "$defs" in parameters
+    assert parameters["properties"]["nested"]["$ref"] == "#/$defs/NestedProbe"
+
+
+def test_dereference_json_schema_rejects_recursive_refs():
+    schema = {
+        "$defs": {
+            "Node": {
+                "type": "object",
+                "properties": {"child": {"$ref": "#/$defs/Node"}},
+            }
+        },
+        "$ref": "#/$defs/Node",
+    }
+
+    with pytest.raises(ValueError, match="Recursive schema"):
+        dereference_json_schema(schema)
 
 
 def test_multimodal_support_falls_back_for_claude_aliases(monkeypatch):

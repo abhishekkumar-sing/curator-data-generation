@@ -12,7 +12,7 @@ from typing import Any
 from datasets import Dataset
 from jsonl_io import write_jsonl_rows
 
-RESUME_SCHEMA_VERSION = "nrl-resume-v1"
+RESUME_SCHEMA_VERSION = "nrl-resume-v2"
 
 
 def _canonical_hash(value: Any) -> str:
@@ -44,7 +44,7 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
 
 
 def pipeline_source_fingerprint(pipeline_dir: Path) -> str:
-    """Hash relevant Python sources so helper-validator changes invalidate work."""
+    """Hash Python sources for producer provenance and partial-cache isolation."""
     files = sorted(pipeline_dir.glob("*.py"))
     payload = [
         {
@@ -174,11 +174,11 @@ class ResumeManager:
         }
 
     def _contract_hash(self, stage: str) -> str:
+        """Hash stable data/config semantics, independently of source revision."""
         return _canonical_hash(
             {
                 "schema_version": RESUME_SCHEMA_VERSION,
                 "stage": stage,
-                "pipeline_source_sha256": self.source_hash,
                 "config_sha256": self.config_hash,
             }
         )
@@ -191,8 +191,42 @@ class ResumeManager:
                 "role": role,
                 "model": self.model_identities[role],
                 "contract_sha256": self._contract_hash(stage),
+                # Never combine an incomplete Curator response cache across
+                # code revisions. Completed immutable checkpoints are handled
+                # separately and retain their original producer provenance.
+                "pipeline_source_sha256": self.source_hash,
             }
         )
+
+    def _completed_checkpoint(
+        self,
+        *,
+        stage: str,
+        logical_input_hash: str,
+        preferred_dir: Path,
+    ) -> tuple[Path, dict[str, Any]] | None:
+        """Find an immutable completed artifact, including v1 checkpoints."""
+        candidates = [preferred_dir]
+        stage_root = self.run_root / "checkpoints" / stage
+        if stage_root.is_dir():
+            candidates.extend(
+                path.parent
+                for path in sorted(stage_root.glob("*/metadata.json"))
+                if path.parent != preferred_dir
+            )
+        for checkpoint_dir in candidates:
+            data_path = checkpoint_dir / "records.jsonl"
+            metadata_path = checkpoint_dir / "metadata.json"
+            if not data_path.is_file() or not metadata_path.is_file():
+                continue
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            if (
+                metadata.get("status") == "complete"
+                and metadata.get("stage") == stage
+                and metadata.get("input_sha256") == logical_input_hash
+            ):
+                return checkpoint_dir, metadata
+        return None
 
     def execute_llm_stage(
         self,
@@ -215,21 +249,23 @@ class ResumeManager:
         checkpoint_dir = self.run_root / "checkpoints" / stage / checkpoint_key
         data_path = checkpoint_dir / "records.jsonl"
         metadata_path = checkpoint_dir / "metadata.json"
-        if (
-            stage not in self.refresh_stages
-            and data_path.is_file()
-            and metadata_path.is_file()
-        ):
-            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-            if (
-                metadata.get("status") == "complete"
-                and metadata.get("input_sha256") == logical_input_hash
-                and metadata.get("contract_sha256") == contract_hash
-            ):
-                rows = _read_jsonl(data_path)
+        if stage not in self.refresh_stages:
+            completed = self._completed_checkpoint(
+                stage=stage,
+                logical_input_hash=logical_input_hash,
+                preferred_dir=checkpoint_dir,
+            )
+            if completed is not None:
+                completed_dir, metadata = completed
+                rows = _read_jsonl(completed_dir / "records.jsonl")
                 self.stage_events[stage] = {
                     "status": "reused_checkpoint",
-                    "checkpoint_key": checkpoint_key,
+                    "checkpoint_key": completed_dir.name,
+                    "compatibility": (
+                        "current_contract"
+                        if completed_dir == checkpoint_dir
+                        else "source_independent_completed_artifact"
+                    ),
                     "producer": metadata.get("producer"),
                     "records": len(rows),
                 }
@@ -267,6 +303,7 @@ class ResumeManager:
                 "role": role,
                 "model_identity": self.model_identities[role],
                 "stage_fingerprint": stage_fingerprint,
+                "pipeline_source_sha256": self.source_hash,
             },
         }
         _atomic_json(metadata_path, metadata)

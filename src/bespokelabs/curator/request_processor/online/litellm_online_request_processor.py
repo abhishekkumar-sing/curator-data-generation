@@ -1,3 +1,4 @@
+import copy
 import datetime
 import json
 import time
@@ -35,9 +36,63 @@ _ANTHROPIC_IMAGE_TOKEN_ESTIMATE = 1024
 _ANTHROPIC_DOCUMENT_TOKEN_ESTIMATE = 2048
 
 
-def build_auto_tool_request(api_request: dict, response_model) -> dict:
+def dereference_json_schema(schema: dict) -> dict:
+    """Inline local $defs references, rejecting unsupported or recursive refs."""
+    schema_copy = copy.deepcopy(schema)
+    definitions = schema_copy.get("$defs", {})
+
+    def resolve(node, seen: frozenset[str]):
+        if isinstance(node, dict):
+            if "$ref" in node:
+                reference = node["$ref"]
+                prefix = "#/$defs/"
+                if not reference.startswith(prefix):
+                    raise ValueError(f"Unsupported $ref target: {reference}")
+                name = reference[len(prefix) :]
+                if name in seen:
+                    raise ValueError(
+                        f"Recursive schema at {name!r} cannot be fully inlined"
+                    )
+                if name not in definitions:
+                    raise KeyError(
+                        f"$ref {reference!r} has no matching entry in $defs"
+                    )
+                resolved = resolve(definitions[name], seen | {name})
+                siblings = {
+                    key: resolve(value, seen)
+                    for key, value in node.items()
+                    if key != "$ref"
+                }
+                return {**resolved, **siblings}
+            return {
+                key: resolve(value, seen)
+                for key, value in node.items()
+                if key != "$defs"
+            }
+        if isinstance(node, list):
+            return [resolve(item, seen) for item in node]
+        return node
+
+    return resolve(schema_copy, frozenset())
+
+
+def build_auto_tool_request(
+    api_request: dict,
+    response_model,
+    *,
+    dereference_schema: bool = False,
+) -> dict:
     """Build the exact single-tool request used by auto-only servers."""
     tool_name = response_model.__name__
+    tool = pydantic_function_tool(
+        response_model,
+        name=tool_name,
+        description=f"Return one validated {tool_name} structured response.",
+    )
+    if dereference_schema:
+        tool["function"]["parameters"] = dereference_json_schema(
+            tool["function"]["parameters"]
+        )
     return {
         **api_request,
         "messages": [
@@ -51,13 +106,7 @@ def build_auto_tool_request(api_request: dict, response_model) -> dict:
             },
             *api_request["messages"],
         ],
-        "tools": [
-            pydantic_function_tool(
-                response_model,
-                name=tool_name,
-                description=f"Return one validated {tool_name} structured response.",
-            )
-        ],
+        "tools": [tool],
         "tool_choice": "auto",
     }
 
@@ -115,13 +164,17 @@ class LiteLLMOnlineRequestProcessor(BaseOnlineRequestProcessor):
             assert config.max_input_tokens_per_minute is None, "`max_input_tokens_per_minute` cannot be used with `combined` token strategy"
             assert config.max_output_tokens_per_minute is None, "`max_output_tokens_per_minute` cannot be used with `combined` token strategy"
 
-    @staticmethod
     def _auto_tool_request(
+        self,
         api_request: dict,
         response_model,
     ) -> dict:
         """Build a single-tool request for servers that support auto only."""
-        return build_auto_tool_request(api_request, response_model)
+        return build_auto_tool_request(
+            api_request,
+            response_model,
+            dereference_schema=self.config.dereference_tool_schema,
+        )
 
     @staticmethod
     def _parse_auto_tool_completion(completion_obj, response_model):

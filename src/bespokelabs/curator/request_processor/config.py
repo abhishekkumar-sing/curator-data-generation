@@ -112,6 +112,7 @@ class OnlineRequestProcessorConfig(RequestProcessorConfig):
     structured_output_mode: t.Literal[
         "auto", "tools", "tools_auto", "json_schema", "json", "md_json"
     ] = "auto"
+    dereference_tool_schema: bool = False
 
 
 class OfflineRequestProcessorConfig(RequestProcessorConfig):
@@ -167,6 +168,7 @@ class OnlineBackendParams(BaseBackendParams, total=False):
     structured_output_mode: t.Literal[
         "auto", "tools", "tools_auto", "json_schema", "json", "md_json"
     ]
+    dereference_tool_schema: t.Optional[bool]
 
 
 class BatchBackendParams(BaseBackendParams, total=False):

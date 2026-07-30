@@ -12,6 +12,7 @@ PIPELINE = Path(__file__).resolve().parents[2] / "pipelines" / "nrl_procurement"
 sys.path.insert(0, str(PIPELINE))
 
 import generate as generation_pipeline  # noqa: E402
+import resume as resume_module  # noqa: E402
 from corpus import (  # noqa: E402
     corpus_quality_report,
     generation_text,
@@ -2831,6 +2832,105 @@ def test_transport_only_change_reuses_partial_cache_identity(
     )
     second.start()
     assert second._stage_fingerprint("generation", "generation") == old_fingerprint
+
+
+def test_completed_stage_survives_pipeline_source_change(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    first = _resume_manager(
+        tmp_path,
+        monkeypatch,
+        generation_model="model-a",
+        generation_url="http://10.0.0.1:8000/v1",
+        generation_deployment="deployment-a",
+    )
+    first.start()
+    expected = [{"record_id": "immutable-result"}]
+    calls: list[str] = []
+    assert first.execute_llm_stage(
+        stage="generation",
+        role="generation",
+        llm=_FakeStageLLM(expected, calls),
+        inputs=[{"planned_request_id": "one"}],
+    ) == expected
+    first.finish("partial")
+
+    pipeline_source = tmp_path / "pipeline" / "stage.py"
+    pipeline_source.write_text("VERSION = 2\n", encoding="utf-8")
+    second = _resume_manager(
+        tmp_path,
+        monkeypatch,
+        generation_model="model-a",
+        generation_url="http://10.0.0.1:8000/v1",
+        generation_deployment="deployment-a",
+    )
+    second.start()
+    assert second.execute_llm_stage(
+        stage="generation",
+        role="generation",
+        llm=_FakeStageLLM([], calls, fail=True),
+        inputs=[{"planned_request_id": "one"}],
+    ) == expected
+    assert len(calls) == 1
+    assert (
+        second.summary()["stage_events"]["generation"]["compatibility"]
+        == "current_contract"
+    )
+
+
+def test_v1_completed_checkpoint_is_reused_after_resume_contract_upgrade(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    manager = _resume_manager(
+        tmp_path,
+        monkeypatch,
+        generation_model="model-a",
+        generation_url="http://10.0.0.1:8000/v1",
+        generation_deployment="deployment-a",
+    )
+    manager.start()
+    inputs = [{"planned_request_id": "one"}]
+    input_hash = resume_module._canonical_hash(resume_module._checkpoint_input(inputs))
+    legacy_dir = (
+        tmp_path
+        / "outputs"
+        / "same-run"
+        / "checkpoints"
+        / "generation"
+        / "legacy-v1-key"
+    )
+    legacy_dir.mkdir(parents=True)
+    (legacy_dir / "records.jsonl").write_text(
+        '{"record_id":"legacy"}\n',
+        encoding="utf-8",
+    )
+    (legacy_dir / "metadata.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "nrl-resume-v1",
+                "status": "complete",
+                "stage": "generation",
+                "input_sha256": input_hash,
+                "contract_sha256": "old-source-dependent-contract",
+                "producer": {"pipeline_source_sha256": "old-source"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = manager.execute_llm_stage(
+        stage="generation",
+        role="generation",
+        llm=_FakeStageLLM([], [], fail=True),
+        inputs=inputs,
+    )
+    assert result == [{"record_id": "legacy"}]
+    assert (
+        manager.summary()["stage_events"]["generation"]["compatibility"]
+        == "source_independent_completed_artifact"
+    )
 
 
 def test_refresh_stage_preserves_checkpoint_history_and_redacts_secrets(

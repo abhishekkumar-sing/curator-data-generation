@@ -475,6 +475,7 @@ class BaseRequestProcessor(ABC):
         failed_responses_count = 0
         provider_success_count = 0
         parsed_rows_count = 0
+        parsed_rows: list[dict] = []
         error_sample = []
         dataset_file = os.path.join(self.working_dir, f"{parse_func_hash}.arrow")
         from datasets.arrow_writer import ArrowWriter
@@ -515,7 +516,7 @@ class BaseRequestProcessor(ABC):
                                 raise ValueError(f"Got empty row {row} from `parse_func`. {error_help}")
                             # Add the original row index to the row so that we can sort by it later.
                             row["__original_row_idx"] = response.generic_request.original_row_idx
-                            writer.write(row)
+                            parsed_rows.append(row)
                             parsed_rows_count += 1
 
             logger.info(f"Read {total_responses_count} responses.")
@@ -543,6 +544,16 @@ class BaseRequestProcessor(ABC):
                 )
                 return Dataset.from_list([])
             else:
+                # ArrowWriter fixes its schema from the first row and raises a
+                # KeyError when a later valid row intentionally has fewer
+                # columns (for example, an empty-generation lineage marker).
+                # Normalize only missing keys to null; type mismatches still
+                # fail normally instead of being silently coerced.
+                all_columns = set().union(*(row.keys() for row in parsed_rows))
+                for row in parsed_rows:
+                    writer.write(
+                        {column: row.get(column) for column in all_columns}
+                    )
                 logger.info("Finalizing writer")
                 writer.finalize()
 

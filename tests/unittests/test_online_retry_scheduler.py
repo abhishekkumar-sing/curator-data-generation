@@ -351,3 +351,71 @@ def test_all_filtered_provider_responses_return_empty_dataset(tmp_path) -> None:
 
     assert dataset.to_list() == []
     assert not (tmp_path / "filtered.arrow").exists()
+
+
+def test_dataset_writer_normalizes_missing_columns_between_valid_rows(
+    tmp_path,
+) -> None:
+    """Lineage markers may intentionally have fewer keys than data records."""
+
+    request = _request(attempts_left=0)
+    responses = [
+        GenericResponse(
+            response_message={"kind": "record"},
+            raw_response={"id": "response-1"},
+            raw_request={"model": "test-model"},
+            generic_request=request.generic_request,
+            created_at=request.created_at,
+            finished_at=request.created_at,
+            token_usage=_TokenUsage(input=10, output=5),
+            response_cost=0.0,
+            finish_reason="stop",
+        ),
+        GenericResponse(
+            response_message={"kind": "lineage"},
+            raw_response={"id": "response-2"},
+            raw_request={"model": "test-model"},
+            generic_request=request.generic_request,
+            created_at=request.created_at,
+            finished_at=request.created_at,
+            token_usage=_TokenUsage(input=10, output=5),
+            response_cost=0.0,
+            finish_reason="stop",
+        ),
+    ]
+    (tmp_path / "responses_0.jsonl").write_text(
+        "\n".join(response.model_dump_json() for response in responses) + "\n",
+        encoding="utf-8",
+    )
+
+    def process(response):
+        if response.response_message["kind"] == "record":
+            return [{"record_id": "one", "answer": "supported"}]
+        return [{"terminal_state": "empty_generation"}]
+
+    processor = SimpleNamespace(
+        working_dir=str(tmp_path),
+        _process_response=process,
+        config=SimpleNamespace(require_all_responses=False),
+    )
+    processor._load_from_dataset_file = lambda path: (
+        BaseRequestProcessor._load_from_dataset_file(processor, path)
+    )
+
+    dataset = BaseRequestProcessor.create_dataset_files(
+        processor,
+        "heterogeneous",
+    )
+
+    assert dataset.to_list() == [
+        {
+            "answer": "supported",
+            "record_id": "one",
+            "terminal_state": None,
+        },
+        {
+            "answer": None,
+            "record_id": None,
+            "terminal_state": "empty_generation",
+        },
+    ]

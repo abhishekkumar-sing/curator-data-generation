@@ -30,6 +30,9 @@ model_profiles:
     # for named/required forcing. Curator still requires and validates exactly
     # one call to the Pydantic-derived tool.
     structured_output_mode: tools_auto
+    # qwen3_coder in vLLM 0.25 misclassifies nested $ref fields as strings.
+    # Inline non-recursive references only for this affected deployment.
+    dereference_tool_schema: true
     # Operational limit of the private deployment; independently configurable
     # from the model's advertised maximum and source-window construction size.
     context_window: 131072
