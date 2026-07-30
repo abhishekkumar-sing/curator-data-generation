@@ -75,6 +75,7 @@ from propositions import (  # noqa: E402
 )
 from provenance import build_reasoning_graph, leakage_audit  # noqa: E402
 from reasoning_paths import build_reasoning_paths, validate_reasoning_path  # noqa: E402
+from resume import ResumeManager  # noqa: E402
 from review import REVIEW_DIMENSIONS, prepare_review, validate_reviews  # noqa: E402
 from schemas import (  # noqa: E402
     CandidateBatch,
@@ -2647,7 +2648,6 @@ def test_run_layout_and_curator_cache_are_project_local(tmp_path: Path, monkeypa
     assert run_id == "run-20260728T153012-123456Z"
     assert files_dir == tmp_path / "outputs" / run_id / "files"
     assert files_dir.is_dir()
-    assert generation_pipeline._working_dir(run_id, "generation") == str(tmp_path / ".curator_working" / run_id / "generation")
 
 
 def test_run_layout_rejects_unsafe_or_existing_run(tmp_path: Path, monkeypatch) -> None:
@@ -2667,6 +2667,211 @@ def test_run_layout_rejects_unsafe_or_existing_run(tmp_path: Path, monkeypatch) 
     try:
         generation_pipeline._run_layout("pilot-001")
     except SystemExit as exc:
-        assert "already exists and is not empty" in str(exc)
+        assert "without a recognized manifest/run_state" in str(exc)
     else:
         raise AssertionError("non-empty run output should not be overwritten")
+
+    (files_dir / "manifest.json").write_text(
+        '{"run_id":"pilot-001","status":"failed"}\n',
+        encoding="utf-8",
+    )
+    resumed_run_id, resumed_files = generation_pipeline._run_layout("pilot-001")
+    assert resumed_run_id == "pilot-001"
+    assert resumed_files == files_dir
+
+
+def _resume_profile(prefix: str, profile_name: str) -> dict:
+    return {
+        "profile_name": profile_name,
+        "served_model_env": f"{prefix}_MODEL",
+        "base_url_env": f"{prefix}_BASE_URL",
+        "api_key_env": f"{prefix}_API_KEY",
+        "deployment_identity_env": f"{prefix}_DEPLOYMENT_ID",
+        "structured_output_mode": "tools_auto",
+        "generation_params": {"temperature": 1.0},
+        "request_timeout": 10,
+        "max_retries": 1,
+        "max_concurrent_requests": 2,
+        "max_requests_per_minute": 100,
+        "max_tokens_per_minute": 1000,
+    }
+
+
+class _FakeStageLLM:
+    def __init__(self, rows: list[dict], calls: list[str], fail: bool = False):
+        self.rows = rows
+        self.calls = calls
+        self.fail = fail
+
+    def __call__(self, dataset, working_dir: str):
+        self.calls.append(working_dir)
+        if self.fail:
+            raise AssertionError("completed checkpoint should have been reused")
+        return SimpleNamespace(
+            dataset=SimpleNamespace(to_list=lambda: self.rows),
+        )
+
+
+def _resume_manager(
+    tmp_path: Path,
+    monkeypatch,
+    *,
+    generation_model: str,
+    generation_url: str,
+    generation_deployment: str,
+    judge_model: str = "judge-a",
+    refresh_stages: set[str] | None = None,
+) -> ResumeManager:
+    pipeline_dir = tmp_path / "pipeline"
+    pipeline_dir.mkdir(exist_ok=True)
+    (pipeline_dir / "stage.py").write_text("VERSION = 1\n", encoding="utf-8")
+    for name, value in {
+        "GEN_MODEL": generation_model,
+        "GEN_BASE_URL": generation_url,
+        "GEN_API_KEY": "secret-generation-key",
+        "GEN_DEPLOYMENT_ID": generation_deployment,
+        "JDG_MODEL": judge_model,
+        "JDG_BASE_URL": "http://10.0.0.2:8000/v1",
+        "JDG_API_KEY": "secret-judge-key",
+        "JDG_DEPLOYMENT_ID": "judge-deployment-v1",
+    }.items():
+        monkeypatch.setenv(name, value)
+    return ResumeManager(
+        run_id="same-run",
+        output_root=tmp_path / "outputs",
+        cache_root=tmp_path / ".curator_working",
+        config={"quality": {"minimum": 4}},
+        pipeline_dir=pipeline_dir,
+        generation_profile=_resume_profile("GEN", "generation"),
+        judge_profile=_resume_profile("JDG", "judge"),
+        refresh_stages=refresh_stages,
+    )
+
+
+def test_completed_stage_survives_generation_and_judge_model_changes(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    first = _resume_manager(
+        tmp_path,
+        monkeypatch,
+        generation_model="model-a",
+        generation_url="http://10.0.0.1:8000/v1",
+        generation_deployment="deployment-a",
+    )
+    first.start()
+    calls: list[str] = []
+    expected = [{"record_id": "kept", "generation_model": "model-a"}]
+    assert first.execute_llm_stage(
+        stage="generation",
+        role="generation",
+        llm=_FakeStageLLM(expected, calls),
+        inputs=[{"planned_request_id": "one"}],
+    ) == expected
+    judged = [{"record_id": "kept", "judge_model": "judge-a"}]
+    assert first.execute_llm_stage(
+        stage="judge",
+        role="judge",
+        llm=_FakeStageLLM(judged, calls),
+        inputs=expected,
+    ) == judged
+    first.finish("partial")
+
+    second = _resume_manager(
+        tmp_path,
+        monkeypatch,
+        generation_model="renamed-model-b",
+        generation_url="http://10.0.0.9:9000/v1",
+        generation_deployment="deployment-b",
+        judge_model="judge-b",
+    )
+    second.start()
+    reused = second.execute_llm_stage(
+        stage="generation",
+        role="generation",
+        llm=_FakeStageLLM([], calls, fail=True),
+        inputs=[{"planned_request_id": "one"}],
+    )
+    assert reused == expected
+    reused_judgment = second.execute_llm_stage(
+        stage="judge",
+        role="judge",
+        llm=_FakeStageLLM([], calls, fail=True),
+        inputs=expected,
+    )
+    assert reused_judgment == judged
+    assert len(calls) == 2
+    assert second.summary()["stage_events"]["generation"]["status"] == (
+        "reused_checkpoint"
+    )
+    assert second.summary()["stage_events"]["judge"]["status"] == (
+        "reused_checkpoint"
+    )
+
+
+def test_transport_only_change_reuses_partial_cache_identity(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    first = _resume_manager(
+        tmp_path,
+        monkeypatch,
+        generation_model="model-a",
+        generation_url="http://127.0.0.1:3011/v1",
+        generation_deployment="same-deployment",
+    )
+    first.start()
+    old_fingerprint = first._stage_fingerprint("generation", "generation")
+    second = _resume_manager(
+        tmp_path,
+        monkeypatch,
+        generation_model="model-a",
+        generation_url="http://127.0.0.1:9999/v1",
+        generation_deployment="same-deployment",
+    )
+    second.start()
+    assert second._stage_fingerprint("generation", "generation") == old_fingerprint
+
+
+def test_refresh_stage_preserves_checkpoint_history_and_redacts_secrets(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    first = _resume_manager(
+        tmp_path,
+        monkeypatch,
+        generation_model="model-a",
+        generation_url="http://10.0.0.1:8000/v1",
+        generation_deployment="deployment-a",
+    )
+    first.start()
+    first.execute_llm_stage(
+        stage="generation",
+        role="generation",
+        llm=_FakeStageLLM([{"value": "old"}], []),
+        inputs=[{"id": "one"}],
+    )
+    first.finish("partial")
+    second = _resume_manager(
+        tmp_path,
+        monkeypatch,
+        generation_model="model-b",
+        generation_url="http://10.0.0.8:8000/v1",
+        generation_deployment="deployment-b",
+        refresh_stages={"generation"},
+    )
+    second.start()
+    assert second.execute_llm_stage(
+        stage="generation",
+        role="generation",
+        llm=_FakeStageLLM([{"value": "new"}], []),
+        inputs=[{"id": "one"}],
+    ) == [{"value": "new"}]
+    checkpoint_root = tmp_path / "outputs" / "same-run" / "checkpoints"
+    assert list(checkpoint_root.rglob("history/*/records.jsonl"))
+    serialized = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in (tmp_path / "outputs" / "same-run").rglob("*.json")
+    )
+    assert "secret-generation-key" not in serialized
+    assert "secret-judge-key" not in serialized

@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import argparse
+import atexit
 import hashlib
 import json
 import os
@@ -42,6 +43,7 @@ from propositions import (
     write_proposition_cache,
 )
 from reasoning_paths import build_reasoning_paths
+from resume import ResumeManager
 from source_windows import build_source_windows
 from path_qa import (
     SourceAblationAnswerGenerator,
@@ -85,6 +87,22 @@ OUTPUT_ROOT = (PROJECT_ROOT / PATHS["output_root"]).resolve()
 _TOKENIZE_UNAVAILABLE: dict[tuple[str, str], str] = {}
 _RUN_STARTED_MONOTONIC: float | None = None
 _RUN_STARTED_AT: str | None = None
+_RESUME_MANAGER: ResumeManager | None = None
+_RUN_ATTEMPT_TERMINAL = False
+
+LLM_STAGE_NAMES = {
+    "propositions",
+    "path_questions",
+    "path_answers",
+    "path_ablation_trials",
+    "path_ablation_judge",
+    "generation",
+    "judge",
+    "cross_generation",
+    "cross_judge",
+    "drafting_generation",
+    "drafting_judge",
+}
 
 
 def _code_revision() -> dict[str, Any]:
@@ -117,7 +135,7 @@ def _configuration_fingerprint() -> str:
 
 
 def _run_layout(requested_run_id: str | None, now: datetime | None = None) -> tuple[str, Path]:
-    """Create one safe, immutable outputs/<run-id>/files directory."""
+    """Create or recognize one resumable outputs/<run-id>/files directory."""
     if OUTPUT_ROOT != PROJECT_ROOT / "outputs":
         raise SystemExit("paths.output_root must resolve to the project outputs directory")
     current = now or datetime.now(timezone.utc)
@@ -126,20 +144,66 @@ def _run_layout(requested_run_id: str | None, now: datetime | None = None) -> tu
         raise SystemExit("--run-id must be 1-128 letters, digits, dots, underscores, or hyphens " "and must start with a letter or digit")
     files_dir = OUTPUT_ROOT / run_id / "files"
     if files_dir.exists() and any(files_dir.iterdir()):
-        raise SystemExit(f"Run output already exists and is not empty: {files_dir}")
+        recognized = (
+            (files_dir / "manifest.json").is_file()
+            or (OUTPUT_ROOT / run_id / "run_state.json").is_file()
+        )
+        if not recognized:
+            raise SystemExit(
+                "Run output exists without a recognized manifest/run_state and "
+                f"cannot be resumed safely: {files_dir}"
+            )
     files_dir.mkdir(parents=True, exist_ok=True)
     return run_id, files_dir
 
 
-def _working_dir(run_id: str, stage: str) -> str:
-    """Return a run- and stage-isolated cache below .curator_working."""
-    if CACHE_ROOT != PROJECT_ROOT / ".curator_working":
-        raise SystemExit("Curator cache root must resolve to .curator_working")
-    if not RUN_ID_PATTERN.fullmatch(run_id):
-        raise SystemExit("Invalid run ID for Curator working directory")
-    path = CACHE_ROOT / run_id / stage
-    path.mkdir(parents=True, exist_ok=True)
-    return str(path)
+def _execute_llm_stage(
+    stage: str,
+    role: str,
+    llm: Any,
+    inputs: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Execute one resumable logical LLM stage."""
+    if _RESUME_MANAGER is None:
+        raise RuntimeError("Resume manager must be initialized before model stages")
+    return _RESUME_MANAGER.execute_llm_stage(
+        stage=stage,
+        role=role,
+        llm=llm,
+        inputs=inputs,
+    )
+
+
+def _finalize_unfinished_attempt() -> None:
+    """Fail closed when an exception or interruption leaves an attempt running."""
+    global _RUN_ATTEMPT_TERMINAL
+    if _RESUME_MANAGER is None or _RUN_ATTEMPT_TERMINAL:
+        return
+    manifest_path = _RESUME_MANAGER.files_dir / "manifest.json"
+    manifest: dict[str, Any] = {}
+    if manifest_path.is_file():
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            manifest = {}
+    status = str(manifest.get("status", "failed"))
+    if status not in {"complete", "partial", "failed"}:
+        status = "failed"
+        write_manifest(
+            _RESUME_MANAGER.files_dir,
+            {
+                **manifest,
+                "run_id": _RESUME_MANAGER.run_id,
+                "status": "failed",
+                "failure": "attempt_interrupted_or_raised_before_terminal_manifest",
+                "resume": _RESUME_MANAGER.summary(),
+            },
+        )
+    _RESUME_MANAGER.finish(status)
+    _RUN_ATTEMPT_TERMINAL = True
+
+
+atexit.register(_finalize_unfinished_attempt)
 
 
 def _role_profile(role: str) -> dict[str, Any]:
@@ -289,10 +353,19 @@ def _write_audit(path: Path, rows: list[dict[str, Any]]) -> None:
 
 def _non_secret_model_manifest(profile: dict[str, Any]) -> dict[str, Any]:
     model, base_url, _ = _model_settings(profile)
+    deployment_identity_env = str(
+        profile.get("deployment_identity_env", "")
+    ).strip()
     return {
         "profile": profile["profile_name"],
         "model": model,
         "base_url": base_url,
+        "deployment_identity": (
+            os.environ.get(deployment_identity_env, "").strip()
+            if deployment_identity_env
+            else None
+        ),
+        "deployment_identity_env": deployment_identity_env or None,
         "structured_output_mode": profile.get("structured_output_mode", "auto"),
         "generation_params": profile["generation_params"],
         "max_concurrent_requests": profile["max_concurrent_requests"],
@@ -882,11 +955,17 @@ def _final_manifest(
             "complete": False,
             "note": "Human labels are external release evidence and are never inferred.",
         },
+        "resume": (
+            _RESUME_MANAGER.summary()
+            if _RESUME_MANAGER is not None
+            else {"enabled": False}
+        ),
     }
 
 
 def main() -> None:
     """Run single- and cross-document generation through verified exports."""
+    global _RESUME_MANAGER, _RUN_ATTEMPT_TERMINAL
     global _RUN_STARTED_AT, _RUN_STARTED_MONOTONIC
     _RUN_STARTED_MONOTONIC = time.monotonic()
     _RUN_STARTED_AT = datetime.now(timezone.utc).isoformat()
@@ -907,8 +986,31 @@ def main() -> None:
     parser.add_argument("--drafting-limit", type=int, help="Limit authored drafting seeds for a pilot")
     parser.add_argument("--skip-drafting", action="store_true")
     parser.add_argument("--skip-judge", action="store_true", help="Development only")
+    parser.add_argument(
+        "--refresh-stage",
+        action="append",
+        choices=sorted(LLM_STAGE_NAMES),
+        default=[],
+        help=(
+            "Ignore a completed logical checkpoint for this stage while retaining "
+            "its historical files. May be repeated."
+        ),
+    )
     args = parser.parse_args()
     run_id, files_dir = _run_layout(args.run_id)
+    _RUN_ATTEMPT_TERMINAL = False
+    _RESUME_MANAGER = ResumeManager(
+        run_id=run_id,
+        output_root=OUTPUT_ROOT,
+        cache_root=CACHE_ROOT,
+        config=CONFIG,
+        pipeline_dir=Path(__file__).resolve().parent,
+        generation_profile=GENERATION,
+        judge_profile=JUDGE,
+        refresh_stages=set(args.refresh_stage),
+    )
+    running_manifest = _RESUME_MANAGER.start()
+    write_manifest(files_dir, running_manifest)
 
     all_rows, manuals = load_corpus(args.source_dir.resolve(), args.ocr_dir.resolve())
     corpus_report = corpus_quality_report(all_rows, manuals)
@@ -979,10 +1081,12 @@ def main() -> None:
         generated_propositions: list[dict[str, Any]] = []
         if uncached_inputs:
             os.environ["HOSTED_VLLM_API_KEY"] = _model_settings(GENERATION)[2]
-            generated_propositions = PropositionExtractor(**_llm_kwargs(GENERATION))(
-                Dataset.from_list(uncached_inputs),
-                working_dir=_working_dir(run_id, "propositions"),
-            ).dataset.to_list()
+            generated_propositions = _execute_llm_stage(
+                "propositions",
+                "generation",
+                PropositionExtractor(**_llm_kwargs(GENERATION)),
+                uncached_inputs,
+            )
             write_proposition_cache(
                 proposition_cache_root,
                 generated_propositions,
@@ -1076,10 +1180,12 @@ def main() -> None:
         path_questions_audit: list[dict[str, Any]] = []
         if budgeted_inputs:
             os.environ["HOSTED_VLLM_API_KEY"] = _model_settings(GENERATION)[2]
-            path_questions_audit = question_generator(
-                Dataset.from_list(budgeted_inputs),
-                working_dir=_working_dir(run_id, "path_questions"),
-            ).dataset.to_list()
+            path_questions_audit = _execute_llm_stage(
+                "path_questions",
+                "generation",
+                question_generator,
+                budgeted_inputs,
+            )
         _write_audit(
             files_dir / "path_questions_generated_audit.jsonl",
             path_questions_audit,
@@ -1132,10 +1238,12 @@ def main() -> None:
         path_answers_audit: list[dict[str, Any]] = []
         if budgeted_answer_inputs:
             os.environ["HOSTED_VLLM_API_KEY"] = _model_settings(GENERATION)[2]
-            path_answers_audit = answer_generator(
-                Dataset.from_list(budgeted_answer_inputs),
-                working_dir=_working_dir(run_id, "path_answers"),
-            ).dataset.to_list()
+            path_answers_audit = _execute_llm_stage(
+                "path_answers",
+                "generation",
+                answer_generator,
+                budgeted_answer_inputs,
+            )
         _write_audit(
             files_dir / "path_answers_generated_audit.jsonl",
             path_answers_audit,
@@ -1179,10 +1287,12 @@ def main() -> None:
         ablation_trials_audit: list[dict[str, Any]] = []
         if budgeted_ablation_inputs:
             os.environ["HOSTED_VLLM_API_KEY"] = _model_settings(GENERATION)[2]
-            ablation_trials_audit = ablation_generator(
-                Dataset.from_list(budgeted_ablation_inputs),
-                working_dir=_working_dir(run_id, "path_ablation_trials"),
-            ).dataset.to_list()
+            ablation_trials_audit = _execute_llm_stage(
+                "path_ablation_trials",
+                "generation",
+                ablation_generator,
+                budgeted_ablation_inputs,
+            )
         _write_audit(
             files_dir / "path_ablation_trials_audit.jsonl",
             ablation_trials_audit,
@@ -1223,10 +1333,12 @@ def main() -> None:
         ablation_judged: list[dict[str, Any]] = []
         if ablation_judge_inputs and not args.skip_judge:
             os.environ["HOSTED_VLLM_API_KEY"] = _model_settings(JUDGE)[2]
-            ablation_judged = SourceAblationJudge(**_llm_kwargs(JUDGE))(
-                Dataset.from_list(ablation_judge_inputs),
-                working_dir=_working_dir(run_id, "path_ablation_judge"),
-            ).dataset.to_list()
+            ablation_judged = _execute_llm_stage(
+                "path_ablation_judge",
+                "judge",
+                SourceAblationJudge(**_llm_kwargs(JUDGE)),
+                ablation_judge_inputs,
+            )
         _write_audit(
             files_dir / "path_ablation_judged.jsonl",
             ablation_judged,
@@ -1324,10 +1436,12 @@ def main() -> None:
         }
 
     os.environ["HOSTED_VLLM_API_KEY"] = _model_settings(GENERATION)[2]
-    generated_audit = ProcurementGenerator(**_llm_kwargs(GENERATION))(
-        Dataset.from_list(planned_single),
-        working_dir=_working_dir(run_id, "generation"),
-    ).dataset.to_list()
+    generated_audit = _execute_llm_stage(
+        "generation",
+        "generation",
+        ProcurementGenerator(**_llm_kwargs(GENERATION)),
+        planned_single,
+    )
     _write_audit(files_dir / "qa_generated_audit.jsonl", generated_audit)
     single_generation_coverage = request_coverage(planned_single, generated_audit)
     deterministic_rejected = [row for row in generated_audit if not row.get("deterministic_checks", {}).get("passed", False)]
@@ -1376,10 +1490,12 @@ def main() -> None:
             judge_prompt_rejected,
         )
         if budgeted_judge_rows:
-            judged = judge(
-                Dataset.from_list(budgeted_judge_rows),
-                working_dir=_working_dir(run_id, "judge"),
-            ).dataset.to_list()
+            judged = _execute_llm_stage(
+                "judge",
+                "judge",
+                judge,
+                budgeted_judge_rows,
+            )
         accepted = [row for row in judged if row["judge"]["accepted"]]
     single_accepted = list(accepted)
     single_coverage = {
@@ -1425,10 +1541,12 @@ def main() -> None:
         planned_cross = plan_cross_document_requests(bundles, seed)
         if bundles:
             os.environ["HOSTED_VLLM_API_KEY"] = _model_settings(GENERATION)[2]
-            cross_generated_audit = CrossDocumentGenerator(**_llm_kwargs(GENERATION))(
-                Dataset.from_list(planned_cross),
-                working_dir=_working_dir(run_id, "cross_generation"),
-            ).dataset.to_list()
+            cross_generated_audit = _execute_llm_stage(
+                "cross_generation",
+                "generation",
+                CrossDocumentGenerator(**_llm_kwargs(GENERATION)),
+                planned_cross,
+            )
             _write_audit(
                 files_dir / "cross_generated_audit.jsonl",
                 cross_generated_audit,
@@ -1459,10 +1577,12 @@ def main() -> None:
                     cross_judge_prompt_rejected,
                 )
                 if budgeted_cross_rows:
-                    cross_judged = cross_judge(
-                        Dataset.from_list(budgeted_cross_rows),
-                        working_dir=_working_dir(run_id, "cross_judge"),
-                    ).dataset.to_list()
+                    cross_judged = _execute_llm_stage(
+                        "cross_judge",
+                        "judge",
+                        cross_judge,
+                        budgeted_cross_rows,
+                    )
                 cross_accepted = [row for row in cross_judged if row["judge"]["accepted"]]
     cross_coverage = {
         "generated": request_coverage(planned_cross, cross_generated_audit),
@@ -1539,10 +1659,12 @@ def main() -> None:
             drafting_seeds = drafting_seeds[: args.drafting_limit]
         drafting_inputs = build_drafting_inputs(drafting_seeds, all_rows)
         os.environ["HOSTED_VLLM_API_KEY"] = _model_settings(GENERATION)[2]
-        drafting_generated = TenderDraftingGenerator(**_llm_kwargs(GENERATION))(
-            Dataset.from_list(drafting_inputs),
-            working_dir=_working_dir(run_id, "drafting_generation"),
-        ).dataset.to_list()
+        drafting_generated = _execute_llm_stage(
+            "drafting_generation",
+            "generation",
+            TenderDraftingGenerator(**_llm_kwargs(GENERATION)),
+            drafting_inputs,
+        )
         write_jsonl(files_dir / "drafting_generated_audit.jsonl", drafting_generated)
         deterministic_drafting = [row for row in drafting_generated if row["deterministic_checks"]["passed"]]
         deterministic_rejected = [row for row in drafting_generated if not row["deterministic_checks"]["passed"]]
@@ -1558,10 +1680,12 @@ def main() -> None:
             for row in deterministic_drafting:
                 row["_minimum_judge_score"] = int(QUALITY.get("minimum_judge_score", 4))
             os.environ["HOSTED_VLLM_API_KEY"] = _model_settings(judge_profile)[2]
-            drafting_judged = TenderDraftingJudge(**_llm_kwargs(judge_profile))(
-                Dataset.from_list(deterministic_drafting),
-                working_dir=_working_dir(run_id, "drafting_judge"),
-            ).dataset.to_list()
+            drafting_judged = _execute_llm_stage(
+                "drafting_judge",
+                "judge",
+                TenderDraftingJudge(**_llm_kwargs(judge_profile)),
+                deterministic_drafting,
+            )
             drafting_accepted = [row for row in drafting_judged if row["judge"]["accepted"]]
             drafting_rejected = [
                 *deterministic_rejected,
@@ -1676,6 +1800,8 @@ def main() -> None:
     if missing_judge_responses:
         final_manifest["status"] = "partial"
     write_manifest(files_dir, final_manifest)
+    _RESUME_MANAGER.finish(str(final_manifest["status"]))
+    _RUN_ATTEMPT_TERMINAL = True
 
     print(
         f"Run {run_id}: exported {stats['records']} accepted records to {files_dir} "

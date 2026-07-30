@@ -190,6 +190,16 @@ Design decision:
   LLM stages load Curator's cached dataset; changed models/endpoints receive a
   different outer directory; changed upstream datasets receive a different
   Curator inner fingerprint, automatically invalidating downstream calls.
+- Persist successful stage outputs as immutable logical checkpoints with their
+  producer fingerprint and model lineage. A later invocation may reuse a
+  completed checkpoint even when the currently selected model changes; the new
+  model begins at the first incomplete stage. Downstream fingerprints include
+  the reused checkpoint content, so mixed stage provenance remains explicit
+  rather than accidental.
+- Do not merge partial responses from two model identities inside one
+  unfinished stage. Preserve the old partial cache for audit, but restart that
+  incomplete stage under the new model. This avoids an unmarked mixed-model
+  batch while retaining all prior files.
 - Write a `run_state.json` attempt journal atomically. At invocation start,
   preserve the prior terminal manifest in append-only resume history and mark
   the logical run `running`. A stopped attempt cannot leave an old `complete`
@@ -238,11 +248,15 @@ Implementation acceptance criteria:
 - An interrupted same-configuration invocation with the same run ID uses the
   same stage fingerprint and Curator cache.
 - A generation-model/deployment change creates new generation stage
-  fingerprints. A transport-only endpoint change with an unchanged explicit
-  deployment identity reuses them. Changed generated datasets invalidate judge
-  requests through Curator's inner dataset hash.
+  fingerprints for incomplete stages. Completed logical stage checkpoints
+  remain reusable and retain their original producer lineage. A transport-only
+  endpoint change with an unchanged explicit deployment identity also reuses
+  partial Curator caches. Changed generated datasets invalidate judge requests
+  through Curator's inner dataset hash.
 - A judge-only change reuses generation caches and creates new judge stage
-  fingerprints.
+  fingerprints for incomplete judge stages. Completed judge checkpoints remain
+  reusable with their original judge-model lineage; downstream acceptance and
+  exports consume the selected checkpoint explicitly.
 - Prompt/schema/validator/config changes cannot reuse an incompatible stage
   cache.
 - No fingerprint, state file, manifest, or log contains an API key.
@@ -4449,3 +4463,43 @@ implementation:
   manuals, all derived RAG/distractor variants, and multiple folds do not.
 - Terminal-lineage code is complete, while the acceptance checkbox requiring
   every request to be terminal remains an empirical run gate.
+
+### Same-run model/endpoint resumption implementation (2026-07-30)
+
+Status: implemented and locally verified; a bounded user-run interruption and
+resume remains the final operational check.
+
+- [x] Added logical, completed-stage checkpoints whose reuse key covers the
+  stage inputs, configuration, pipeline source, and output contract, but not
+  the current generator or judge identity. A completed stage therefore remains
+  reusable when either model is renamed or replaced, while retaining the
+  original producer identity in checkpoint provenance.
+- [x] Added model-aware outer Curator cache fingerprints for incomplete stages.
+  Changing a model/deployment starts a new stage cache instead of silently
+  combining partial responses from two deployments.
+- [x] Separated stable deployment identity from transport address. When a
+  profile's `*_DEPLOYMENT_ID` is set, changing only its forwarded URL/port
+  retains the same incomplete-stage cache. Without that explicit identity,
+  the endpoint remains part of the fingerprint and changes invalidate safely.
+- [x] Applied the same rules independently to generation and judge stages.
+- [x] Added atomic `run_state.json`, attempt history, prior-manifest snapshots,
+  fail-closed running manifests, secret-free model provenance, and explicit
+  `--refresh-stage` overrides that preserve replaced checkpoint history.
+- [x] Added regression coverage for generator/judge swaps, transport-only
+  changes, completed-checkpoint reuse, forced refresh history, and credential
+  redaction. Focused verification passed 73 tests, Ruff, Python compilation,
+  YAML parsing, and `git diff --check`.
+
+### Nemotron strict-auto endpoint probe (2026-07-30)
+
+- [x] Re-tested the live Nemotron endpoint after disabling the broken vLLM
+  structural-tag enforcement path. With Curator's real `PropositionBatch`
+  schema, `tool_choice: "auto"`, `strict: true`, and the production
+  4,096-token output allowance, both bounded requests returned HTTP 200,
+  exactly one tool call, and Pydantic-valid arguments.
+- [x] Confirmed the active Curator `tools_auto` implementation sends
+  `tool_choice: "auto"`.
+- [ ] Treat `tool_choice: "required"` as unsupported on this deployment:
+  bounded probes returned HTTP 200 but no usable tool call, sometimes with a
+  false `finish_reason: "tool_calls"`. The procurement pipeline does not use
+  this mode, but it must not be enabled without a separate server-side fix.
