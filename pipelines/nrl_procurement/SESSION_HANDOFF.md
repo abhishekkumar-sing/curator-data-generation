@@ -44,9 +44,11 @@ At this handoff:
 - Generation: `hosted_vllm/nvidia/nemotron-3-super`, tool-call structured
   output, deployment identity
   `nemotron-3-super-fp8-vllm-0.25-strict-bypass-v1`.
-- Judge: the configuration profile may still be named `gemma`, but the actual
-  model is `hosted_vllm/qwen2.5-coder-14b-instruct-q6_k.gguf`, using JSON
-  schema structured output.
+- Judge: the active `gemma` profile uses JSON-schema structured output with
+  `temperature=1.0`, `top_k=64`, and `top_p=0.95`. Its local endpoint is
+  configured through ignored `.env` variables rather than tracked files. The
+  supplied endpoint was updated on 2026-07-30; verify `/models` before a live
+  pilot because its initial probe was reset by the server.
 
 Endpoint relocation may reuse a checkpoint only when the explicit deployment
 identity and semantic stage contract are unchanged. A model, prompt, schema,
