@@ -4568,3 +4568,167 @@ Implementation:
   causing `KeyError: record_id`. Type conflicts remain hard failures.
 - [x] Focused verification passed 91 tests, Ruff, Python compilation, and
   `git diff --check`.
+
+## Capability research — pilot-020 release-audit code defects (2026-07-30)
+
+Status: researched and approved for implementation; a bounded user-run smoke
+test remains pending after these fixes.
+
+Research questions:
+
+- Why do 32 accepted-record evidence references fail
+  `source_chunk[start_char:end_char] == quote`, and what is the minimal,
+  precedent-consistent fix?
+- Why does `leakage_audit()` report only two unique manuals when accepted
+  records span roughly fifteen, and what is the correct fallback?
+- Why does `pending_independent_judge` stay nonzero after every ablation
+  candidate has a terminal judge decision, and why does
+  `request_coverage.judged.missing_request_ids` list deterministically
+  rejected requests as missing?
+
+Verified local findings:
+
+- `pipelines/nrl_procurement/propositions.py:67,85,131` already resolves
+  proposition evidence against
+  `row.get("source_passage", row["passage"])` — the raw registered chunk
+  identified by `chunk_id` — and rejects `non_verbatim_evidence` /
+  `ambiguous_evidence_occurrence` when the quote cannot be uniquely located
+  there. `tests/nrl_procurement/test_pipeline.py::test_proposition_offsets_resolve_against_original_source_chunk`
+  (line 940) locks this behavior in with an inserted-image-line fixture.
+- `pipelines/nrl_procurement/generate.py::plan_single_document_requests`
+  (line 307) stores the original chunk text as `source_passage` but
+  overwrites `row["passage"]` with `row["generation_passage"]` (the
+  image-line-stripped, whitespace-collapsed rendering built by
+  `corpus.generation_text()`) for prompting. `ProcurementGenerator.parse`
+  (line 546) then computes `start_char`/`end_char` via
+  `row["passage"].find(quote)` — i.e. against `generation_passage` — while
+  `citations[].chunk_id` still names the original chunk. `generation_text()`
+  strips leading/inter-line content, so the returned offset is only valid in
+  the cleaned string's reference frame, not the registered chunk's. This is
+  the same bug class already fixed for propositions, not yet applied to QA
+  generation.
+- `pipelines/nrl_procurement/cross_document.py` and `cross_stage.py` compute
+  prompt text, offsets, and citations from the same untransformed
+  `document["passage"]` throughout (no `generation_passage` substitution
+  exists on the cross-document path), so this defect is confined to
+  single-document QA/QA-CoT generation.
+- `pipelines/nrl_procurement/export.py` (lines 56, 121, 176, 262) uniformly
+  resolves manual identity as
+  `[doc["manual_id"] for doc in row.get("source_documents", [])] or [row["manual_id"]]`,
+  because only cross-document records carry `source_documents`; every
+  single-document record instead carries a top-level `manual_id`.
+  `pipelines/nrl_procurement/provenance.py::leakage_audit` (lines 240-243)
+  omits the `or [row["manual_id"]]` fallback used everywhere else in this
+  pipeline, so single-document records contribute nothing to the `manual` and
+  `section` leakage-collision fields. With only one accepted cross-document
+  record contributing its two `source_documents` entries, `unique_values.manual`
+  reports exactly 2 — matching the audit's observation precisely — while the
+  35 single-document `qa`/`qa_cot` records covering ~15 manuals are silently
+  excluded from manual/edition-level leakage detection, producing a false
+  `passed: true`.
+- `pipelines/nrl_procurement/generate.py:1470-1507` shows `ablation_judged` is
+  the terminal-complete list for every entry in `ablation_judge_inputs`
+  (accepted, judge-rejected, or `model_failure_after_retries` via
+  `materialize_terminal_failures`), and `path_qa.build_ablation_judge_inputs`
+  restricts `ablation_judge_inputs` to a subset of `ablation_passed_ids`
+  (real-ablation-passed records with a complete `full`/`source_a_only`/
+  `source_b_only` trial set). The neighboring, already-correct
+  `independent_judge_rejected` field is `len(ablation_judged) -
+  len(accepted_ablation_judgments)`, but `pending_independent_judge` (line
+  1584) is `len(ablation_passed_ids) - len(accepted_ablation_judgments)` —
+  the same subtrahend as the rejected count, so every judge-rejected record
+  is double-counted as still "pending" even though it reached a terminal
+  judge decision.
+- `single_coverage["judged"]` and `cross_coverage["judged"]` (lines 1687,
+  1787) call `request_coverage(planned_single, ...)` /
+  `request_coverage(planned_cross, ...)` — comparing judged/generated output
+  against *every* planned generation request. Deterministically rejected
+  requests and deduplicated requests are correctly excluded from `judged`
+  before ever reaching the judge, so they are indistinguishable in this
+  computation from a genuinely missing judge response.
+- [Scikit-learn common pitfalls: group leakage](https://scikit-learn.org/stable/common_pitfalls.html)
+  (accessed 2026-07-30) and the documented `GroupKFold`/group-split pattern:
+  related samples sharing a group identity (here, manual/edition lineage)
+  must stay in one split, or evaluation leakage results. The ELI5 dataset
+  precedent (81% of test questions found to be training paraphrases) is the
+  same failure mode the audit observed for the OM-availability question pair.
+  These sources confirm `leakage_audit`'s manual/section grouping is the
+  intended mechanism for exactly this defense, so restoring its coverage
+  (not adding a new mechanism) is the correct fix.
+- [W3C PROV-O](https://www.w3.org/TR/prov-o/), already the basis for this
+  pipeline's drafting citation-integrity work (see the addendum above),
+  requires a quotation relation to identify the actual entity quoted from.
+  An offset computed against a transformed rendering but attributed to the
+  original registered chunk violates that relation; this is the same
+  principle already applied to drafting and propositions, extended here to
+  QA evidence.
+
+Decision:
+
+- [x] In `ProcurementGenerator.parse`, resolve each evidence quote's
+  `start_char`/`end_char` against `row.get("source_passage", row["passage"])`
+  instead of `row["passage"]`, matching `propositions.py`. Add a
+  `citation_offset_unresolvable` deterministic-rejection reason when a quote
+  cannot be found in the source chunk, so no unresolvable citation is ever
+  exported. Do not add ambiguous-occurrence rejection in this pass — it is a
+  distinct, non-required enhancement (`propositions.py` already has it for
+  proposition evidence) and changing QA acceptance behavior beyond the
+  audit's stated required rule is out of scope for this fix.
+- [x] Add the same `or [row["manual_id"]]` fallback already used throughout
+  `export.py` to `leakage_audit`'s `manual` and `section` fields in
+  `provenance.py`, so single-document records participate in manual/edition
+  leakage detection.
+- [x] Change `pending_independent_judge` to `len(ablation_passed_ids) -
+  len(ablation_judged)`, matching the terminal-lineage accounting already
+  used for `independent_judge_rejected`.
+- [x] Compute `single_coverage["judged"]` / `cross_coverage["judged"]` against
+  the judge-eligible planned subset (planned requests whose generated
+  candidate reached `generated`/`cross_generated`, i.e. passed deterministic
+  checks and survived deduplication), not the full planned-request list.
+
+Rejected alternatives:
+
+- Rewriting `validate_record`'s signature to take `source_passage` directly:
+  rejected because it is exercised by ~15 existing unit tests with a
+  `(record, passage)` signature checking grounding against exactly what the
+  model was shown; the citation-offset concern is separable and belongs next
+  to where offsets are actually computed, matching how `propositions.py`
+  keeps its own local resolution.
+- Silently clamping unresolved offsets to `-1` without adding a rejection
+  reason: rejected because the release rule is "anything else must be
+  rejected before export," not merely flagged.
+- Treating `judged` coverage gaps as a new terminal-audit row: rejected
+  because deterministic rejection and dedup removal already have their own
+  audit trails (`qa_rejected.jsonl`, `duplicates` counter); the bug is a
+  wrong comparison base, not a missing audit artifact.
+
+Known risks:
+
+- The corrected `judged` coverage still depends on `generated`/`cross_generated`
+  already being the authoritative judge-eligible set; if a future stage adds
+  another filter between generation and judging without updating this
+  eligible-set computation, coverage could again misclassify exclusions as
+  missing.
+- Restoring manual-level leakage detection will likely surface new
+  collisions (same-edition rule families, near-duplicate cross-split
+  questions) that pilot-020 already found by manual inspection. This fix
+  makes the automated audit agree with that manual finding; it does not by
+  itself implement edition-lineage-aware split assignment, which remains a
+  separate, larger design task if the collisions require a different split
+  algorithm rather than just being surfaced.
+
+Validation plan:
+
+- Add/adjust regression tests for: an inserted-image-line offset fixture on
+  the QA path (mirroring the existing propositions test), an unresolvable
+  QA evidence quote being rejected, `leakage_audit` catching a single-document
+  manual collision it previously missed, `pending_independent_judge`
+  reaching zero once every ablation-passed record has a terminal judge
+  decision, and `judged` coverage no longer listing a deterministically
+  rejected request as missing.
+- Run the focused regression suite
+  (`tests/nrl_procurement/test_pipeline.py`, `test_temporal.py`,
+  `test_litellm_online_request_processor.py`) plus Ruff before commit.
+- A bounded user-run pilot remains required before any conclusion about
+  resulting yield or split composition; this fix corrects reporting/citation
+  integrity, it does not itself re-run generation.
