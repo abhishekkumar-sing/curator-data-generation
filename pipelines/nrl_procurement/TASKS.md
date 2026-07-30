@@ -374,8 +374,41 @@ behavior remains provisional until a user-run judge pilot completes.
     - Validation: 70 focused procurement and LiteLLM processor tests passed;
       Ruff and Python compilation passed. No model-backed generation or judge
       call was run.
-- [ ] Validate schema compliance, exact witness behavior, latency, and judge
+- [x] Validate schema compliance, exact witness behavior, latency, and judge
   calibration with a user-run pilot before production-scale generation.
+  - Pilot-014 completed 2026-07-29 with Nemotron generation and independent
+    Gemma judging. Final manifest status was correctly `failed`; production
+    scale remains unapproved.
+  - Endpoint-native prompt measurement succeeded for all 87 judge calls with
+    no fallback or prompt-budget rejection. Single-document prompts used
+    1,778-4,115 tokens and at most 5,395 tokens including completion reserve
+    and margin. Cross-document prompts used 3,595-5,790 tokens and at most
+    7,070 total against the served 8,192-token limit.
+  - Gemma returned schema-valid responses for 78/78 singular QA judge calls
+    and 9/9 singular cross-document judge calls. Observed call latency was
+    31-452 seconds (median 246, p95 380) for QA and 43-119 seconds
+    (median 59, p95 119) for cross-document.
+  - The judge accepted 70/78 QA records and 6/9 cross-document records.
+    Manual review confirmed representative accepted answer/evidence witnesses
+    were exact and material. Six QA rejections were taxonomy/persona
+    disagreements, while two correctly identified dropped qualifications.
+  - Calibration failure: all three rejected cross-document records reviewed
+    were grounded in both source documents, but the judge returned an empty
+    `unsupported_without_source_ids` prediction. The pipeline therefore
+    rejected them through `source_ablation_passed=false` despite full-context
+    support. This confirms the documented limitation that predicted ablation
+    is not a substitute for executing A-only and B-only trials.
+  - Nemotron transport compliance improved but was not perfect: one of 50
+    single-generation requests, three of 50 cross-generation requests, one of
+    two drafting requests, and one of 25 path-answer requests failed
+    permanently after malformed tool arguments. The dominant yield loss was
+    deterministic grounding rejection (non-verbatim evidence, unsupported
+    numbers/dates, claim/evidence mismatch), not transport failure.
+  - Final output contained 76 records, but request coverage was incomplete:
+    123 single-document candidates became 78 judged and 70 accepted; 36
+    cross-document candidates became 9 judged and 6 accepted; drafting was
+    0/2 accepted; path QA remained 0 training records pending real claim
+    coverage and independent adjudication.
 
 ## Capability research — pilot-003 quality recovery
 
