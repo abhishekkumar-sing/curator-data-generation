@@ -22,6 +22,15 @@
 # "DD.MM.YYYY" for OMs, which are dated letters; "Month YYYY" or "YYYY" for
 # manual editions, which state a revision month/year on the cover but not
 # a specific day).
+#
+# Official-source verification cutoff: 2026-07-30. The Department of
+# Expenditure publication index verifies the registered Government edition
+# identities below. Publication identity alone does not prove that no later OM
+# modifies an individual provision. The NRL public website was checked at the
+# same cutoff. The three NRL PDFs below are the locally registered authority
+# documents and are pinned by SHA-256. No public procurement-manual index
+# establishing post-Rev1 amendment/currentness lineage was located, so the
+# documents are verified inputs but are not asserted "current".
 
 manuals:
   # --- Goods ---
@@ -33,6 +42,10 @@ manuals:
     as_of_date: "2017"
     start_page: 1
     exclude_pages: []
+    official_verification:
+      status: archived_source_registered
+      cutoff: "2026-07-30"
+      authority_url: "https://doe.gov.in/manuals"
 
   - manual_id: goods_2022
     title: Manual for Procurement of Goods (Updated June, 2022)
@@ -51,6 +64,14 @@ manuals:
     as_of_date: "2024"
     start_page: 1
     exclude_pages: []
+    official_verification:
+      status: publication_identity_verified
+      cutoff: "2026-07-30"
+      authority_url: "https://doe.gov.in/circulars/manual-procurement-goods-second-edition-2024"
+    temporal_predecessors:
+      - manual_id: goods_2017
+        pair_id: government_goods_2017_to_2024
+        lineage_basis: publication_series
 
   - manual_id: goods_om_2018_issuance
     title: >-
@@ -112,6 +133,14 @@ manuals:
     as_of_date: "2025"
     start_page: 1
     exclude_pages: []
+    official_verification:
+      status: publication_identity_verified
+      cutoff: "2026-07-30"
+      authority_url: "https://doe.gov.in/manuals"
+    temporal_predecessors:
+      - manual_id: services_2017
+        pair_id: government_services_2017_to_consultancy_2025
+        lineage_basis: publication_series
 
   - manual_id: services_non_consultancy_2025
     title: Manual for Procurement of Non-Consultancy Services (2025)
@@ -121,6 +150,10 @@ manuals:
     as_of_date: "2025"
     start_page: 1
     exclude_pages: []
+    official_verification:
+      status: publication_identity_verified
+      cutoff: "2026-07-30"
+      authority_url: "https://doe.gov.in/manuals"
 
   - manual_id: services_om_2021_startup_definition
     title: "OM: Amendment to Manual for Procurement of Consultancy & Other Services 2017 — Startup Definition"
@@ -158,6 +191,14 @@ manuals:
     as_of_date: "2025"
     start_page: 1
     exclude_pages: []
+    official_verification:
+      status: publication_identity_verified
+      cutoff: "2026-07-30"
+      authority_url: "https://doe.gov.in/manuals"
+    temporal_predecessors:
+      - manual_id: works_2019
+        pair_id: government_works_2019_to_2025
+        lineage_basis: publication_series
 
   - manual_id: works_om_2022_corrigendum_pqb
     title: "Corrigendum: Updated Manual for Procurement of Works — Para 3.3.6(iv) PQB Submission Period"
@@ -191,6 +232,11 @@ manuals:
     policy_scope: nrl_company_policy
     start_page: 3
     exclude_pages: []
+    official_verification:
+      status: registered_nrl_pdf_verified_no_later_lineage_asserted
+      cutoff: "2026-07-30"
+      authority_url: "https://www.nrl.co.in/"
+      source_sha256: "f344c2e3c9fb5eda267a0c0614a760a0281219eae79b9587e4e1de2cdcb7b709"
 
   - manual_id: nrl_works_rev1
     title: NRL Manual for Procurement of Works, Rev1
@@ -203,6 +249,11 @@ manuals:
     policy_scope: nrl_company_policy
     start_page: 3
     exclude_pages: []
+    official_verification:
+      status: registered_nrl_pdf_verified_no_later_lineage_asserted
+      cutoff: "2026-07-30"
+      authority_url: "https://www.nrl.co.in/"
+      source_sha256: "12a1e0391b976693b435dba73ea9b80930bdd0fc4b574e04190422ce9944bcaa"
 
   - manual_id: nrl_consultancy_other_services_rev1
     title: NRL Manual for Procurement of Consultancy & Other Services, Rev1
@@ -215,3 +266,8 @@ manuals:
     policy_scope: nrl_company_policy
     start_page: 3
     exclude_pages: []
+    official_verification:
+      status: registered_nrl_pdf_verified_no_later_lineage_asserted
+      cutoff: "2026-07-30"
+      authority_url: "https://www.nrl.co.in/"
+      source_sha256: "6ad854771416f4b9e0297f5d4761393d9a79a129c78765dd176542921ab26afc"

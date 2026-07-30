@@ -141,6 +141,32 @@ reasoning_paths:
   enabled: true
   max_per_pair: 25
 
+# Temporal artifacts are derived from accepted, exact-evidence propositions.
+# "publication_series" pairs compare dated editions but never imply legal
+# supersession or present-day applicability.
+temporal:
+  enabled: true
+  verification_cutoff: "2026-07-30"
+  discover_pairs_from_manifest: true
+  holdout_rule_family_fraction: 0.2
+  split_seed: nrl-temporal-v1
+  pairs: []
+  # This is an experiment configuration consumed by a trainer, not a claim
+  # that staged mixing outperforms uniform mixing.
+  schedule:
+    - step_fraction: 0.0
+      historical_context: 0.4
+      temporal_transition: 0.3
+      target_context: 0.3
+    - step_fraction: 0.5
+      historical_context: 0.25
+      temporal_transition: 0.35
+      target_context: 0.4
+    - step_fraction: 1.0
+      historical_context: 0.15
+      temporal_transition: 0.25
+      target_context: 0.6
+
 path_qa:
   enabled: true
   qa_cot_fraction: 0.5

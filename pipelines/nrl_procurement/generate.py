@@ -43,6 +43,14 @@ from propositions import (
     write_proposition_cache,
 )
 from reasoning_paths import build_reasoning_paths
+from temporal import (
+    TemporalAlignmentJudge,
+    build_temporal_alignments,
+    build_temporal_judge_inputs,
+    load_temporal_config,
+    resolve_manifest_pairs,
+    write_temporal_artifacts,
+)
 from resume import ResumeManager
 from source_windows import build_source_windows
 from path_qa import (
@@ -92,6 +100,7 @@ _RUN_ATTEMPT_TERMINAL = False
 
 LLM_STAGE_NAMES = {
     "propositions",
+    "temporal_alignment_judge",
     "path_questions",
     "path_answers",
     "path_ablation_trials",
@@ -913,6 +922,7 @@ def _final_manifest(
     reasoning_path_stats: dict[str, Any] | None = None,
     source_window_stats: dict[str, Any] | None = None,
     path_qa_stats: dict[str, Any] | None = None,
+    temporal_stats: dict[str, Any] | None = None,
     judge_batch_integrity_rejections: dict[str, int] | None = None,
 ) -> dict[str, Any]:
     return {
@@ -938,6 +948,7 @@ def _final_manifest(
         "reasoning_paths": reasoning_path_stats or {"enabled": False},
         "source_windows": source_window_stats or {"enabled": False},
         "path_qa": path_qa_stats or {"enabled": False},
+        "temporal": temporal_stats or {"enabled": False},
         "judge_batch_integrity_rejections": judge_batch_integrity_rejections
         or {"single_document": 0, "cross_document": 0},
         "near_duplicates_removed": duplicates,
@@ -1060,6 +1071,7 @@ def main() -> None:
     proposition_stats: dict[str, Any] = {"enabled": False}
     reasoning_path_stats: dict[str, Any] = {"enabled": False}
     path_qa_stats: dict[str, Any] = {"enabled": False}
+    temporal_stats: dict[str, Any] = {"enabled": False}
     promoted_path_records: list[dict[str, Any]] = []
     accepted_propositions: list[dict[str, Any]] = []
     accepted_paths: list[dict[str, Any]] = []
@@ -1138,6 +1150,37 @@ def main() -> None:
             "rejected": len(rejected_paths),
             "schema_version": (accepted_paths[0]["schema_version"] if accepted_paths else None),
         }
+
+    temporal_config = CONFIG.get("temporal", {})
+    if temporal_config.get("enabled", False):
+        resolved_temporal = resolve_manifest_pairs(
+            load_temporal_config(temporal_config),
+            manuals,
+        )
+        temporal_candidates, _ = build_temporal_alignments(
+            accepted_propositions,
+            resolved_temporal,
+        )
+        temporal_judged: list[dict[str, Any]] = []
+        if temporal_candidates and not args.skip_judge:
+            os.environ["HOSTED_VLLM_API_KEY"] = _model_settings(JUDGE)[2]
+            temporal_judged = _execute_llm_stage(
+                "temporal_alignment_judge",
+                "judge",
+                TemporalAlignmentJudge(**_llm_kwargs(JUDGE)),
+                build_temporal_judge_inputs(
+                    temporal_candidates,
+                    accepted_propositions,
+                ),
+            )
+        temporal_stats = write_temporal_artifacts(
+            files_dir,
+            accepted_propositions,
+            temporal_config,
+            manuals,
+            run_id=run_id,
+            judged_alignments=temporal_judged,
+        )
 
     path_qa_config = CONFIG.get("path_qa", {})
     if path_qa_config.get("enabled", False) and accepted_paths:
@@ -1469,6 +1512,7 @@ def main() -> None:
                 reasoning_path_stats=reasoning_path_stats,
                 source_window_stats=source_window_stats,
                 path_qa_stats=path_qa_stats,
+                temporal_stats=temporal_stats,
             ),
         )
         raise SystemExit("No records passed deterministic validation")
@@ -1632,6 +1676,7 @@ def main() -> None:
                 reasoning_path_stats=reasoning_path_stats,
                 source_window_stats=source_window_stats,
                 path_qa_stats=path_qa_stats,
+                temporal_stats=temporal_stats,
             ),
         )
         raise SystemExit("No records passed the quality judge")
@@ -1730,6 +1775,7 @@ def main() -> None:
                     reasoning_path_stats=reasoning_path_stats,
                     source_window_stats=source_window_stats,
                     path_qa_stats=path_qa_stats,
+                    temporal_stats=temporal_stats,
                 ),
             )
             raise SystemExit("No drafting records passed generation and quality checks")
@@ -1769,7 +1815,16 @@ def main() -> None:
         "missing_judge_response" in row.get("judge", {}).get("issues", [])
         for row in [*qa_rejected, *cross_rejected]
     )
-    status = "complete" if not required_missing and not incomplete_requests else "partial"
+    missing_temporal_judge_responses = int(
+        temporal_stats.get("missing_judge_responses", 0)
+    )
+    status = (
+        "complete"
+        if not required_missing
+        and not incomplete_requests
+        and missing_temporal_judge_responses == 0
+        else "partial"
+    )
     final_manifest = _final_manifest(
         run_id=run_id,
         status=status,
@@ -1785,6 +1840,7 @@ def main() -> None:
         reasoning_path_stats=reasoning_path_stats,
         source_window_stats=source_window_stats,
         path_qa_stats=path_qa_stats,
+        temporal_stats=temporal_stats,
         judge_batch_integrity_rejections={
             "single_document": _batch_integrity_rejections(judged),
             "cross_document": _batch_integrity_rejections(cross_judged),
@@ -1793,15 +1849,20 @@ def main() -> None:
     final_manifest["required_task_type_counts"] = task_counts
     final_manifest["missing_required_task_types"] = required_missing
     final_manifest["terminal_request_completeness"] = {
-        "complete": not incomplete_requests and missing_judge_responses == 0,
+        "complete": (
+            not incomplete_requests
+            and missing_judge_responses == 0
+            and missing_temporal_judge_responses == 0
+        ),
         "missing_generation_request_ids": incomplete_requests,
         "missing_judge_responses": missing_judge_responses,
+        "missing_temporal_judge_responses": missing_temporal_judge_responses,
     }
     final_manifest["quality_acceptance"] = {
         "accepted_records": len(accepted),
         "required_task_types_complete": not required_missing,
     }
-    if missing_judge_responses:
+    if missing_judge_responses or missing_temporal_judge_responses:
         final_manifest["status"] = "partial"
     write_manifest(files_dir, final_manifest)
     _RESUME_MANAGER.finish(str(final_manifest["status"]))

@@ -1238,8 +1238,9 @@ experiment.
 
 ### Dataset-annealing research record (2026-07-29)
 
-Status: initial research gate complete; no production implementation has
-started. The effectiveness of any schedule remains an empirical hypothesis.
+Status: research and production data-artifact implementation complete on
+2026-07-30. The effectiveness of any schedule remains an empirical hypothesis
+until the user-controlled pilot and controlled training experiment are run.
 
 Questions researched:
 
@@ -1359,25 +1360,47 @@ Research-supported architecture:
 
 Implementation backlog:
 
-- [ ] Verify and complete amendment/currentness metadata against official
+- [x] Verify and complete amendment/currentness metadata against official
   Department of Expenditure and NRL sources; record a verification cutoff.
-- [ ] Add typed temporal-pair and sampling-schedule configuration with strict
+- [x] Add typed temporal-pair and sampling-schedule configuration with strict
   validation and secret-free fingerprints.
-- [ ] Build bounded one-to-many temporal alignments from accepted propositions
+- [x] Build bounded one-to-many temporal alignments from accepted propositions
   and section windows; write candidate and rejected alignment audits.
-- [ ] Add a source-grounded change extractor that emits historical/target
+- [x] Add a source-grounded change extractor that emits historical/target
   proposition IDs, exact evidence, change type, and explicit lineage basis.
-- [ ] Generate separately validated historical, transition, and target QA/CoT
+- [x] Generate separately validated historical, transition, and target QA/CoT
   exports with visible time and authority scope.
-- [ ] Export a trainer curriculum manifest; do not implement provider batching
+- [x] Export a trainer curriculum manifest; do not implement provider batching
   or model training inside Curator.
-- [ ] Add leakage-safe temporal splits that keep a change lineage together
+- [x] Add leakage-safe temporal splits that keep a change lineage together
   while holding out separate rule families for evaluation.
-- [ ] Add deterministic and judge checks for identical states, unrelated
+- [x] Add deterministic and judge checks for identical states, unrelated
   subjects, reversed dates, unsupported currentness/supersession, missing
   temporal labels, changed numbers/modalities, and NRL/Government leakage.
 - [ ] Run a user-controlled data pilot, followed by a separate controlled
   training experiment before selecting or claiming benefits from a schedule.
+
+Implementation record (2026-07-30):
+
+- `data/source/manuals.yaml` is the evolving canonical source registry.
+  Temporal discovery uses only explicit `temporal_predecessors`; a newly added
+  document cannot silently acquire inferred amendment or supersession edges.
+- Registered NRL PDFs are the authority originals. Runtime corpus loading uses
+  their corresponding Chandra Markdown under `data/interim/ocr`, retaining
+  separate `source_sha256` (PDF) and `content_sha256` (OCR) fingerprints.
+- Government edition identity was checked against the Department of
+  Expenditure publication index at cutoff 2026-07-30. NRL Rev1 PDFs are pinned
+  by source hash; absent a public later-lineage index, no post-Rev1 currentness
+  assertion is made.
+- Temporal candidates require deterministic authority/date/signature checks
+  and an independent configured judge verdict before any change or QA export.
+  Missing judge responses are terminal rejections, not implicit acceptance.
+- Six time-labelled files are emitted: historical QA/QA-CoT, transition
+  QA/QA-CoT, and target QA/QA-CoT, plus candidate/rejection/change audits and a
+  trainer-only curriculum manifest.
+- The schedule is explicitly labelled an unvalidated experiment
+  configuration. Curator performs neither model training nor schedule-benefit
+  claims.
 
 Primary and official sources:
 
