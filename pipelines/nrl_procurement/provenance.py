@@ -237,7 +237,17 @@ def leakage_audit(records: list[dict[str, Any]]) -> dict[str, Any]:
         fields["canonical_record"][str(row.get("record_id", ""))].add(split)
         fields["normalized_question"][_normalized_question(str(row.get("question", "")))].add(split)
         fields["path_family"][str(row.get("path_id") or row.get("source_bundle_id") or row.get("record_id", ""))].add(split)
-        for document in row.get("source_documents", []):
+        documents = row.get("source_documents")
+        if not documents:
+            citations = row.get("citations") or [{}]
+            documents = [
+                {
+                    "source_sha256": row.get("source_sha256", ""),
+                    "manual_id": row.get("manual_id", ""),
+                    "section": citations[0].get("section", ""),
+                }
+            ]
+        for document in documents:
             fields["source_hash"][str(document.get("source_sha256", ""))].add(split)
             fields["manual"][str(document.get("manual_id", ""))].add(split)
             fields["section"][f"{document.get('manual_id', '')}:{document.get('section', '')}"].add(split)

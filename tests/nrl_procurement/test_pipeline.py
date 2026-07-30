@@ -2680,6 +2680,51 @@ def test_leakage_audit_detects_question_and_chunk_across_splits() -> None:
     assert audit["collisions"]["normalized_question"]
 
 
+def test_leakage_audit_covers_single_document_manual_and_section() -> None:
+    rows = [
+        {
+            "record_id": "one",
+            "split": "train",
+            "question": "What does the Goods manual say?",
+            "manual_id": "goods-2021",
+            "source_sha256": "sha-goods-2021",
+            "source_chunk_ids": ["chunk-a"],
+            "citations": [{"section": "Supply order rules"}],
+        },
+        {
+            "record_id": "two",
+            "split": "validation",
+            "question": "What does the earlier Goods edition say?",
+            "manual_id": "goods-2021",
+            "source_sha256": "sha-goods-2021",
+            "source_chunk_ids": ["chunk-b"],
+            "citations": [{"section": "Supply order rules"}],
+        },
+        {
+            "record_id": "three",
+            "split": "train",
+            "question": "cross-document unaffected",
+            "source_documents": [
+                {"manual_id": "left", "section": "x", "source_sha256": "left-sha"},
+                {"manual_id": "right", "section": "y", "source_sha256": "right-sha"},
+            ],
+            "source_chunk_ids": ["left-1", "right-1"],
+        },
+    ]
+    audit = leakage_audit(rows)
+    assert not audit["passed"]
+    assert audit["collisions"]["manual"] == [
+        {"value": "goods-2021", "splits": ["train", "validation"]}
+    ]
+    assert audit["collisions"]["section"] == [
+        {"value": "goods-2021:Supply order rules", "splits": ["train", "validation"]}
+    ]
+    assert audit["collisions"]["source_hash"] == [
+        {"value": "sha-goods-2021", "splits": ["train", "validation"]}
+    ]
+    assert audit["unique_values"]["manual"] == 3
+
+
 def test_ablation_judge_reviews_only_complete_actual_trial_bundles() -> None:
     answer = {
         "record_id": "record-a",
