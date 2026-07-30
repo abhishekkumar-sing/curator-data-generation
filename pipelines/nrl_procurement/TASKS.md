@@ -135,6 +135,120 @@ Research-gate acceptance criteria:
 - [ ] Validate with a user-run bounded pilot before approving the CLI for a
   full `--limit 200` execution. Codex must not run model-backed pilots.
 
+### Same-run resumability research record (2026-07-30)
+
+Status: research and local source audit complete; implementation follows this
+record.
+
+User requirement:
+
+- Reusing the same `--run-id` must continue an interrupted run.
+- Changing a generation or judge model, endpoint, decoding configuration,
+  schema, prompt, validator, or other material input must remain safe under the
+  same run ID. Unaffected completed work should be reused, while the changed
+  stage and all data-dependent downstream work must be recomputed.
+
+Verified findings:
+
+- Curator's local `LLM._hash_fingerprint` includes the dataset fingerprint,
+  prompt-function source hash, model name, response schema, batch mode, and
+  generation parameters. Its request processor reconstructs parsed datasets
+  from persisted responses and sends only unfinished requests when a matching
+  cache is resumed.
+- Curator's fingerprint does not include the endpoint URL, structured-output
+  mode, retry/concurrency/rate-limit backend settings, or validator helpers
+  called indirectly by `parse`. Reopening one stage directory without another
+  identity layer could therefore reuse an old response after an endpoint
+  change when the served model name is unchanged.
+- Snakemake recomputes affected DAG jobs when an input, output, or relevant
+  workflow definition changes. Its between-workflow cache hashes steps,
+  parameters, software stacks, and transitive raw inputs using a Merkle-tree
+  design.
+- Nextflow resumes an interrupted workflow from cached tasks. These systems
+  distinguish immutable cached results from the mutable logical run attempt.
+
+Design decision:
+
+- Keep the logical run at `outputs/<run-id>` and allow repeated invocation with
+  the same explicit run ID.
+- Add a secret-free outer fingerprint directory at
+  `.curator_working/<run-id>/<stage>/<stage-fingerprint>`. The fingerprint
+  covers the stage name, role-specific semantic deployment identity,
+  structured output and runtime settings, full non-secret pipeline
+  configuration, relevant pipeline source hashes, and a versioned fingerprint
+  contract. Curator keeps its existing dataset/prompt/schema/request
+  fingerprint beneath that directory.
+- Distinguish semantic model identity from transport location. Each profile may
+  declare a stable, non-secret deployment/cache identity environment variable
+  representing weights/quantization/tokenizer/chat template/tool parser and
+  serving semantics. When supplied, changing only a port-forward URL does not
+  invalidate the cache. When it is absent, the endpoint remains part of the
+  fingerprint and an endpoint change fails safe by creating a new cache.
+- Do not include API-key values. Record only the configured credential
+  variable name.
+- Re-execute inexpensive deterministic orchestration on resume. Exact unchanged
+  LLM stages load Curator's cached dataset; changed models/endpoints receive a
+  different outer directory; changed upstream datasets receive a different
+  Curator inner fingerprint, automatically invalidating downstream calls.
+- Write a `run_state.json` attempt journal atomically. At invocation start,
+  preserve the prior terminal manifest in append-only resume history and mark
+  the logical run `running`. A stopped attempt cannot leave an old `complete`
+  manifest authorizing stale exports.
+- Never silently combine outputs from two fingerprints. Final canonical files
+  are regenerated from the current attempt, and the terminal manifest records
+  stage fingerprints and whether each stage used an existing cache directory.
+- Treat a run-ID collision without recognized pipeline state as unsafe.
+  Recognized legacy runs remain readable; continuation starts fingerprinted
+  caches and records the migration.
+
+Alternatives rejected:
+
+- Blindly remove the existing nonempty-output guard: unsafe because Curator's
+  inner hash omits endpoint/backend identity.
+- Delete the old run before restarting: destroys audit history and does not
+  satisfy continuation.
+- Reuse successful responses across actual model changes: invalid because model
+  identity is a material dependency. “Continue” means retain the logical run
+  and unaffected stages, not mix old-model outputs into a changed stage.
+- Treat identical served names on arbitrary machines as proof of identical
+  deployments: rejected because weights, quantization, tokenizer, templates,
+  parser flags, and server revisions may differ. Explicitly preserving the
+  deployment/cache identity is the operator assertion for a tunnel-only move.
+- Hash API keys: leaks a stable credential verifier into artifacts and makes
+  routine key rotation invalidate scientific results. Endpoint/model/config
+  identity is sufficient; secrets remain secret.
+
+Primary and official sources:
+
+- Local Curator implementation:
+  `src/bespokelabs/curator/llm/llm.py`,
+  `src/bespokelabs/curator/request_processor/base_request_processor.py`, and
+  `src/bespokelabs/curator/request_processor/cache.py`.
+- Snakemake,
+  [workflow caching](https://snakemake.readthedocs.io/en/v9.13.4/executing/caching.html),
+  [provenance](https://snakemake.readthedocs.io/en/latest/executing/provenance.html),
+  and [DAG recomputation](https://snakemake.readthedocs.io/en/stable/tutorial/basics.html).
+- Nextflow,
+  [resume behavior](https://nextflow.io/docs/stable/guides/updating-spot-retries.html).
+- W3C,
+  [PROV-O](https://www.w3.org/TR/prov-o/).
+
+Implementation acceptance criteria:
+
+- An interrupted same-configuration invocation with the same run ID uses the
+  same stage fingerprint and Curator cache.
+- A generation-model/deployment change creates new generation stage
+  fingerprints. A transport-only endpoint change with an unchanged explicit
+  deployment identity reuses them. Changed generated datasets invalidate judge
+  requests through Curator's inner dataset hash.
+- A judge-only change reuses generation caches and creates new judge stage
+  fingerprints.
+- Prompt/schema/validator/config changes cannot reuse an incompatible stage
+  cache.
+- No fingerprint, state file, manifest, or log contains an API key.
+- A running or failed resumed attempt cannot expose a stale terminal
+  `complete` manifest.
+
 ### Unified CLI research record (2026-07-28)
 
 Status: research gate complete; implementation has not started. Each unchecked
