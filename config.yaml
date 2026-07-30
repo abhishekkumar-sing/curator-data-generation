@@ -135,22 +135,24 @@ quality:
   required_task_types:
     - qa
     - qa_cot
-    - cross_document_qa
-    - cross_document_qa_cot
 
 propositions:
-  enabled: true
+  # Only path_qa and temporal consume propositions; both are disabled below
+  # for the current qa/qa_cot-only scope. Re-enable alongside them.
+  enabled: false
   max_per_window: 8
 
 reasoning_paths:
-  enabled: true
+  # Only path_qa consumes reasoning paths; disabled below for the current
+  # qa/qa_cot-only scope. Re-enable alongside path_qa.
+  enabled: false
   max_per_pair: 25
 
 # Temporal artifacts are derived from accepted, exact-evidence propositions.
 # "publication_series" pairs compare dated editions but never imply legal
 # supersession or present-day applicability.
 temporal:
-  enabled: true
+  enabled: false
   verification_cutoff: "2026-07-30"
   discover_pairs_from_manifest: true
   pilot_pairs_per_edge: 2
@@ -174,7 +176,9 @@ temporal:
       target_context: 0.6
 
 path_qa:
-  enabled: true
+  # Disabled for the current qa/qa_cot-only scope: promoted path answers
+  # export as cross_document_qa/cross_document_qa_cot, outside that scope.
+  enabled: false
   qa_cot_fraction: 0.5
 
 source_windows:
