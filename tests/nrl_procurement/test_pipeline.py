@@ -44,6 +44,7 @@ from generate import (  # noqa: E402
     _budget_judge_rows,
     _judge_prompt_budget,
     _singular_judge_batch_size,
+    judge_eligible_planned,
     materialize_terminal_failures,
     plan_cross_document_requests,
     plan_single_document_requests,
@@ -2362,6 +2363,30 @@ def test_explicit_task_planning_and_request_coverage(monkeypatch) -> None:
         "cross_document_qa",
         "cross_document_qa_cot",
     }
+
+
+def test_judge_coverage_excludes_deterministic_and_budget_rejections() -> None:
+    planned = [
+        {"planned_request_id": f"request-{index}", "planned_task_type": "qa"}
+        for index in range(4)
+    ]
+    # request-0: deterministically rejected, never reached the judge.
+    # request-1: passed determinism/dedup but was prompt-budget rejected.
+    # request-2: passed determinism/dedup and reached the judge stage.
+    # request-3: passed determinism/dedup but the judge stage never returned
+    #            a terminal decision (a genuinely missing judge response).
+    generated = [
+        {"parent_request_id": "request-1", "record_id": "record-1"},
+        {"parent_request_id": "request-2", "record_id": "record-2"},
+        {"parent_request_id": "request-3", "record_id": "record-3"},
+    ]
+    prompt_rejected = [{"judge_items": [{"record_id": "record-1"}]}]
+    eligible = judge_eligible_planned(planned, generated, prompt_rejected)
+    assert {row["planned_request_id"] for row in eligible} == {"request-2", "request-3"}
+
+    judged = [{"parent_request_id": "request-2", "record_id": "record-2"}]
+    coverage = request_coverage(eligible, judged)
+    assert coverage["missing_request_ids"] == ["request-3"]
 
 
 def test_post_retry_omissions_become_terminal_audit_rows() -> None:

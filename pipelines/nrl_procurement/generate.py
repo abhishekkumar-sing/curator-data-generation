@@ -362,6 +362,25 @@ def request_coverage(planned: list[dict[str, Any]], records: list[dict[str, Any]
     }
 
 
+def judge_eligible_planned(
+    planned: list[dict[str, Any]],
+    generated: list[dict[str, Any]],
+    prompt_rejected: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Restrict planned requests to candidates that actually reached the judge stage.
+
+    Deterministic rejections and near-duplicate removal already exclude a
+    generated candidate from `generated` with their own terminal audit trail,
+    and prompt-budget rejections have theirs in `prompt_rejected`. Judge
+    coverage must compare only against this eligible subset, not every
+    planned generation request, or those correctly excluded candidates read
+    as missing judge responses.
+    """
+    budget_rejected_record_ids = {item["record_id"] for row in prompt_rejected for item in row.get("judge_items", [])}
+    eligible_ids = {row["parent_request_id"] for row in generated if row["record_id"] not in budget_rejected_record_ids}
+    return [row for row in planned if row["planned_request_id"] in eligible_ids]
+
+
 def materialize_terminal_failures(
     planned: list[dict[str, Any]],
     records: list[dict[str, Any]],
@@ -1585,7 +1604,7 @@ def main() -> None:
             "real_source_ablation_failed": len(path_answers)
             - len(ablation_passed_ids),
             "pending_independent_judge": len(ablation_passed_ids)
-            - len(accepted_ablation_judgments),
+            - len(ablation_judged),
             "independent_judge_accepted": len(accepted_ablation_judgments),
             "independent_judge_rejected": len(ablation_judged)
             - len(accepted_ablation_judgments),
@@ -1687,7 +1706,10 @@ def main() -> None:
     single_accepted = list(accepted)
     single_coverage = {
         "generated": single_generation_coverage,
-        "judged": request_coverage(planned_single, generated if args.skip_judge else judged),
+        "judged": request_coverage(
+            judge_eligible_planned(planned_single, generated, judge_prompt_rejected),
+            generated if args.skip_judge else judged,
+        ),
         "accepted": request_coverage(planned_single, single_accepted),
     }
     qa_rejected = deterministic_rejected + (
@@ -1787,7 +1809,10 @@ def main() -> None:
                 cross_accepted = [row for row in cross_judged if row["judge"]["accepted"]]
     cross_coverage = {
         "generated": request_coverage(planned_cross, cross_generated_audit),
-        "judged": request_coverage(planned_cross, cross_generated if args.skip_judge else cross_judged),
+        "judged": request_coverage(
+            judge_eligible_planned(planned_cross, cross_generated, cross_judge_prompt_rejected),
+            cross_generated if args.skip_judge else cross_judged,
+        ),
         "accepted": request_coverage(planned_cross, cross_accepted),
     }
     cross_rejected = cross_deterministic_rejected + (
