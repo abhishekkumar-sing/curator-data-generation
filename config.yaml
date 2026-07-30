@@ -43,7 +43,7 @@ model_profiles:
     deployment_identity_env: GEMMA_DEPLOYMENT_ID
     structured_output_mode: json_schema
     # Verified from this private vLLM endpoint's /models metadata.
-    context_window: 8192
+    context_window: 131072
     # Gemma 4 official generation defaults and non-thinking chat-template mode.
     generation_params:
       temperature: 1.0

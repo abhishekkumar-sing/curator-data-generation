@@ -44,11 +44,10 @@ At this handoff:
 - Generation: `hosted_vllm/nvidia/nemotron-3-super`, tool-call structured
   output, deployment identity
   `nemotron-3-super-fp8-vllm-0.25-strict-bypass-v1`.
-- Judge: the active `gemma` profile uses JSON-schema structured output with
-  `temperature=1.0`, `top_k=64`, and `top_p=0.95`. Its local endpoint is
-  configured through ignored `.env` variables rather than tracked files. The
-  supplied endpoint was updated on 2026-07-30; verify `/models` before a live
-  pilot because its initial probe was reset by the server.
+- Judge: the active `gemma` profile uses `google/gemma-4-31B` with JSON-schema
+  structured output, `temperature=1.0`, `top_k=64`, and `top_p=0.95`. Its
+  private endpoint and token are configured through ignored `.env` variables;
+  the verified server context limit is 131,072 tokens.
 - OCR: Chandra uses the private vLLM endpoint configured through ignored
   `OCR_MODEL`, `OCR_BASE_URL`, and `OCR_API_KEY` variables. The OCR command is
   `chandra`; source PDFs are written to `data/interim/ocr` and that OCR output,
