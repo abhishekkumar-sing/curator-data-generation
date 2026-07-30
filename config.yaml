@@ -80,7 +80,12 @@ models:
     generation_params:
       temperature: 1.0
       top_p: 0.95
-      max_tokens: 4096
+      # Pilot-022 hit IncompleteOutputException on path-answer synthesis (the
+      # most verbose generation task: multiple claims/propositions/reasoning
+      # steps in one structured response) at the prior 4096 ceiling. Nemotron's
+      # context_window is 131072 and source windows cap input at 8192 tokens,
+      # so there is ample headroom to raise the completion budget.
+      max_tokens: 8192
       extra_body:
         chat_template_kwargs:
           enable_thinking: false
