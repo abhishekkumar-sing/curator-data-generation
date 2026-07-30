@@ -1234,6 +1234,38 @@ def main() -> None:
         accepted_ablation_judgments = [
             row for row in ablation_judged if row.get("judge", {}).get("accepted", False)
         ]
+        path_question_missing = sorted(
+            {row["path"]["path_id"] for row in path_question_inputs}
+            - {
+                row["path_id"]
+                for row in path_questions_audit
+                if row.get("path_id")
+            }
+        )
+        path_answer_missing = sorted(
+            {row["question_id"] for row in path_questions}
+            - {
+                row["question_id"]
+                for row in path_answers_audit
+                if row.get("question_id")
+            }
+        )
+        ablation_trial_missing = sorted(
+            {row["trial_id"] for row in budgeted_ablation_inputs}
+            - {
+                row["trial_id"]
+                for row in ablation_trials_audit
+                if row.get("trial_id")
+            }
+        )
+        ablation_judge_missing = sorted(
+            {row["record_id"] for row in ablation_judge_inputs}
+            - {
+                row["record_id"]
+                for row in ablation_judged
+                if row.get("record_id")
+            }
+        )
         answers_by_id = {row["record_id"]: row for row in path_answers}
         for judgment in accepted_ablation_judgments:
             answer = {
@@ -1273,6 +1305,18 @@ def main() -> None:
             "independent_judge_accepted": len(accepted_ablation_judgments),
             "independent_judge_rejected": len(ablation_judged)
             - len(accepted_ablation_judgments),
+            "terminal_lineage": {
+                "complete": not (
+                    path_question_missing
+                    or path_answer_missing
+                    or ablation_trial_missing
+                    or ablation_judge_missing
+                ),
+                "missing_path_question_ids": path_question_missing,
+                "missing_path_answer_ids": path_answer_missing,
+                "missing_ablation_trial_ids": ablation_trial_missing,
+                "missing_ablation_judge_record_ids": ablation_judge_missing,
+            },
             "ablation_trials_planned": len(ablation_inputs),
             "ablation_prompt_rejected": len(ablation_prompt_rejected),
             "ablation_trials_valid": len(valid_ablation_trials),
@@ -1580,6 +1624,18 @@ def main() -> None:
     incomplete_requests = [
         *single_coverage["generated"].get("missing_request_ids", []),
         *cross_coverage["generated"].get("missing_request_ids", []),
+        *path_qa_stats.get("terminal_lineage", {}).get(
+            "missing_path_question_ids", []
+        ),
+        *path_qa_stats.get("terminal_lineage", {}).get(
+            "missing_path_answer_ids", []
+        ),
+        *path_qa_stats.get("terminal_lineage", {}).get(
+            "missing_ablation_trial_ids", []
+        ),
+        *path_qa_stats.get("terminal_lineage", {}).get(
+            "missing_ablation_judge_record_ids", []
+        ),
     ]
     missing_judge_responses = sum(
         "missing_judge_response" in row.get("judge", {}).get("issues", [])
