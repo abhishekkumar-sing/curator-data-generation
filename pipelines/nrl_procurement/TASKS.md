@@ -2360,6 +2360,71 @@ Primary sources:
 - [ ] Verify that the final answer is covered by terminal claims.
 - [ ] Derive QA and QA-with-rationale views from one canonical record.
 
+#### Release-gate research record (2026-07-30)
+
+Status: research and code audit complete; implementation follows this record.
+
+Verified findings:
+
+- W3C PROV models source and derived objects as entities connected through
+  generation, usage, and derivation activities. A replayable record therefore
+  needs stable evidence/claim identities and explicit step inputs and outputs;
+  a free-form rationale list is insufficient provenance.
+- DiRe and counterfactual multi-hop QA research show that a correct final
+  answer can come from one supporting-fact subset. Graph validity is necessary
+  for auditability but is not evidence of multi-hop necessity; the actual
+  full/A-only/B-only trials and independent review remain separate gates.
+- Published CoT-faithfulness work finds that stated intermediate reasoning is
+  not reliably used to produce the answer. Deterministic validation can prove
+  grounding, linkage, and structural necessity, but must not label prose
+  rationales as causally faithful without intervention evidence.
+- Group-aware evaluation requires dependency groups to remain disjoint.
+  Source hashes, manuals, sections, chunks, path families, canonical records,
+  and normalized/paraphrase question families are all leakage edges, not
+  independent row-level checks.
+- NIST's TEVV guidance calls for documenting test sets, metrics, and evaluation
+  tooling for repeatability. A generated `eval.jsonl` is not a frozen,
+  independent human-reviewed benchmark.
+
+Implementation decision:
+
+- Create one canonical reasoning graph per accepted record. Stable IDs are
+  content-addressed; every non-source claim has exactly one producing step;
+  every step declares an operation, input claims, output claim, and evidence
+  references. Reject unknown references, cycles, disconnected nodes, unused
+  source claims, and final answers without terminal-claim coverage.
+- Judge the persisted full/A-only/B-only outputs as one immutable bundle using
+  the independent judge profile. Promotion requires deterministic ablation and
+  this actual-output judgment; invalid/missing trials never count as evidence
+  of necessity.
+- Export QA and QA-with-rationale from the same canonical record without
+  changing answer or provenance. Rationale views expose the auditable graph
+  steps; QA views omit their prose only.
+- Emit a leakage audit containing collisions and component membership at every
+  requested level. Treat any train/evaluation collision as a release failure.
+- Extend the terminal manifest with code/config/source fingerprints, stage
+  timings, retry/failure distributions, cache reuse, rejection distributions,
+  task/source coverage, export cardinalities, and human-review status.
+- Provide immutable review/evaluation scaffolding, but do not fabricate human
+  labels. The 100-accepted-record review and frozen-gold gates remain open
+  until reviewers supply them.
+
+Primary sources:
+
+- W3C, [PROV-O](https://www.w3.org/TR/prov-o/) and
+  [PROV constraints](https://www.w3.org/TR/prov-constraints/).
+- Trivedi et al.,
+  [Is Multihop QA in DiRe Condition?](https://aclanthology.org/2020.emnlp-main.712/).
+- Guo et al.,
+  [Counterfactual Multihop QA](https://aclanthology.org/2023.acl-long.231/).
+- Paul et al.,
+  [Making Reasoning Matter](https://aclanthology.org/2024.findings-emnlp.882/).
+- scikit-learn,
+  [GroupKFold](https://scikit-learn.org/stable/modules/generated/sklearn.model_selection.GroupKFold.html)
+  and [data-leakage guidance](https://scikit-learn.org/stable/common_pitfalls.html#data-leakage).
+- NIST AI RMF,
+  [Measure playbook](https://airc.nist.gov/airmf-resources/playbook/measure/).
+
 Acceptance criteria:
 
 - No reasoning step refers to an unknown claim or evidence item.
