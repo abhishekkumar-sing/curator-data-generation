@@ -4891,3 +4891,122 @@ Validation:
   safe to train on; `qa-qacot-full-002`'s existing exported files predate
   this fix and should be re-exported (resume from checkpoint, same run ID)
   rather than trusted as-is.
+
+## Capability research — corpus-level question-opener template collapse (2026-07-31)
+
+Status: researched and implemented; supersedes an inadequate first attempt
+from the same session (see "Rejected alternatives").
+
+Observed defect: manual review of `qa-qacot-full-002`'s canonical export
+found 2,111/2,493 (84.7%) accepted questions begin with the literal phrase
+"According to." Verified root cause: `ProcurementGenerator.prompt()`
+(`generate.py`, CONSTRAINTS section) requires every question to "identify
+the organization, manual, domain, or date needed to make its authority and
+temporal scope unambiguous" — a genuinely necessary requirement, since
+`qa_sft.jsonl` flattens questions from 16 manuals into one file — but gives
+the model no guidance on *how* to satisfy it and no pressure against a
+single stereotyped realization. Each of the ~2,938 generation requests is
+independent and stateless (one isolated passage per call, no shared memory
+across calls), so the model reliably converges on its single most
+statistically default construction absent any counter-pressure.
+
+First attempt (rejected): a within-one-response check
+(`_question_opener_key` comparing the `examples` returned by a single
+`CandidateBatch` call) plus a prompt line forbidding repeated openers
+*within one batch*. Identified as structurally inadequate: a single
+generation call returns at most `examples_per_chunk` (3) records, so this
+mechanism could only ever catch a same-call collision — a negligible
+fraction of a defect that spans thousands of independent calls. Removed in
+favor of a corpus-level mechanism.
+
+Verified findings from primary sources:
+
+- [Self-Instruct (Wang et al., ACL 2023)](https://aclanthology.org/2023.acl-long.754.pdf)
+  (accessed 2026-07-31): a newly generated instruction is added to the task
+  pool only when its ROUGE-L similarity with every existing pool instruction
+  is below 0.7. This is explicitly a growing-pool, corpus-level filter — it
+  rejects a candidate based on its similarity to everything generated
+  *so far*, not based on anything visible to the single call that produced
+  it. This is the established, primary-source-backed technique for exactly
+  this class of problem (template/instruction collapse across many
+  independent generations).
+- Synthetic-data diversity literature (arXiv 2601.17717, "LLM Data
+  Auditor"; arXiv 2505.18949, "The Price of Format: Diversity Collapse in
+  LLMs") (accessed 2026-07-31): templated prompting is documented to
+  measurably reduce output diversity, and "cross-batch mode collapse"
+  (progressive diversity loss across repeated stateless calls) is
+  specifically named as requiring either shared context across calls or
+  post-hoc filtering against accumulated output — prompt wording alone,
+  without a corpus-level check, is not treated as sufficient in this
+  literature.
+- Stratified-sampling/mode-collapse mitigation literature (arXiv
+  2604.07147; general dataset-curation surveys) (accessed 2026-07-31):
+  capping or stratifying by pattern/cluster share is a standard technique
+  for enforcing diversity in a curated corpus after generation, distinct
+  from and complementary to source-side prompt diversity.
+- Local precedent: `validation.py::deduplicate` already implements exactly
+  this shape of corpus-level filter — a deterministic, single-pass,
+  growing-pool comparison (`rapidfuzz.fuzz.token_set_ratio` against
+  already-accepted questions) — for near-duplicate *full-text* removal.
+  This defect is the same failure class at a different granularity (shared
+  opening template rather than near-identical full question), so the
+  correct fix reuses the same architectural position and determinism
+  guarantees rather than inventing a new mechanism.
+
+Decision:
+
+- [x] Keep the prompt wording improvement (the identifying detail does not
+  have to open the sentence; phrase the question in the assigned persona's
+  authentic voice) as a source-side complementary signal — grounded in the
+  "vary prompts via persona/style" finding from general synthetic-data
+  diversity research — but remove the batch-scoped "no two of your own
+  returned questions" instruction and its matching code-level check, since
+  neither can address a phenomenon that spans independent calls.
+- [x] Add `validation.py::enforce_question_opener_diversity`, a
+  deterministic, single-pass, growing-pool cap on how much of the surviving
+  pool may share one normalized 4-word opening n-gram (default
+  `max_share=0.15`, configurable via `quality.max_question_opener_share`),
+  matching `deduplicate`'s exact signature/return shape
+  (`(records, removed_count)`) and processing order.
+- [x] Call it in `generate.py::main()` immediately after `deduplicate()`,
+  before judging — matching this pipeline's established cost-conscious
+  ordering (deterministic rejection always precedes the paid judge call for
+  a candidate that would be discarded anyway), and before the pool sees
+  content this run has no way to un-generate.
+- [x] Add `question_opener_diversity` (unique openers, top opener, top
+  opener's share) to `export.py`'s manifest statistics as a passive,
+  non-rejecting corpus-level visibility signal — independent of the active
+  enforcement above, since the enforcement only sees the pre-judge pool and
+  a small residual concentration could still remain after judging/dedup.
+
+Rejected alternatives:
+
+- The within-batch check from the first attempt: rejected as described
+  above — wrong scope, can only ever address a same-call collision.
+- Hardcoding a fixed set of alternative question-opening phrases (e.g. "use
+  one of these 5 templates"): explicitly rejected per user instruction —
+  this only relocates the collapse from 1 template to N hardcoded ones and
+  does not generalize to any phrasing pattern the model might otherwise
+  produce.
+- Enforcing the quota only after judging (on `accepted` rather than
+  `generated`): rejected because it wastes a paid judge call on a candidate
+  that the quota would discard anyway, inconsistent with every other
+  deterministic-before-judge ordering already established in this pipeline.
+- Feeding a rolling sample of prior questions back into each subsequent
+  generation prompt (true shared-context mitigation, closer to how
+  Self-Instruct also varies its seed pool): deferred as a larger
+  architectural change requiring per-request state threading through
+  Curator's stateless, concurrently-dispatched request model; the post-hoc
+  pool cap achieves the same corpus-level guarantee without it.
+
+Validation:
+
+- Unit tests for `enforce_question_opener_diversity`: caps a dominant
+  opener to its configured share, preserves genuinely diverse questions
+  untouched, and is deterministic given the same input order.
+- Regression test confirming the removed within-batch mechanism's absence
+  does not reintroduce the earlier `citation_offset_unresolvable`/other
+  deterministic checks (no interaction expected, but re-run full suite).
+- A bounded user-run pilot remains required to measure the actual resulting
+  opener-share distribution and yield impact; `max_share=0.15` is a
+  reasoned default, not empirically calibrated against this corpus yet.

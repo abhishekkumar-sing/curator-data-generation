@@ -78,6 +78,7 @@ from schemas import AblationTrialDraft, PathAnswerDraft, PathQuestionBatch
 from schemas import CandidateBatch, JudgeBatch, JudgedCandidate
 from validation import (
     deduplicate,
+    enforce_question_opener_diversity,
     judge_quotes_are_grounded,
     quarantine_invalid_judge_batch,
     recover_grounded_judge_quotes,
@@ -479,7 +480,11 @@ CONSTRAINTS
   whose authentic work or information need the question represents. Choose a
   specific role only when supported by the passage; otherwise use general_user.
 - Each question must stand alone and identify the organization, manual, domain, or
-  date needed to make its authority and temporal scope unambiguous.
+  date needed to make its authority and temporal scope unambiguous. That
+  identifying detail may appear anywhere a natural question places it; it does
+  not have to open the sentence. Phrase each question the way the assigned
+  persona would actually ask it in their own working context, not as a generic
+  reading-comprehension prompt.
 - Allowed question_type values are direct_fact, definition, procedure, sequence,
   threshold, exception, negative_rule, role_responsibility, comparison,
   compliance_check, drafting_knowledge, and currentness.
@@ -989,6 +994,7 @@ def _final_manifest(
     cross_coverage: dict[str, Any],
     drafting_stats: dict[str, Any],
     duplicates: int,
+    opener_overrepresented: int = 0,
     proposition_stats: dict[str, Any] | None = None,
     reasoning_path_stats: dict[str, Any] | None = None,
     source_window_stats: dict[str, Any] | None = None,
@@ -1023,6 +1029,7 @@ def _final_manifest(
         "judge_batch_integrity_rejections": judge_batch_integrity_rejections
         or {"single_document": 0, "cross_document": 0},
         "near_duplicates_removed": duplicates,
+        "question_opener_overrepresented_removed": opener_overrepresented,
         "manuals": manuals,
         "reproducibility": {
             "code_revision": _code_revision(),
@@ -1652,6 +1659,10 @@ def main() -> None:
     deterministic_rejected = [row for row in generated_audit if not row.get("deterministic_checks", {}).get("passed", False)]
     generated = [row for row in generated_audit if row.get("deterministic_checks", {}).get("passed", False)]
     generated, duplicates = deduplicate(generated, float(QUALITY.get("dedupe_threshold", 94)))
+    generated, opener_overrepresented = enforce_question_opener_diversity(
+        generated,
+        float(QUALITY.get("max_question_opener_share", 0.15)),
+    )
     if not generated:
         write_manifest(
             files_dir,
@@ -1666,6 +1677,7 @@ def main() -> None:
                 cross_coverage={},
                 drafting_stats={},
                 duplicates=duplicates,
+                opener_overrepresented=opener_overrepresented,
                 proposition_stats=proposition_stats,
                 reasoning_path_stats=reasoning_path_stats,
                 source_window_stats=source_window_stats,
@@ -1850,6 +1862,7 @@ def main() -> None:
                 cross_coverage=cross_coverage,
                 drafting_stats={},
                 duplicates=duplicates + cross_duplicates,
+                opener_overrepresented=opener_overrepresented,
                 proposition_stats=proposition_stats,
                 reasoning_path_stats=reasoning_path_stats,
                 source_window_stats=source_window_stats,
@@ -1997,6 +2010,7 @@ def main() -> None:
         cross_coverage=cross_coverage,
         drafting_stats=drafting_stats,
         duplicates=duplicates + cross_duplicates,
+        opener_overrepresented=opener_overrepresented,
         proposition_stats=proposition_stats,
         reasoning_path_stats=reasoning_path_stats,
         source_window_stats=source_window_stats,

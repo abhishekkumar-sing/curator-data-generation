@@ -130,6 +130,11 @@ quality:
   # The configured Gemma judge server has an 8,192-token runtime context.
   judge_batch_size: 1
   dedupe_threshold: 94
+  # Corpus-level cap: no single normalized 4-word question opener may exceed
+  # this share of the deterministic-pass, deduplicated pool. Grounded in
+  # Self-Instruct's pool-similarity filtering (ACL 2023) generalized from
+  # near-duplicate full text to shared opening templates.
+  max_question_opener_share: 0.15
   allow_unjudged_exports: false
   require_independent_judge: true
   required_task_types:

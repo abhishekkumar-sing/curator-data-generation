@@ -36,7 +36,7 @@ from drafting import (  # noqa: E402
     normalize_drafting_response,
     read_drafting_seeds,
 )
-from export import assert_unique_record_ids, assign_splits, export_records  # noqa: E402
+from export import assert_unique_record_ids, assign_splits, export_records, question_opener_diversity  # noqa: E402
 from generate import (  # noqa: E402
     ProcurementGenerator,
     ProcurementJudge,
@@ -98,6 +98,7 @@ from source_windows import (  # noqa: E402
 from validate_run import validate_run  # noqa: E402
 from validation import (  # noqa: E402
     deduplicate,
+    enforce_question_opener_diversity,
     judge_batch_identity_issues,
     judge_quotes_are_grounded,
     recover_grounded_judge_quotes,
@@ -1688,6 +1689,34 @@ def test_dedup_and_amendment_connected_split() -> None:
     ]
     assign_splits(records[:2], manuals, 0.8, 0.1, "test")
     assert records[0]["split"] == records[1]["split"]
+
+
+def test_enforce_question_opener_diversity_caps_dominant_template() -> None:
+    records = [{"record_id": f"template-{i}", "question": f"According to the manual, what is fact {i}?"} for i in range(17)]
+    records += [{"record_id": f"varied-{i}", "question": f"Under Section {i}, who approves this step?"} for i in range(3)]
+    kept, removed = enforce_question_opener_diversity(records, max_share=0.15)
+    assert removed == 14  # 20 total records * 0.15 -> limit 3 survivors of the dominant opener
+    kept_templates = sum(1 for r in kept if r["record_id"].startswith("template-"))
+    assert kept_templates == 3
+    assert sum(1 for r in kept if r["record_id"].startswith("varied-")) == 3
+    assert len(kept) + removed == len(records)
+
+
+def test_enforce_question_opener_diversity_leaves_diverse_pool_untouched() -> None:
+    records = [{"record_id": f"r{i}", "question": f"Question number {i} is phrased differently each time?"} for i in range(10)]
+    kept, removed = enforce_question_opener_diversity(records, max_share=0.15)
+    assert removed == 0
+    assert kept == records
+
+
+def test_question_opener_diversity_reports_top_share() -> None:
+    records = [{"question": "According to the manual, what applies?"} for _ in range(3)]
+    records.append({"question": "Who approves this exception?"})
+    report = question_opener_diversity(records)
+    assert report["unique_openers"] == 2
+    assert report["top_opener"] == "according to the manual"
+    assert report["top_opener_share"] == 0.75
+    assert question_opener_diversity([]) == {"unique_openers": 0, "top_opener": "", "top_opener_share": 0.0}
 
 
 def test_connected_split_targets_records_without_leaking_components() -> None:

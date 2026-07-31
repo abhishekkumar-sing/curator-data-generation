@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import re
 from collections import Counter
 from collections.abc import Iterable
@@ -413,6 +414,44 @@ def deduplicate(records: Iterable[dict[str, Any]], threshold: float = 94.0) -> t
     for record in accepted:
         record.pop("_normalized_question", None)
     return accepted, removed
+
+
+def question_opener_key(question: str, words: int = 4) -> str:
+    """Normalize a question's opening n-gram into a template fingerprint."""
+    tokens = re.findall(r"[a-z0-9]+", question.lower())
+    return " ".join(tokens[:words])
+
+
+def enforce_question_opener_diversity(
+    records: Iterable[dict[str, Any]],
+    max_share: float = 0.15,
+) -> tuple[list[dict[str, Any]], int]:
+    """Cap how much of the accepted pool may share one opening template.
+
+    Generation requests are independent and stateless, so no single call can
+    see that many other requests already produced the same opening
+    construction; this is a corpus-level property and must be enforced by
+    inspecting the accumulated output, not by asking one isolated call to
+    self-diversify. Same shape and processing order as `deduplicate` above,
+    which already performs this class of growing-pool filter for near-
+    identical full questions; this applies it to shared opening templates.
+    """
+    records = list(records)
+    if not records:
+        return [], 0
+    limit = max(1, math.ceil(max_share * len(records)))
+    opener_counts: dict[str, int] = {}
+    kept: list[dict[str, Any]] = []
+    removed = 0
+    for record in records:
+        key = question_opener_key(str(record.get("question", "")))
+        count = opener_counts.get(key, 0)
+        if key and count >= limit:
+            removed += 1
+            continue
+        opener_counts[key] = count + 1
+        kept.append(record)
+    return kept, removed
 
 
 def validate_cross_record(record: dict[str, Any], documents: list[dict[str, Any]]) -> list[str]:

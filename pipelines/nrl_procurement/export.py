@@ -10,6 +10,28 @@ from typing import Any
 
 from jsonl_io import write_jsonl_rows
 from provenance import build_reasoning_graph, leakage_audit
+from validation import question_opener_key
+
+
+def question_opener_diversity(records: list[dict[str, Any]]) -> dict[str, Any]:
+    """Report how concentrated accepted questions are on one opening phrase.
+
+    This does not reject anything; `validation.enforce_question_opener_diversity`
+    already does the active rejection pre-judge. This is a post-export
+    visibility signal in case residual concentration remains after judging
+    and deduplication, which the pre-judge pass cannot see.
+    """
+    opener_counts: dict[str, int] = defaultdict(int)
+    for row in records:
+        opener_counts[question_opener_key(str(row.get("question", "")))] += 1
+    if not records:
+        return {"unique_openers": 0, "top_opener": "", "top_opener_share": 0.0}
+    top_opener, top_count = max(opener_counts.items(), key=lambda item: item[1])
+    return {
+        "unique_openers": len(opener_counts),
+        "top_opener": top_opener,
+        "top_opener_share": round(top_count / len(records), 4),
+    }
 
 
 def assert_unique_record_ids(
@@ -285,6 +307,7 @@ def export_records(
     stats["cross_document_qa_cot_sft_records"] = len(cross_cot)
     stats["rag_records"] = len(rag)
     stats["eval_records"] = len(evaluation)
+    stats["question_opener_diversity"] = question_opener_diversity(records)
     write_manifest(
         output_dir,
         {
