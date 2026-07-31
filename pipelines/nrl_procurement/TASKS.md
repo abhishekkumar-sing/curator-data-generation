@@ -4732,3 +4732,83 @@ Validation plan:
 - A bounded user-run pilot remains required before any conclusion about
   resulting yield or split composition; this fix corrects reporting/citation
   integrity, it does not itself re-run generation.
+
+## Capability research — export-time reasoning-graph abort (2026-07-31)
+
+Status: researched and implemented.
+
+Observed incident: a full-corpus qa/qa_cot run (`qa-qacot-full-002`, 3,006
+chunks, ~2,938 generation requests, 3,834 judge decisions, ~1.5 hours of live
+Nemotron/Gemma calls) crashed at the very last step with `ValueError: 9
+accepted records have invalid reasoning graphs` and produced no
+`canonical.jsonl` at all.
+
+Verified root cause:
+
+- `export.py::export_records` (lines 140-172 before this fix) builds a
+  `build_reasoning_graph(row)` for every accepted record, writes any
+  structurally invalid ones to `reasoning_graph_rejected.jsonl`, and then
+  unconditionally raised `ValueError` if that rejected list was non-empty —
+  aborting before `canonical.jsonl` or any task-specific export was written,
+  discarding every other accepted record along with the genuinely bad ones.
+- `provenance.py::build_reasoning_graph` treats a `qa_cot` record's
+  `terminal_claim_ids` ancestry as reachable only through the linear
+  `reasoning_steps` chain (`previous_outputs` carries forward only the most
+  recent step's output claim) plus each step's own directly cited evidence.
+  A top-level `claims` entry whose evidence is never cited by any
+  `reasoning_steps` entry has no outgoing adjacency edge and is therefore
+  unreachable backward from the terminal claim, firing
+  `disconnected_claims` + `unused_source_claim`.
+- All 9 rejected records in the incident matched this exact pattern (8x
+  `disconnected_claims`/`unused_source_claim`, 1x
+  `invalid_or_duplicate_claim_ids`): the model's parallel `claims` and
+  `reasoning_steps` outputs disagreed about which atomic claim was actually
+  walked through, a genuine per-record data defect, not a false positive.
+  Reproduced locally with `_exportable_record(unused_claim=True)` in
+  `tests/nrl_procurement/test_pipeline.py`.
+- Confirmed via the crashed run's own `manifest.json` `resume` section that
+  the generation (7,299 records) and judge (3,834 decisions) stages were
+  both checkpointed (`status: "executed"`) before the crash, so a re-run
+  with the same `--run-id` reuses the cached model responses and only
+  re-executes export — the fix does not require repeating the live calls.
+
+Decision:
+
+- [x] Change `export_records` to exclude only the graph-invalid records
+  (still logged to `reasoning_graph_rejected.jsonl` with their issues) and
+  continue exporting every other accepted record, matching the existing
+  pipeline convention of excluding bad records rather than discarding a
+  whole run (mirrors deterministic-rejection and dedup handling elsewhere
+  in `generate.py`).
+- [x] Mutate the caller's `records` list in place (`records[:] =
+  graph_valid`) so `main()`'s downstream task-type counts and manifest
+  statistics, computed from the same list object after `export_records`
+  returns, agree with what was actually written to `canonical.jsonl`.
+- [x] Add `stats["reasoning_graphs_rejected"]` alongside the existing
+  `reasoning_graphs_valid` counter for manifest visibility.
+
+Rejected alternatives:
+
+- Keeping the hard abort and only fixing it operationally (e.g. asking
+  operators to manually filter and re-export): rejected because the
+  pipeline's own resumability design already treats completed
+  generation/judge checkpoints as reusable; the export step should honor
+  that same philosophy instead of requiring a full manual recovery workflow
+  for a handful of bad records.
+- Also adding a generation-time deterministic check that every top-level
+  claim's evidence is cited by some reasoning step (catching this before
+  judging, not just before export): deferred as a separate, worthwhile
+  follow-up rather than bundled into this incident fix, since the acute
+  problem is the crash's blast radius, not that the defect exists at all.
+
+Validation:
+
+- Added `test_export_drops_only_graph_invalid_records_instead_of_aborting`,
+  reproducing the exact `disconnected_claims`/`unused_source_claim` pattern
+  from the incident and asserting export no longer raises, the bad record
+  is excluded from `canonical.jsonl` and the mutated `records` list, and it
+  still appears in `reasoning_graph_rejected.jsonl`.
+- Full focused suite (101 tests) and Ruff pass.
+- Operational follow-up: re-run `qa-qacot-full-002` with the same run ID to
+  resume from the checkpointed generation/judge stages and complete export
+  without repeating the live model calls.

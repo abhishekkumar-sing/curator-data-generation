@@ -2684,6 +2684,70 @@ def test_reasoning_graph_is_stable_connected_and_terminal() -> None:
     assert len(first["terminal_claim_ids"]) == 1
 
 
+def _exportable_record(record_id: str, *, unused_claim: bool) -> dict:
+    claims = [
+        {
+            "statement": "Rule A applies.",
+            "evidence": [{"source_id": "source_a", "quote": "Rule A applies."}],
+        }
+    ]
+    if unused_claim:
+        claims.append(
+            {
+                "statement": "Rule B also applies.",
+                "evidence": [{"source_id": "source_a", "quote": "Rule B also applies."}],
+            }
+        )
+    return {
+        "record_id": record_id,
+        "split": "train",
+        "manual_id": "manual",
+        "source_chunk_ids": ["chunk-1"],
+        "citations": [
+            {
+                "citation_id": "chunk-1",
+                "manual_id": "manual",
+                "chunk_id": "chunk-1",
+                "page": 1,
+                "section": "Policy",
+                "quote": "Rule A applies.",
+            }
+        ],
+        "task_type": "qa_cot",
+        "task": "general_reference",
+        "persona": "general_user",
+        "question": "What rule applies?",
+        "answer": "Rule A applies.",
+        "answerable": True,
+        "claims": claims,
+        "evidence": [{"manual_id": "manual", "chunk_id": "chunk-1", "quote": "Rule A applies."}],
+        "question_type": "direct_fact",
+        "reasoning_steps": [
+            {
+                "operation": "lookup",
+                "statement": "Apply rule A.",
+                "evidence_quotes": ["Rule A applies."],
+            }
+        ],
+    }
+
+
+def test_export_drops_only_graph_invalid_records_instead_of_aborting(tmp_path: Path) -> None:
+    records = [
+        _exportable_record("record-good", unused_claim=False),
+        _exportable_record("record-bad", unused_claim=True),
+    ]
+    stats = export_records(records, [{"manual_id": "manual"}], tmp_path, "test-run")
+    assert stats["records"] == 1
+    assert stats["reasoning_graphs_rejected"] == 1
+    # export_records mutates the passed-in list to match what was exported.
+    assert [row["record_id"] for row in records] == ["record-good"]
+    canonical_ids = [json.loads(line)["record_id"] for line in (tmp_path / "canonical.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert canonical_ids == ["record-good"]
+    rejected = [json.loads(line) for line in (tmp_path / "reasoning_graph_rejected.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert rejected == [{"record_id": "record-bad", "issues": ["disconnected_claims", "unused_source_claim"]}]
+
+
 def test_leakage_audit_detects_question_and_chunk_across_splits() -> None:
     rows = [
         {

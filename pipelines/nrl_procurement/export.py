@@ -147,10 +147,13 @@ def export_records(
     assert_unique_record_ids(records)
     output_dir.mkdir(parents=True, exist_ok=True)
     graph_rejected = []
+    graph_valid = []
     for row in records:
         graph = build_reasoning_graph(row)
         row["reasoning_graph"] = graph
-        if not graph["validation"]["passed"]:
+        if graph["validation"]["passed"]:
+            graph_valid.append(row)
+        else:
             graph_rejected.append(
                 {
                     "record_id": row["record_id"],
@@ -159,9 +162,10 @@ def export_records(
             )
     if graph_rejected:
         _write(output_dir / "reasoning_graph_rejected.jsonl", graph_rejected)
-        raise ValueError(
-            f"{len(graph_rejected)} accepted records have invalid reasoning graphs"
-        )
+    # A record whose reasoning graph fails structural validation is dropped
+    # rather than aborting the whole export: one malformed record must not
+    # discard every other accepted record's real generation/judge lineage.
+    records[:] = graph_valid
     leakage = leakage_audit(records)
     (output_dir / "leakage_audit.json").write_text(
         json.dumps(leakage, ensure_ascii=False, indent=2) + "\n",
@@ -263,6 +267,7 @@ def export_records(
             counts[f"manual_{manual_id}"] += 1
     stats = {"records": len(records), **dict(sorted(counts.items()))}
     stats["reasoning_graphs_valid"] = len(records)
+    stats["reasoning_graphs_rejected"] = len(graph_rejected)
     stats["leakage_audit_passed"] = leakage["passed"]
     write_manifest(
         output_dir,
