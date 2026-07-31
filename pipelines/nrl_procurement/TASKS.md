@@ -4812,3 +4812,82 @@ Validation:
 - Operational follow-up: re-run `qa-qacot-full-002` with the same run ID to
   resume from the checkpointed generation/judge stages and complete export
   without repeating the live model calls.
+
+## Capability research — train/eval file split leakage in export (2026-07-31)
+
+Status: researched and implemented.
+
+Observed incident: manual review of `qa-qacot-full-002`'s exported files
+found `qa_sft.jsonl` (2,163 records) spanning all three splits (`train`
+1,676 / `validation` 254 / `test` 233) and `eval.jsonl` (2,493 records,
+1,930/305/258) sharing **100%** record_id overlap with `qa_sft.jsonl` and
+`qa_cot_sft.jsonl`. `assign_splits`/`leakage_audit` correctly assign and
+audit the `split` field upstream, but `export_records` never applied it
+when writing the per-task-type files.
+
+Verified root cause:
+
+- `export.py::export_records` (before this fix) built `qa`/`cot`/`cross_qa`/
+  `cross_cot`/`rag`/`evaluation` from every accepted record regardless of
+  `row["split"]`, then wrote each straight to a single flat file. The
+  `split` field was present per-row inside each exported object, but
+  nothing partitioned the files themselves on it. A consumer training on
+  `qa_sft.jsonl` "as-is" and evaluating on `eval.jsonl` "as-is" would
+  silently train on part of what they believe is held-out evaluation data.
+
+- [Hugging Face `datasets` repository-structure convention](https://huggingface.co/docs/datasets/repository_structure)
+  (accessed 2026-07-31): splits are conventionally separated either by
+  filename (`train.csv`/`validation.csv`/`test.csv`) or by directory, and
+  the library infers split membership from the file itself — never from a
+  field inside a shared file. Manual-split guidance further recommends
+  auditing for exact and near-duplicate overlap between split files as a
+  release gate, which is exactly the check that was missing here at the
+  file level despite already existing at the record-assignment level
+  (`leakage_audit`).
+
+Decision:
+
+- [x] Filter every `*_sft.jsonl` export (`qa_sft`, `qa_cot_sft`,
+  `cross_document_qa_sft`, `cross_document_qa_cot_sft`) and `rag.jsonl` to
+  `split == "train"` only.
+- [x] Filter `eval.jsonl` to non-train splits (`validation` + `test`) only.
+- [x] Leave `canonical.jsonl` covering every split unchanged — it is the
+  full audit/lineage record, not a ready-to-train artifact, and collapsing
+  it to one split would break `leakage_audit`/manifest statistics that
+  legitimately need the whole accepted population.
+- [x] Add explicit per-file record counts (`qa_sft_records`,
+  `qa_cot_sft_records`, `cross_document_qa_sft_records`,
+  `cross_document_qa_cot_sft_records`, `rag_records`, `eval_records`) to
+  manifest statistics so a future train/eval mismatch is visible without
+  manually diffing record_ids across files by hand, the way this one was
+  found.
+
+Rejected alternatives:
+
+- Splitting into per-split files (`qa_sft_train.jsonl`,
+  `qa_sft_validation.jsonl`, `qa_sft_test.jsonl`, matching the HF filename
+  convention exactly): rejected for now as unnecessary complexity — the
+  existing single-file-per-purpose naming (`*_sft.jsonl` = train,
+  `eval.jsonl` = non-train) is unambiguous once the invariant holds, and
+  the `split` field remains in every exported row for anyone who wants
+  finer partitioning (e.g. separating validation from test within
+  `eval.jsonl`).
+- Leaving `rag.jsonl` all-split (treating it as a distinct, non-training
+  artifact): rejected because it is exported alongside the SFT files as a
+  ready-to-use artifact with the same messages/answer shape, and nothing
+  in this pipeline documents `rag.jsonl` as an evaluation-only file; the
+  same train/eval overlap risk applies to it.
+
+Validation:
+
+- Added `test_export_never_mixes_splits_between_sft_and_eval_files`,
+  constructing train/validation/test records across distinct manuals
+  (avoiding `leakage_audit` collisions unrelated to this fix) and asserting
+  `qa_sft.jsonl`/`rag.jsonl` contain only train record_ids, `eval.jsonl`
+  contains only non-train record_ids, and the two sets never intersect.
+- Full focused suite (102 tests) and Ruff pass.
+- A bounded user-run pilot remains required to confirm the fix against a
+  real multi-split run before treating any prior run's `qa_sft.jsonl` as
+  safe to train on; `qa-qacot-full-002`'s existing exported files predate
+  this fix and should be re-exported (resume from checkpoint, same run ID)
+  rather than trusted as-is.

@@ -196,9 +196,10 @@ def export_records(
             ],
         }
         is_cross = row["task_type"].startswith("cross_document_")
-        if row["task_type"] == "qa":
+        is_train = row["split"] == "train"
+        if row["task_type"] == "qa" and is_train:
             qa.append(qa_row)
-        elif row["task_type"] == "cross_document_qa":
+        elif row["task_type"] == "cross_document_qa" and is_train:
             cross_qa.append(
                 {
                     **qa_row,
@@ -206,7 +207,7 @@ def export_records(
                     "source_bundle_id": row["source_bundle_id"],
                 }
             )
-        if row["task_type"] in {"qa_cot", "cross_document_qa_cot"}:
+        if row["task_type"] in {"qa_cot", "cross_document_qa_cot"} and is_train:
             rationale = "\n".join(f"{index}. {step['statement']}" for index, step in enumerate(row["reasoning_steps"], 1))
             cot_row = {
                 **provenance,
@@ -228,26 +229,32 @@ def export_records(
                         "source_bundle_id": row["source_bundle_id"],
                     }
                 )
-        rag.append(
-            {
-                **provenance,
-                "question": row["question"],
-                "contexts": row["evidence"],
-                "answer": row["answer"],
-                "answerable": row["answerable"],
-            }
-        )
-        evaluation.append(
-            {
-                **provenance,
-                "question": row["question"],
-                "reference_answer": row["answer"],
-                "evidence": row["evidence"],
-                "question_type": row["question_type"],
-                "task": row["task"],
-                "persona": row["persona"],
-            }
-        )
+        if is_train:
+            rag.append(
+                {
+                    **provenance,
+                    "question": row["question"],
+                    "contexts": row["evidence"],
+                    "answer": row["answer"],
+                    "answerable": row["answerable"],
+                }
+            )
+        else:
+            evaluation.append(
+                {
+                    **provenance,
+                    "question": row["question"],
+                    "reference_answer": row["answer"],
+                    "evidence": row["evidence"],
+                    "question_type": row["question_type"],
+                    "task": row["task"],
+                    "persona": row["persona"],
+                }
+            )
+    # Every *_sft.jsonl and rag.jsonl file is train-split only; eval.jsonl is
+    # validation+test only. canonical.jsonl above retains every split so the
+    # split assignment itself stays fully auditable; only the ready-to-use
+    # training/evaluation exports must never overlap on record_id.
     _write(output_dir / "qa_sft.jsonl", qa)
     _write(output_dir / "qa_cot_sft.jsonl", cot)
     _write(output_dir / "cross_document_qa_sft.jsonl", cross_qa)
@@ -269,6 +276,15 @@ def export_records(
     stats["reasoning_graphs_valid"] = len(records)
     stats["reasoning_graphs_rejected"] = len(graph_rejected)
     stats["leakage_audit_passed"] = leakage["passed"]
+    # Explicit per-export-file counts so a train-only/eval-only mismatch
+    # against `records` (the full accepted, all-split pool) is visible in
+    # the manifest without re-deriving it from the exported files by hand.
+    stats["qa_sft_records"] = len(qa)
+    stats["qa_cot_sft_records"] = len(cot)
+    stats["cross_document_qa_sft_records"] = len(cross_qa)
+    stats["cross_document_qa_cot_sft_records"] = len(cross_cot)
+    stats["rag_records"] = len(rag)
+    stats["eval_records"] = len(evaluation)
     write_manifest(
         output_dir,
         {

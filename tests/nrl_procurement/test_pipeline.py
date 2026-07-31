@@ -2652,6 +2652,86 @@ def test_exports_keep_qa_and_rationale_task_files_disjoint(tmp_path: Path) -> No
         assert json.loads(line)["reasoning_graph"]["validation"]["passed"]
 
 
+def _split_record(record_id: str, split: str, manual_id: str) -> dict:
+    quote = f"The stated action is required for {manual_id}."
+    return {
+        "record_id": record_id,
+        "split": split,
+        "manual_id": manual_id,
+        "source_chunk_ids": [f"chunk-{record_id}"],
+        "citations": [
+            {
+                "citation_id": f"chunk-{record_id}",
+                "manual_id": manual_id,
+                "chunk_id": f"chunk-{record_id}",
+                "page": 1,
+                "section": "Policy",
+                "quote": quote,
+            }
+        ],
+        "task_type": "qa",
+        "task": "general_reference",
+        "persona": "general_user",
+        "question": f"What is required under {manual_id}?",
+        "answer": quote,
+        "answerable": True,
+        "reasoning_steps": [],
+        "claims": [
+            {
+                "statement": quote,
+                "evidence": [
+                    {
+                        "manual_id": manual_id,
+                        "chunk_id": f"chunk-{record_id}",
+                        "quote": quote,
+                    }
+                ],
+            }
+        ],
+        "evidence": [
+            {
+                "manual_id": manual_id,
+                "chunk_id": f"chunk-{record_id}",
+                "quote": quote,
+            }
+        ],
+        "question_type": "direct_fact",
+    }
+
+
+def test_export_never_mixes_splits_between_sft_and_eval_files(tmp_path: Path) -> None:
+    records = [
+        _split_record("train-1", "train", "manual-a"),
+        _split_record("train-2", "train", "manual-b"),
+        _split_record("val-1", "validation", "manual-c"),
+        _split_record("test-1", "test", "manual-d"),
+    ]
+    export_records(
+        records,
+        [{"manual_id": m} for m in ("manual-a", "manual-b", "manual-c", "manual-d")],
+        tmp_path,
+        "test-run",
+    )
+
+    qa_sft_ids = {json.loads(line)["record_id"] for line in (tmp_path / "qa_sft.jsonl").read_text(encoding="utf-8").splitlines()}
+    rag_ids = {json.loads(line)["record_id"] for line in (tmp_path / "rag.jsonl").read_text(encoding="utf-8").splitlines()}
+    eval_ids = {json.loads(line)["record_id"] for line in (tmp_path / "eval.jsonl").read_text(encoding="utf-8").splitlines()}
+
+    assert qa_sft_ids == {"train-1", "train-2"}
+    assert rag_ids == {"train-1", "train-2"}
+    assert eval_ids == {"val-1", "test-1"}
+    # The defining invariant: no record_id is ready-to-train and ready-to-eval at once.
+    assert not (qa_sft_ids & eval_ids)
+    assert not (rag_ids & eval_ids)
+
+    manifest = json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))
+    stats = manifest["statistics"]
+    assert stats["qa_sft_records"] == 2
+    assert stats["rag_records"] == 2
+    assert stats["eval_records"] == 2
+    assert stats["records"] == 4
+
+
 def test_reasoning_graph_is_stable_connected_and_terminal() -> None:
     record = {
         "record_id": "record-graph",
