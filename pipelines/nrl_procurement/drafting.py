@@ -10,7 +10,12 @@ from typing import Any
 
 from jsonl_io import write_jsonl_rows
 from pydantic import ValidationError
-from schemas import DraftingJudgeDecision, DraftingResult, DraftingSeed
+from schemas import (
+    DraftingJudgeDecision,
+    DraftingResult,
+    DraftingSeed,
+    collect_structural_repairs,
+)
 from settings import CONFIG
 from validation import semantic_support_issues
 
@@ -372,7 +377,7 @@ and tender-fact lists, and absence of unsupported content.
     def parse(self, row: dict[str, Any], response: DraftingResult) -> list[dict[str, Any]]:
         """Retain full lineage while marking deterministic acceptance."""
         blocks = []
-        repairs: list[str] = []
+        repairs: list[str] = collect_structural_repairs(response)
         for block in response.document_blocks:
             normalized_text, block_repairs = normalize_drafting_response(block.text)
             blocks.append(block.model_copy(update={"text": normalized_text}))
@@ -540,6 +545,7 @@ to perform the requested drafting task.
             **row,
             "judge": {
                 **decision,
+                "structural_repairs": collect_structural_repairs(response),
                 "accepted": accepted,
                 "model": self.model_name,
             },

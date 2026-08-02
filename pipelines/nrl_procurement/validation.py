@@ -489,6 +489,30 @@ def question_opener_key(question: str, words: int = 4) -> str:
     return " ".join(tokens[:words])
 
 
+SOURCE_FRAMING_PREFIX = re.compile(
+    r"^\s*(?:according\s+to|as\s+per|in\s+accordance\s+with|"
+    r"under\s+(?:the\s+)?(?:manual|policy|rules?|guidelines?))\b",
+    re.IGNORECASE,
+)
+
+
+def question_style_issues(question: str, persona: str) -> list[str]:
+    """Reject source-reading templates and cosmetic persona preambles."""
+    issues: list[str] = []
+    value = " ".join(str(question).split())
+    if SOURCE_FRAMING_PREFIX.search(value):
+        issues.append("templated_source_attribution_opener")
+    normalized_persona = " ".join(str(persona).replace("_", " ").split())
+    if normalized_persona and normalized_persona != "general user":
+        role_prefix = re.compile(
+            rf"^\s*as\s+(?:a|an|the)\s+{re.escape(normalized_persona)}\b",
+            re.IGNORECASE,
+        )
+        if role_prefix.search(value):
+            issues.append("cosmetic_persona_preamble")
+    return issues
+
+
 def is_extractive_answer(record: dict[str, Any], minimum_words: int = 4) -> bool:
     """Return whether an answer is a substantial verbatim evidence span.
 

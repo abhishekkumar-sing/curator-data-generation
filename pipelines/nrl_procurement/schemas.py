@@ -2,9 +2,91 @@
 
 # ruff: noqa: D101
 
-from typing import Literal
+import json
+from typing import Annotated, Any, ClassVar, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, GetJsonSchemaHandler, model_validator
+from pydantic.json_schema import JsonSchemaValue
+
+
+class AuditedListModel(BaseModel):
+    """Recover only valid JSON-encoded lists and retain an audit marker.
+
+    Some OpenAI-compatible tool servers return a schema list as a JSON string.
+    This narrow repair accepts only a string that decodes to an actual JSON
+    list. It deliberately does not use ``eval``, coerce prose, or map enums.
+    The audit field is excluded from serialization and from the tool schema.
+    """
+
+    json_list_fields: ClassVar[tuple[str, ...]] = ()
+    structural_repairs: list[str] = Field(
+        default_factory=list,
+        exclude=True,
+        alias="_structural_repairs",
+    )
+    model_config = ConfigDict(populate_by_name=True)
+
+    @model_validator(mode="before")
+    @classmethod
+    def recover_json_lists(cls, value: Any) -> Any:
+        """Decode only configured fields containing valid JSON arrays."""
+        if not isinstance(value, dict):
+            return value
+        repaired = dict(value)
+        repairs = list(repaired.get("_structural_repairs", []))
+        for field_name in cls.json_list_fields:
+            candidate = repaired.get(field_name)
+            if not isinstance(candidate, str):
+                continue
+            try:
+                decoded = json.loads(candidate)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(decoded, list):
+                repaired[field_name] = decoded
+                repairs.append(f"stringified_json_list:{field_name}")
+        if repairs:
+            repaired["_structural_repairs"] = repairs
+        return repaired
+
+    @classmethod
+    def __get_pydantic_json_schema__(
+        cls,
+        core_schema: Any,
+        handler: GetJsonSchemaHandler,
+    ) -> JsonSchemaValue:
+        """Hide the pipeline-only repair ledger from model-facing schemas."""
+        schema = super().__get_pydantic_json_schema__(core_schema, handler)
+        schema.get("properties", {}).pop("_structural_repairs", None)
+        required = schema.get("required", [])
+        schema["required"] = [
+            name for name in required if name != "_structural_repairs"
+        ]
+        if not schema.get("required"):
+            schema.pop("required", None)
+        return schema
+
+
+def collect_structural_repairs(value: Any, path: str = "") -> list[str]:
+    """Collect nested structural repair markers with stable field paths."""
+    repairs: list[str] = []
+    if isinstance(value, AuditedListModel):
+        repairs.extend(
+            f"{path}:{repair}" if path else repair
+            for repair in value.structural_repairs
+        )
+    if isinstance(value, BaseModel):
+        for field_name in value.__class__.model_fields:
+            if field_name == "structural_repairs":
+                continue
+            child_path = f"{path}.{field_name}" if path else field_name
+            repairs.extend(
+                collect_structural_repairs(getattr(value, field_name), child_path)
+            )
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            repairs.extend(collect_structural_repairs(item, f"{path}[{index}]"))
+    return list(dict.fromkeys(repairs))
 
 ProcurementPersona = Literal[
     "indenting_officer",
@@ -87,6 +169,8 @@ ProcurementTask = Literal[
     "currentness",
 ]
 
+IssueText = Annotated[str, Field(max_length=160)]
+
 QuestionType = Literal[
     "direct_fact",
     "definition",
@@ -111,25 +195,27 @@ class EvidenceDraft(BaseModel):
     quote: str = Field(min_length=1)
 
 
-class AnswerClaimDraft(BaseModel):
+class AnswerClaimDraft(AuditedListModel):
     """One material answer claim and its exact supporting source spans."""
 
     # Parse incomplete model objects so deterministic validation can persist a
     # precise rejection instead of losing the entire request to Pydantic.
     statement: str = ""
     evidence: list[EvidenceDraft] = Field(default_factory=list)
+    json_list_fields = ("evidence",)
 
 
-class ReasoningStepDraft(BaseModel):
+class ReasoningStepDraft(AuditedListModel):
     # Intermediate model output is intentionally permissive. The validator
     # enforces the operation vocabulary and grounded inputs while preserving
     # malformed rows in the audit trail.
     operation: str = ""
     statement: str = ""
     evidence_quotes: list[str] = Field(default_factory=list)
+    json_list_fields = ("evidence_quotes",)
 
 
-class Candidate(BaseModel):
+class Candidate(AuditedListModel):
     task_type: Literal["qa", "qa_cot"]
     task: ProcurementTask
     persona: ProcurementPersona
@@ -140,13 +226,15 @@ class Candidate(BaseModel):
     claims: list[AnswerClaimDraft] = Field(default_factory=list)
     evidence: list[EvidenceDraft] = Field(default_factory=list)
     reasoning_steps: list[ReasoningStepDraft] = Field(default_factory=list)
+    json_list_fields = ("claims", "evidence", "reasoning_steps")
 
 
-class CandidateBatch(BaseModel):
+class CandidateBatch(AuditedListModel):
     examples: list[Candidate]
+    json_list_fields = ("examples",)
 
 
-class QABlueprintDraft(BaseModel):
+class QABlueprintDraft(AuditedListModel):
     """A grounded plan produced before final question wording."""
 
     # Keep the allowed vocabulary in the prompt and validate it in parse. This
@@ -154,12 +242,20 @@ class QABlueprintDraft(BaseModel):
     # auditable rejection can be written.
     task: str
     persona: str
+    persona_need: str = Field(
+        min_length=12,
+        description=(
+            "Concrete work decision, check, or action for which this persona "
+            "needs the answer; never a role-play preamble."
+        ),
+    )
     instruction_goal: str = Field(min_length=12)
     must_cover: list[str] = Field(min_length=1, max_length=4)
     evidence: list[EvidenceDraft] = Field(min_length=1, max_length=4)
+    json_list_fields = ("must_cover", "evidence")
 
 
-class GroundedCandidateDraft(BaseModel):
+class GroundedCandidateDraft(AuditedListModel):
     """Final wording for one already-fixed blueprint.
 
     Contract labels deliberately do not appear here. The pipeline injects the
@@ -171,6 +267,7 @@ class GroundedCandidateDraft(BaseModel):
     answer: str = Field(min_length=1)
     claims: list[AnswerClaimDraft] = Field(default_factory=list)
     reasoning_steps: list[ReasoningStepDraft] = Field(default_factory=list)
+    json_list_fields = ("claims", "reasoning_steps")
 
 
 class UnanswerableQuestionDraft(BaseModel):
@@ -180,7 +277,7 @@ class UnanswerableQuestionDraft(BaseModel):
     missing_premise: str = Field(min_length=4)
 
 
-class AnswerabilityDecision(BaseModel):
+class AnswerabilityDecision(AuditedListModel):
     """Independent full-context verification of an adversarial negative."""
 
     record_id: str = Field(min_length=1)
@@ -190,9 +287,10 @@ class AnswerabilityDecision(BaseModel):
     abstention_is_appropriate: bool
     score: int = Field(ge=1, le=5)
     issues: list[str] = Field(default_factory=list)
+    json_list_fields = ("issues",)
 
 
-class PropositionDraft(BaseModel):
+class PropositionDraft(AuditedListModel):
     """One source-language procurement proposition and its complete witness."""
 
     subject: str = Field(min_length=1)
@@ -212,10 +310,12 @@ class PropositionDraft(BaseModel):
     threshold_unit: str = ""
     temporal_scope: str = ""
     evidence_quote: str = Field(min_length=8)
+    json_list_fields = ("conditions", "exceptions")
 
 
-class PropositionBatch(BaseModel):
+class PropositionBatch(AuditedListModel):
     propositions: list[PropositionDraft]
+    json_list_fields = ("propositions",)
 
 
 PathQuestionType = Literal[
@@ -229,15 +329,18 @@ PathQuestionType = Literal[
 
 
 class PathQuestionDraft(BaseModel):
-    task: ProcurementTask
-    persona: ProcurementPersona
-    question_type: PathQuestionType
-    difficulty: Literal["moderate", "advanced"]
+    # Parse unknown labels so deterministic validation can preserve the request
+    # as a rejection instead of dropping it at the transport boundary.
+    task: str
+    persona: str
+    question_type: str
+    difficulty: str
     question: str = Field(min_length=12)
 
 
-class PathQuestionBatch(BaseModel):
+class PathQuestionBatch(AuditedListModel):
     questions: list[PathQuestionDraft] = Field(max_length=1)
+    json_list_fields = ("questions",)
 
 
 class PathAnswerEvidenceDraft(BaseModel):
@@ -245,27 +348,30 @@ class PathAnswerEvidenceDraft(BaseModel):
     quote: str = Field(min_length=8)
 
 
-class PathAnswerClaimDraft(BaseModel):
+class PathAnswerClaimDraft(AuditedListModel):
     statement: str = Field(min_length=8)
     evidence: list[PathAnswerEvidenceDraft] = Field(min_length=1)
+    json_list_fields = ("evidence",)
 
 
-class PathAnswerDraft(BaseModel):
+class PathAnswerDraft(AuditedListModel):
     answer: str = Field(min_length=1)
     claims: list[PathAnswerClaimDraft] = Field(min_length=2)
     rationale_steps: list[str] = Field(default_factory=list, max_length=4)
+    json_list_fields = ("claims", "rationale_steps")
 
 
-class AblationTrialDraft(BaseModel):
+class AblationTrialDraft(AuditedListModel):
     """One answer attempt under an explicitly bounded evidence context."""
 
     answerable: bool
     answer: str = ""
     claims: list[PathAnswerClaimDraft] = Field(default_factory=list)
     limitation_reason: str = ""
+    json_list_fields = ("claims",)
 
 
-class AblationJudgeDecision(BaseModel):
+class AblationJudgeDecision(AuditedListModel):
     """Independent review of persisted full/A-only/B-only answer attempts."""
 
     record_id: str
@@ -275,16 +381,19 @@ class AblationJudgeDecision(BaseModel):
     comparison_valid: bool
     score: int = Field(ge=1, le=5)
     issues: list[str] = Field(default_factory=list)
+    json_list_fields = ("issues",)
 
 
-class JudgeDecision(BaseModel):
+class JudgeDecision(AuditedListModel):
     supported: bool
     relevant: bool
     preserves_qualifications: bool
     authority_correct: bool
     reasoning_valid: bool
-    recommended_task: ProcurementTask
-    recommended_persona: ProcurementPersona
+    question_natural: bool
+    persona_relevant: bool
+    recommended_task: str
+    recommended_persona: str
     answer_found_in_source: bool
     answer_quotes: list[str] = Field(
         default_factory=list,
@@ -294,7 +403,8 @@ class JudgeDecision(BaseModel):
         ),
     )
     score: int = Field(ge=1, le=5)
-    issues: list[str] = Field(default_factory=list)
+    issues: list[IssueText] = Field(default_factory=list, max_length=4)
+    json_list_fields = ("answer_quotes", "issues")
 
 
 class JudgedCandidate(BaseModel):
@@ -302,8 +412,9 @@ class JudgedCandidate(BaseModel):
     decision: JudgeDecision
 
 
-class JudgeBatch(BaseModel):
+class JudgeBatch(AuditedListModel):
     judgments: list[JudgedCandidate]
+    json_list_fields = ("judgments",)
 
 
 class DraftingSeed(BaseModel):
@@ -317,7 +428,7 @@ class DraftingSeed(BaseModel):
     manual_chunk_ids: list[str] = Field(min_length=1)
 
 
-class DraftingBlock(BaseModel):
+class DraftingBlock(AuditedListModel):
     text: str = Field(
         min_length=1,
         description=(
@@ -339,9 +450,14 @@ class DraftingBlock(BaseModel):
             "not a substitute for factual or policy evidence."
         ),
     )
+    json_list_fields = (
+        "manual_evidence_quotes",
+        "tender_facts_used",
+        "instruction_evidence_quotes",
+    )
 
 
-class DraftingFieldClaim(BaseModel):
+class DraftingFieldClaim(AuditedListModel):
     """One material draft value bound to its exact block-local support."""
 
     block_index: int = Field(ge=0)
@@ -350,9 +466,14 @@ class DraftingFieldClaim(BaseModel):
     manual_evidence_quotes: list[str] = Field(default_factory=list)
     tender_facts_used: list[str] = Field(default_factory=list)
     instruction_evidence_quotes: list[str] = Field(default_factory=list)
+    json_list_fields = (
+        "manual_evidence_quotes",
+        "tender_facts_used",
+        "instruction_evidence_quotes",
+    )
 
 
-class DraftingResult(BaseModel):
+class DraftingResult(AuditedListModel):
     document_blocks: list[DraftingBlock] = Field(
         min_length=2,
         description=(
@@ -374,15 +495,22 @@ class DraftingResult(BaseModel):
             "the exact manual, tender, or instruction support used for it."
         ),
     )
+    json_list_fields = (
+        "document_blocks",
+        "manual_evidence_quotes",
+        "tender_facts_used",
+        "field_claims",
+    )
 
 
-class DraftingJudgeDecision(BaseModel):
+class DraftingJudgeDecision(AuditedListModel):
     supported: bool
     follows_instruction: bool
     preserves_policy_qualifications: bool
     resolves_source_conflicts_safely: bool
     score: int = Field(ge=1, le=5)
     issues: list[str] = Field(default_factory=list)
+    json_list_fields = ("issues",)
 
 
 CrossRelationship = Literal[
@@ -398,47 +526,35 @@ class CrossEvidenceDraft(BaseModel):
     quote: str = Field(min_length=8)
 
 
-class CrossClaimDraft(BaseModel):
+class CrossClaimDraft(AuditedListModel):
     statement: str = Field(min_length=8)
     evidence: list[CrossEvidenceDraft] = Field(min_length=1)
+    json_list_fields = ("evidence",)
 
 
-class CrossReasoningStepDraft(BaseModel):
-    operation: Literal[
-        "lookup",
-        "compare",
-        "apply_condition",
-        "resolve_authority",
-        "resolve_time",
-        "combine",
-        "calculate",
-        "conclude",
-    ]
+class CrossReasoningStepDraft(AuditedListModel):
+    operation: str
     statement: str = Field(min_length=8)
     evidence: list[CrossEvidenceDraft] = Field(min_length=1)
+    json_list_fields = ("evidence",)
 
 
-class CrossCandidate(BaseModel):
-    task_type: Literal["cross_document_qa", "cross_document_qa_cot"]
-    task: ProcurementTask
-    persona: ProcurementPersona
-    question_type: Literal[
-        "comparison",
-        "temporal",
-        "complementary",
-        "bridge",
-        "cross_domain",
-        "unanswerable",
-    ]
+class CrossCandidate(AuditedListModel):
+    task_type: str
+    task: str
+    persona: str
+    question_type: str
     question: str = Field(min_length=12)
     answer: str = Field(min_length=1)
     answerable: bool = True
     claims: list[CrossClaimDraft] = Field(min_length=1)
     reasoning_steps: list[CrossReasoningStepDraft] = Field(default_factory=list)
+    json_list_fields = ("claims", "reasoning_steps")
 
 
-class CrossCandidateBatch(BaseModel):
+class CrossCandidateBatch(AuditedListModel):
     examples: list[CrossCandidate]
+    json_list_fields = ("examples",)
 
 
 class CrossJudgeDecision(JudgeDecision):
@@ -446,6 +562,7 @@ class CrossJudgeDecision(JudgeDecision):
     unsupported_without_source_ids: list[str]
     connected_reasoning: bool
     relationship_correct: bool
+    json_list_fields = ("answer_quotes", "issues", "unsupported_without_source_ids")
 
 
 class CrossJudgedCandidate(BaseModel):
@@ -453,5 +570,6 @@ class CrossJudgedCandidate(BaseModel):
     decision: CrossJudgeDecision
 
 
-class CrossJudgeBatch(BaseModel):
+class CrossJudgeBatch(AuditedListModel):
     judgments: list[CrossJudgedCandidate]
+    json_list_fields = ("judgments",)

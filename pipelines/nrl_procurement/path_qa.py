@@ -37,6 +37,17 @@ def question_validation_issues(
         issues.append("unsupported_task")
     if draft.get("persona") not in TAXONOMY.get("personas", []):
         issues.append("unsupported_persona")
+    if draft.get("question_type") not in {
+        "comparison",
+        "bridge",
+        "temporal",
+        "complementary",
+        "condition_exception",
+        "cross_domain",
+    }:
+        issues.append("unsupported_question_type")
+    if draft.get("difficulty") not in {"moderate", "advanced"}:
+        issues.append("unsupported_difficulty")
     expected_ids = path.get("input_claim_ids", [])
     if [item["proposition_id"] for item in propositions] != expected_ids:
         issues.append("path_proposition_mismatch")

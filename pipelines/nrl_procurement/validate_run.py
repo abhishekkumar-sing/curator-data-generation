@@ -132,6 +132,11 @@ def validate_run(
     quality_acceptance = manifest.get("quality_acceptance", {})
     if not quality_acceptance.get("portfolio_quality_complete", False):
         issues.append("portfolio_quality_incomplete")
+    stage_quality_evidence = manifest.get("stage_quality_evidence", {})
+    for stage in ("cross_document", "drafting"):
+        evidence = stage_quality_evidence.get(stage, {})
+        if evidence.get("required", True) and not evidence.get("passed", False):
+            issues.append(f"stage_quality_evidence_incomplete:{stage}")
 
     leakage_path = files_dir / "leakage_audit.json"
     leakage = (
@@ -171,6 +176,7 @@ def validate_run(
         "eval_count": len(evaluation_rows),
         "training_eval_record_id_overlap": len(training_ids & evaluation_ids),
         "canonical_count": canonical_count,
+        "stage_quality_evidence": stage_quality_evidence,
         "leakage_audit_passed": leakage.get("passed", False),
         "post_retry_model_failure_distribution": failures,
         "human_review": {

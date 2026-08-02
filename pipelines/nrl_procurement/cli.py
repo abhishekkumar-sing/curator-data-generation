@@ -24,7 +24,13 @@ def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="nrl-curate")
     parser.add_argument(
         "command",
-        choices=("all", "probe-structure", "validate-run", "regress"),
+        choices=(
+            "all",
+            "probe-structure",
+            "validate-run",
+            "regress",
+            "calibrate-judge",
+        ),
     )
     if not arguments or arguments[0] in {"-h", "--help"}:
         parser.print_help()
@@ -41,6 +47,9 @@ def main(argv: list[str] | None = None) -> None:
         return
     if known.command == "regress":
         _load_module("evaluation").main(remaining)
+        return
+    if known.command == "calibrate-judge":
+        _load_module("judge_calibration").main(remaining)
         return
     _load_module("validate_run").main(remaining)
 

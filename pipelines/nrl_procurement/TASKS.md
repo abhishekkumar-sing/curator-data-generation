@@ -69,9 +69,91 @@ External validation required before release:
 - [ ] Perform stratified human review of accepted and rejected records, record
   reviewer disagreement where possible, and calibrate opener/type/extraction/
   length thresholds only from that evidence.
+- [ ] Complete disjoint development/holdout judge reviews, run
+  `nrl-curate calibrate-judge`, pin the passing artifact SHA-256 in
+  `config.yaml`, and confirm the holdout precision target before an unbounded
+  run. The command and gate are implemented; no human labels were fabricated.
 - [ ] Run downstream retrieval and SFT evaluations before claiming that a
   diversity threshold, temporal curriculum, or saturation rule improves model
   behavior.
+
+## P0 quality-remediation contract (2026-08-02)
+
+Status: primary-source research and current-code/run audit completed before
+implementation. The seven user-reported defects are release blockers. The
+`qa-qacot-full-003` measurements remain a pre-blueprint baseline and will not
+be misrepresented as evidence for post-fix quality.
+
+Research findings and implementation decisions:
+
+- [Type-controlled question-generation research](https://aclanthology.org/2022.starsem-1.22/)
+  and [RAST](https://aclanthology.org/2023.emnlp-main.104/) support explicit
+  question-type/style conditioning rather than asking a model to be vaguely
+  diverse. Add a deterministic, source-compatible question-style plan outside
+  the response schema; reject source-attribution and role-preamble templates;
+  measure both style and intent concentration after judge attrition.
+- [Explicit Diversity Conditions for Effective Question Answer Generation](https://aclanthology.org/2024.lrec-main.601/)
+  reports stronger diversity from explicit conditions. Preserve the existing
+  grounded intent planner, lower the provisional concentration ceiling, and add
+  a minimum effective-type release gate. Never force a type unsupported by the
+  passage merely to satisfy a quota.
+- Persona research finds generic generation can neglect an attached persona;
+  [PAL](https://aclanthology.org/2025.tacl-1.77/) makes semantic persona
+  alignment explicit, while [Quantifying the Persona Effect](https://aclanthology.org/2024.acl-long.554/)
+  shows persona variables often explain little variance. A persona label or
+  “As a …” prefix is therefore insufficient. Blueprints must state a concrete
+  role-relevant information need, role prefixes are forbidden, and the
+  independent judge must separately attest persona relevance. Use
+  `general_user` when specialization is not material.
+- [vLLM tool-calling guidance](https://docs.vllm.ai/en/latest/features/tool_calling/)
+  guarantees parseable structure, not semantic quality, and recommends making
+  the schema contract explicit in the prompt. [Instructor retry guidance](https://python.useinstructor.com/learning/validation/retry_mechanisms/)
+  feeds validation errors into bounded reasks. Keep strict schemas, add only
+  narrow JSON-list unwrapping for the repeatedly observed stringified-list
+  transport defect, retain every repair in audit lineage, and allow two bounded
+  validation retries. Invented enums and missing semantics remain failures.
+- vLLM's [Gemma 4 structured-output recipe](https://docs.vllm.ai/projects/recipes/en/stable/Google/Gemma4.html)
+  notes schema descriptions are not automatically visible to the model. Keep a
+  singular compact judge contract and explicit prompt fields. Fix role/profile
+  parameter merging so the intended judge completion budget is actually used;
+  bound issue cardinality/text and preserve prompt-budget checks.
+- [LLM-Rubric](https://aclanthology.org/2024.acl-long.745/) finds
+  multidimensional rubric signals require human calibration, and
+  [Judging the Judges](https://aclanthology.org/2025.ijcnlp-long.18/) documents
+  non-random judge bias. Add a development/holdout calibration command that
+  selects a score threshold only from immutable completed reviews, reports
+  holdout precision/recall/F1 and confusion counts, fingerprints inputs and the
+  feature contract, and gates unbounded runs on a pinned passing artifact.
+- Zero cross-document or drafting records are absence of evidence, not evidence
+  of poor or good quality. Enabled tracks must have configured minimum accepted
+  counts, terminal lineage, review sampling, and manifest/validator gates. Unit
+  tests can close the enforcement code, but only a live model-backed run plus
+  human review can close quality evidence for those stages.
+
+Implementation checklist:
+
+- [x] Add balanced source-compatible question-style planning, template-prefix
+  rejection, style metrics, and post-judge release gates.
+- [x] Tighten intent concentration and require adequate effective intent
+  coverage without inventing unsupported intents.
+- [x] Add blueprint `persona_need`, forbid cosmetic role prefixes, and require
+  independent `persona_relevant` judgment for specialized personas.
+- [x] Add narrow audited stringified-list recovery and a second bounded
+  validation retry; keep enum/tool/semantic failures fail-closed.
+- [x] Correct nested role/profile generation-parameter merging, enlarge the
+  effective judge budget, compact issue output, and test the actual resolved
+  configuration.
+- [x] Add immutable development/holdout judge calibration, pinned-artifact
+  loading, calibrated threshold use, and a full-run gate.
+- [x] Require nonzero cross-document/drafting quality-evidence minima when
+  enabled; report and validate the gates. Keep live quality review open until a
+  post-fix run actually produces those records.
+- [x] Run focused and full procurement tests, static checks, build verification,
+  update exact results here, and commit the coherent remediation milestone.
+  Verified on 2026-08-02: `146 passed` for `tests/nrl_procurement`, Ruff passed
+  for pipeline/tests, `git diff --check` passed, both CLI help paths passed, and
+  `uv build` produced the sdist and wheel; the milestone is recorded in Git
+  history with the remediation commit.
 
 ## P0 completion plan — researched implementation contract (2026-08-02)
 

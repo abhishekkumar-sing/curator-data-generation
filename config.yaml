@@ -64,9 +64,6 @@ model_profiles:
       temperature: 1.0
       top_p: 0.95
       top_k: 64
-      # Judge schemas are compact. Reserving 1024 leaves source capacity inside
-      # this endpoint's verified 8192-token combined prompt/output limit.
-      max_tokens: 1024
       extra_body:
         chat_template_kwargs:
           enable_thinking: false
@@ -85,9 +82,11 @@ models:
     default_profile: glm
     private_endpoint_only: true
     request_timeout: 1800
-    # One retry for transient/schema failures; ten identical structured-output
+    # Two retries for transient/schema failures; ten identical structured-output
     # retries created pilot-003's long tail.
-    max_retries: 1
+    # Initial attempt plus two bounded validation-aware corrections. Instructor
+    # returns validation context to the model; permanent failures remain audited.
+    max_retries: 2
     max_concurrent_requests: 128
     # Explicit private-provider limits avoid Curator's public-provider fallback.
     max_requests_per_minute: 10000
@@ -120,7 +119,9 @@ models:
     generation_params:
       temperature: 1.0
       top_p: 0.95
-      max_tokens: 4096
+      # Singular judge objects are normally far smaller; 2,048 prevents the
+      # observed 1,024-token truncation tail while retaining prompt capacity.
+      max_tokens: 2048
       extra_body:
         chat_template_kwargs:
           enable_thinking: false
@@ -166,7 +167,9 @@ quality:
     comparison: 0.07
     compliance_check: 0.12
     currentness: 0.03
-  max_question_type_share: 0.30
+  max_question_type_share: 0.20
+  minimum_effective_question_types: 6
+  max_question_style_share: 0.20
   answer_length_by_format:
     concise_direct: [5, 100]
     ordered_steps: [20, 220]
@@ -189,6 +192,15 @@ quality:
   required_task_types:
     - qa
     - qa_cot
+
+# Human labels, not model self-scores, select the production judge threshold.
+# Full runs remain blocked until the generated passing artifact is SHA-pinned.
+judge_calibration:
+  path: data/evaluation/judge_calibration.json
+  sha256: null
+  required_for_full_runs: true
+  minimum_holdout_precision: 0.90
+  minimum_records_per_split: 25
 
 # Optional semantic-diversity analysis. Only generated questions are sent to
 # this endpoint; source passages, answers, evidence, and credentials are not.
@@ -347,11 +359,13 @@ taxonomy:
 
 drafting:
   enabled: true
+  minimum_accepted_records: 1
 
 # Explicit relationships define which manuals may be combined. Lexical alignment
 # only proposes passages within these pairs; it never establishes legal equivalence.
 cross_document:
   enabled: true
+  minimum_accepted_records: 1
   # Generate siblings, judge each independently, then retain the strongest one
   # with auditable loser reasons.
   best_of_n: 3

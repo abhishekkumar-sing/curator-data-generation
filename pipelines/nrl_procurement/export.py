@@ -447,6 +447,10 @@ def export_records(
         single_document_qa,
         "question_type",
     )
+    stats["question_style_diversity"] = categorical_diversity(
+        single_document_qa,
+        "question_style",
+    )
     stats["answer_format_diversity"] = categorical_diversity(
         single_document_qa,
         "answer_format",

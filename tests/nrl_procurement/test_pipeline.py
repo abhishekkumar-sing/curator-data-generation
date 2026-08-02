@@ -1,12 +1,13 @@
 """Focused tests for the local procurement pipeline."""
 
+import hashlib
 import json
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 PIPELINE = Path(__file__).resolve().parents[2] / "pipelines" / "nrl_procurement"
 sys.path.insert(0, str(PIPELINE))
@@ -59,10 +60,12 @@ from generate import (  # noqa: E402
     judge_eligible_planned,
     materialize_terminal_failures,
     plan_cross_document_requests,
+    plan_question_styles,
     plan_question_types,
     plan_single_document_requests,
     request_coverage,
 )
+from judge_calibration import calibrate_judge, load_judge_calibration  # noqa: E402
 from path_qa import (  # noqa: E402
     SourceAblationAnswerGenerator,
     SourceAblationJudge,
@@ -103,8 +106,10 @@ from schemas import (  # noqa: E402
     GroundedCandidateDraft,
     JudgeBatch,
     JudgedCandidate,
+    JudgeDecision,
     PropositionBatch,
     QABlueprintDraft,
+    collect_structural_repairs,
 )
 from source_windows import (  # noqa: E402
     build_source_windows,
@@ -120,6 +125,7 @@ from validation import (  # noqa: E402
     is_extractive_answer,
     judge_batch_identity_issues,
     judge_quotes_are_grounded,
+    question_style_issues,
     recover_grounded_judge_quotes,
     semantic_support_issues,
     validate_cross_record,
@@ -134,6 +140,8 @@ def _judge_decision(**overrides):
         "preserves_qualifications": True,
         "authority_correct": True,
         "reasoning_valid": True,
+        "question_natural": True,
+        "persona_relevant": True,
         "recommended_task": "general_reference",
         "recommended_persona": "general_user",
         "answer_found_in_source": True,
@@ -480,6 +488,9 @@ def test_grounded_blueprint_is_singular_and_auditable() -> None:
         QABlueprintDraft(
             task="compliance_and_audit",
             persona="auditor",
+            persona_need=(
+                "Check whether the procurement record was retained for audit."
+            ),
             instruction_goal="Determine which procurement record must be retained.",
             must_cover=["The buyer must retain the procurement record."],
             evidence=[{"quote": row["passage"]}],
@@ -495,6 +506,9 @@ def test_grounded_blueprint_is_singular_and_auditable() -> None:
         QABlueprintDraft(
             task="auditor",
             persona="compliance_and_audit",
+            persona_need=(
+                "Check whether the procurement record was retained for audit."
+            ),
             instruction_goal="Determine which procurement record must be retained.",
             must_cover=["The buyer must retain the procurement record."],
             evidence=[{"quote": row["passage"]}],
@@ -2638,6 +2652,7 @@ def test_short_exact_evidence_is_schema_valid() -> None:
     draft = QABlueprintDraft(
         task="general_reference",
         persona="general_user",
+        persona_need="Identify the named party before acting on the rule.",
         instruction_goal="Identify the party named in the source table.",
         must_cover=["The named party is Seller."],
         evidence=[{"quote": "Seller"}],
@@ -2678,6 +2693,124 @@ def test_question_intent_planning_is_feasible_balanced_and_deterministic(
     assert first["threshold"] in eligible_question_types(rows[0])
     assert first["exception"] in eligible_question_types(rows[1])
     assert first["plain"] == "direct_fact"
+
+
+def test_question_style_planning_is_compatible_balanced_and_deterministic() -> None:
+    question_types = {
+        f"row-{index}": question_type
+        for index, question_type in enumerate(
+            ["direct_fact", "procedure", "exception", "comparison"] * 4
+        )
+    }
+    first = plan_question_styles(question_types, "style-seed")
+    assert first == plan_question_styles(question_types, "style-seed")
+    for chunk_id, style in first.items():
+        question_type = question_types[chunk_id]
+        assert style in generation_pipeline.QUESTION_TYPE_STYLES[question_type]
+    counts = {style: list(first.values()).count(style) for style in set(first.values())}
+    assert max(counts.values()) <= 4
+
+
+def test_question_style_gate_rejects_source_and_cosmetic_persona_templates() -> None:
+    assert question_style_issues(
+        "According to the manual, who approves the tender?", "general_user"
+    ) == ["templated_source_attribution_opener"]
+    assert question_style_issues(
+        "As an auditor, what record should I inspect?", "auditor"
+    ) == ["cosmetic_persona_preamble"]
+    assert question_style_issues(
+        "Under what circumstances may the authority reject the bid?", "auditor"
+    ) == []
+
+
+def test_role_profile_preserves_profile_defaults_but_role_limits_win() -> None:
+    resolved = generation_pipeline._role_profile("judge", "gemma")
+    assert resolved["generation_params"]["max_tokens"] == 2048
+    assert resolved["generation_params"]["top_k"] == 64
+
+
+def test_stringified_json_list_recovery_is_narrow_and_audited() -> None:
+    candidate = GroundedCandidateDraft.model_validate(
+        {
+            "question": "What record must the buyer retain?",
+            "answer": "The procurement record.",
+            "claims": (
+                '[{"statement":"Retain the record.",'
+                '"evidence":[{"quote":"procurement record"}]}]'
+            ),
+            "reasoning_steps": "[]",
+        }
+    )
+    assert candidate.model_dump()["claims"][0]["statement"] == "Retain the record."
+    assert collect_structural_repairs(candidate) == [
+        "stringified_json_list:claims",
+        "stringified_json_list:reasoning_steps",
+    ]
+    assert "_structural_repairs" not in GroundedCandidateDraft.model_json_schema()[
+        "properties"
+    ]
+    try:
+        GroundedCandidateDraft.model_validate(
+            {
+                "question": "What record must the buyer retain?",
+                "answer": "The procurement record.",
+                "claims": "claims appear here",
+                "reasoning_steps": [],
+            }
+        )
+    except ValidationError:
+        pass
+    else:
+        raise AssertionError("non-JSON list prose must not be repaired")
+
+
+def test_unknown_model_labels_parse_for_audited_fail_closed_rejection() -> None:
+    decision = JudgeDecision.model_validate(
+        _judge_decision(
+            recommended_task="delivery_of_sold_material",
+            recommended_persona="procuring_entity",
+        )
+    )
+    assert decision.recommended_task == "delivery_of_sold_material"
+    cross = CrossCandidateBatch.model_validate(
+        {
+            "examples": [
+                {
+                    "task_type": "wrong_shape",
+                    "task": "payment_procedures",
+                    "persona": "procuring_entity",
+                    "question_type": "invented_type",
+                    "question": "Which source-supported action should be taken?",
+                    "answer": "Use both sources.",
+                    "claims": [
+                        {
+                            "statement": "A material claim.",
+                            "evidence": [
+                                {
+                                    "source_id": "source_a",
+                                    "quote": "A complete evidence quotation.",
+                                }
+                            ],
+                        }
+                    ],
+                    "reasoning_steps": [
+                        {
+                            "operation": "sequence",
+                            "statement": "An unsupported operation label.",
+                            "evidence": [
+                                {
+                                    "source_id": "source_a",
+                                    "quote": "A complete evidence quotation.",
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ]
+        }
+    )
+    assert cross.examples[0].task == "payment_procedures"
+    assert cross.examples[0].reasoning_steps[0].operation == "sequence"
 
 
 def test_answer_format_and_category_portfolio_checks() -> None:
@@ -2826,6 +2959,8 @@ def test_judge_rejects_false_abstention_and_taxonomy_acquiescence() -> None:
                         "preserves_qualifications": True,
                         "authority_correct": True,
                         "reasoning_valid": True,
+                        "question_natural": True,
+                        "persona_relevant": True,
                         "recommended_task": "nit_filling",
                         "recommended_persona": "bidder",
                         "answer_found_in_source": True,
@@ -2870,6 +3005,8 @@ def test_judge_accepts_multiple_independent_verbatim_answer_spans() -> None:
                         "preserves_qualifications": True,
                         "authority_correct": True,
                         "reasoning_valid": True,
+                        "question_natural": True,
+                        "persona_relevant": True,
                         "recommended_task": "ethics_and_risk_management",
                         "recommended_persona": "procurement_officer",
                         "answer_found_in_source": True,
@@ -3349,6 +3486,92 @@ def test_human_review_template_is_reproducible_and_never_self_certifies(
     assert row["overall_accept"] is None
 
 
+def test_judge_threshold_is_selected_on_development_and_verified_on_holdout(
+    tmp_path: Path,
+) -> None:
+    def review_row(record_id: str, score: int, accepted: bool) -> dict:
+        judge = {
+            feature: True
+            for feature in (
+                "supported",
+                "relevant",
+                "preserves_qualifications",
+                "authority_correct",
+                "reasoning_valid",
+                "question_natural",
+                "persona_relevant",
+                "task_correct",
+                "persona_correct",
+                "answerability_correct",
+            )
+        }
+        record = {"record_id": record_id, "judge": {**judge, "score": score}}
+        record_hash = hashlib.sha256(
+            json.dumps(
+                record, sort_keys=True, separators=(",", ":")
+            ).encode()
+        ).hexdigest()
+        return {
+            "review_id": f"review-{record_id}",
+            "record_id": record_id,
+            "pipeline_disposition": "accepted" if score >= 4 else "rejected",
+            "record_sha256": record_hash,
+            "record": record,
+            "reviewer_id": "reviewer-1",
+            "reviewed_at": "2026-08-02T00:00:00Z",
+            "dimensions": {name: accepted for name in REVIEW_DIMENSIONS},
+            "overall_accept": accepted,
+            "notes": "",
+        }
+
+    development = tmp_path / "development.jsonl"
+    holdout = tmp_path / "holdout.jsonl"
+    development.write_text(
+        "\n".join(
+            json.dumps(review_row(f"dev-{index}", score, accepted))
+            for index, (score, accepted) in enumerate(
+                [(5, True), (4, True), (3, False), (2, False)]
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    holdout.write_text(
+        "\n".join(
+            json.dumps(review_row(f"hold-{index}", score, accepted))
+            for index, (score, accepted) in enumerate(
+                [(5, True), (4, True), (3, False), (1, False)]
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    artifact = calibrate_judge(
+        development,
+        holdout,
+        minimum_precision=1.0,
+        minimum_records=4,
+    )
+    assert artifact["recommended_threshold"] == 4
+    assert artifact["passed"] is True
+    artifact_path = tmp_path / "calibration.json"
+    artifact_path.write_text(json.dumps(artifact), encoding="utf-8")
+    artifact_hash = hashlib.sha256(artifact_path.read_bytes()).hexdigest()
+    loaded = load_judge_calibration(
+        {
+            "judge_calibration": {
+                "path": str(artifact_path),
+                "sha256": artifact_hash,
+                "minimum_holdout_precision": 1.0,
+                "minimum_records_per_split": 4,
+            }
+        },
+        required=True,
+    )
+    assert loaded["recommended_threshold"] == 4
+    assert loaded["holdout_metrics"]["precision"] == 1.0
+
+
 def test_release_validation_requires_all_four_exports_and_human_review(
     tmp_path: Path,
 ) -> None:
@@ -3365,9 +3588,13 @@ def test_release_validation_requires_all_four_exports_and_human_review(
                     "qa_cot": 1,
                     "cross_document_qa": 1,
                     "cross_document_qa_cot": 1,
-                },
-                "quality_acceptance": {"portfolio_quality_complete": True},
-            }
+                    },
+                    "quality_acceptance": {"portfolio_quality_complete": True},
+                    "stage_quality_evidence": {
+                        "cross_document": {"required": True, "passed": True},
+                        "drafting": {"required": True, "passed": True},
+                    },
+                }
         ),
         encoding="utf-8",
     )
@@ -3398,6 +3625,13 @@ def test_release_validation_requires_all_four_exports_and_human_review(
         "cross_document_qa_cot": 1,
     }
     assert report["issues"] == ["human_review_not_supplied"]
+    manifest = json.loads((files_dir / "manifest.json").read_text(encoding="utf-8"))
+    manifest["stage_quality_evidence"]["drafting"]["passed"] = False
+    (files_dir / "manifest.json").write_text(
+        json.dumps(manifest), encoding="utf-8"
+    )
+    failed_stage = validate_run(files_dir)
+    assert "stage_quality_evidence_incomplete:drafting" in failed_stage["issues"]
 
 
 def test_release_validation_detects_train_eval_overlap(tmp_path: Path) -> None:

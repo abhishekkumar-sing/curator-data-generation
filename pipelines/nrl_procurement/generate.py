@@ -48,6 +48,7 @@ from evaluation import (
     validate_manual_folds,
 )
 from jsonl_io import write_jsonl_rows
+from judge_calibration import load_judge_calibration
 from propositions import (
     PropositionExtractor,
     proposition_cache_fingerprint,
@@ -95,7 +96,12 @@ from prompt_budget import (
 from bespokelabs.curator.request_processor.online.litellm_online_request_processor import (
     build_auto_tool_request,
 )
-from schemas import AblationTrialDraft, PathAnswerDraft, PathQuestionBatch
+from schemas import (
+    AblationTrialDraft,
+    PathAnswerDraft,
+    PathQuestionBatch,
+    collect_structural_repairs,
+)
 from schemas import GroundedCandidateDraft, JudgeBatch, JudgedCandidate, QABlueprintDraft
 from validation import (
     answer_format_issues,
@@ -104,6 +110,7 @@ from validation import (
     enforce_extractive_answer_diversity,
     enforce_question_opener_diversity,
     judge_quotes_are_grounded,
+    question_style_issues,
     quarantine_invalid_judge_batch,
     recover_grounded_judge_quotes,
     validate_record,
@@ -124,6 +131,7 @@ _RUN_STARTED_MONOTONIC: float | None = None
 _RUN_STARTED_AT: str | None = None
 _RESUME_MANAGER: ResumeManager | None = None
 _RUN_ATTEMPT_TERMINAL = False
+_ACTIVE_JUDGE_THRESHOLD = int(QUALITY.get("minimum_judge_score", 4))
 
 LLM_STAGE_NAMES = {
     "propositions",
@@ -156,6 +164,33 @@ QUESTION_TYPE_ANSWER_FORMAT = {
     "compliance_check": "audit_check",
     "drafting_knowledge": "concise_direct",
     "currentness": "dated_scope_summary",
+}
+
+QUESTION_TYPE_STYLES = {
+    "direct_fact": ("plain_query", "decision_support", "verification"),
+    "definition": ("plain_query", "clarification", "verification"),
+    "procedure": ("action_sequence", "decision_support"),
+    "sequence": ("action_sequence", "timeline_query"),
+    "threshold": ("verification", "decision_support"),
+    "exception": ("exception_check", "decision_support"),
+    "negative_rule": ("exception_check", "verification"),
+    "role_responsibility": ("responsibility_query", "decision_support"),
+    "comparison": ("comparison_request", "decision_support"),
+    "compliance_check": ("verification", "decision_support"),
+    "drafting_knowledge": ("plain_query", "decision_support"),
+    "currentness": ("timeline_query", "verification"),
+}
+
+QUESTION_STYLE_GUIDANCE = {
+    "plain_query": "Ask the substantive question directly without citing the source.",
+    "decision_support": "Ask what action or decision follows in the stated work context.",
+    "verification": "Ask what must be checked and what source-supported result passes.",
+    "clarification": "Ask for the precise meaning or scope of the source-defined term.",
+    "action_sequence": "Ask for the ordered actions without announcing that it is a procedure.",
+    "timeline_query": "Ask how the dated or ordered states apply without inferring currency.",
+    "exception_check": "Ask when the rule changes or does not apply, preserving the condition.",
+    "responsibility_query": "Ask which actor performs the source-stated duty and what it is.",
+    "comparison_request": "Ask for the exact source-supported contrast dimensions.",
 }
 
 
@@ -280,9 +315,21 @@ def _role_profile(
             f"Unknown {role} model profile {selected_name!r}; "
             f"available: {available}"
         )
+    profile_settings = profiles[selected_name]
+    merged_generation_params = {
+        **profile_settings.get("generation_params", {}),
+        **role_settings.get("generation_params", {}),
+        "extra_body": {
+            **profile_settings.get("generation_params", {}).get(
+                "extra_body", {}
+            ),
+            **role_settings.get("generation_params", {}).get("extra_body", {}),
+        },
+    }
     return {
         **role_settings,
-        **profiles[selected_name],
+        **profile_settings,
+        "generation_params": merged_generation_params,
         "profile_name": selected_name,
     }
 
@@ -423,6 +470,34 @@ def plan_question_types(
     return assignments
 
 
+def plan_question_styles(
+    question_types: dict[str, str],
+    seed: str,
+) -> dict[str, str]:
+    """Balance explicit wording styles within source-compatible intent sets."""
+    assignments: dict[str, str] = {}
+    available_styles = {
+        style
+        for styles in QUESTION_TYPE_STYLES.values()
+        for style in styles
+    }
+    counts = {style: 0 for style in available_styles}
+    for chunk_id, question_type in sorted(question_types.items()):
+        eligible = QUESTION_TYPE_STYLES.get(question_type, ("plain_query",))
+        selected = min(
+            eligible,
+            key=lambda style: (
+                counts[style],
+                hashlib.sha256(
+                    f"{seed}:{chunk_id}:{question_type}:{style}".encode()
+                ).hexdigest(),
+            ),
+        )
+        assignments[chunk_id] = selected
+        counts[selected] += 1
+    return assignments
+
+
 def plan_single_document_requests(rows: list[dict[str, Any]], seed: str) -> list[dict[str, Any]]:
     """Assign explicit QA/rationale and answerability contracts before calls."""
     if not rows:
@@ -434,11 +509,13 @@ def plan_single_document_requests(rows: list[dict[str, Any]], seed: str) -> list
     )
     cot_ids = {row["chunk_id"] for row in sorted(rows, key=_reasoning_suitability, reverse=True)[:cot_count]}
     planned_question_types = plan_question_types(rows, seed)
+    planned_question_styles = plan_question_styles(planned_question_types, seed)
     planned = []
     for row in rows:
         task_type = "qa_cot" if row["chunk_id"] in cot_ids else "qa"
         question_type = planned_question_types[str(row["chunk_id"])]
         answer_format = QUESTION_TYPE_ANSWER_FORMAT[question_type]
+        question_style = planned_question_styles[str(row["chunk_id"])]
         # Arbitrary answer-bearing chunks cannot safely be assigned a negative
         # answerability label. A future adversarial stage must construct and
         # independently verify such examples.
@@ -455,6 +532,7 @@ def plan_single_document_requests(rows: list[dict[str, Any]], seed: str) -> list
                 "planned_task_type": task_type,
                 "planned_question_type": question_type,
                 "planned_answer_format": answer_format,
+                "planned_question_style": question_style,
                 "planned_answerable": answerable,
             }
         )
@@ -598,12 +676,14 @@ class ProcurementBlueprintGenerator(curator.LLM):
 
     def prompt(self, row: dict) -> str:
         """Render a compact planning request with a fixed intent contract."""
+        question_style = row.get("planned_question_style", "plain_query")
         return f"""TASK
 Create exactly one grounded procurement QA blueprint for the source passage.
 Do not write the final question or answer.
 
 FIXED CONTRACT
 - question_type: {row["planned_question_type"]}
+- question_style: {question_style}
 - answer_format: {row["planned_answer_format"]}
 - training shape: {row["planned_task_type"]}
 - answerable: true
@@ -613,11 +693,13 @@ from {json.dumps(TAXONOMY.get("personas", []))}. The task is the procurement wor
 not the question form. Use a specific persona only when the passage supports that
 actor's authentic need; otherwise use general_user.
 
-Return a concrete instruction_goal, one to four concise must_cover facts, and one
-to four exact source quotes that jointly support them. Preserve the issuer, scope,
-date, modality, thresholds, conditions, and exceptions. Do not invent a scenario,
-authority, standard, number, or current-policy conclusion. Avoid page-number,
-contents-list, glossary, and document-navigation trivia.
+Return a concrete instruction_goal and persona_need, one to four concise must_cover
+facts, and one to four exact source quotes that jointly support them. persona_need
+must name the real decision, check, or action for which the selected actor needs the
+answer; it cannot merely say that the actor wants to know or understand the rule.
+Preserve the issuer, scope, date, modality, thresholds, conditions, and exceptions.
+Do not invent a scenario, authority, standard, number, or current-policy conclusion.
+Avoid page-number, contents-list, glossary, and document-navigation trivia.
 
 SOURCE METADATA
 manual_id: {row["manual_id"]}
@@ -638,7 +720,7 @@ section: {row["section"]}
         """Ground the blueprint evidence and attach a stable identity."""
         draft = response.model_dump()
         reasons: list[str] = []
-        repairs: list[str] = []
+        repairs: list[str] = collect_structural_repairs(response)
         allowed_tasks = set(TAXONOMY.get("tasks", []))
         allowed_personas = set(TAXONOMY.get("personas", []))
         # Recover only an unambiguous field swap observed in pilot-003. No
@@ -656,6 +738,13 @@ section: {row["section"]}
             reasons.append("unsupported_blueprint_task")
         if draft["persona"] not in allowed_personas:
             reasons.append("unsupported_blueprint_persona")
+        generic_need = re.fullmatch(
+            r"(?i)(?:the\s+)?(?:user|officer|persona)\s+(?:needs|wants)\s+to\s+"
+            r"(?:know|understand)\s+(?:the\s+)?(?:rule|policy|information)[.!]?",
+            draft["persona_need"].strip(),
+        )
+        if generic_need:
+            reasons.append("generic_blueprint_persona_need")
         blueprint_id = "qabp-" + hashlib.sha256(
             json.dumps(
                 [
@@ -673,6 +762,7 @@ section: {row["section"]}
             "blueprint_id": blueprint_id,
             "task": draft["task"],
             "persona": draft["persona"],
+            "persona_need": draft["persona_need"],
             "instruction_goal": draft["instruction_goal"],
             "must_cover": draft["must_cover"],
             "blueprint_evidence": draft["evidence"],
@@ -691,6 +781,7 @@ class ProcurementGenerator(curator.LLM):
 
     def prompt(self, row: dict) -> str:
         """Render a grounded single-document generation request."""
+        question_style = row.get("planned_question_style", "plain_query")
         return f"""TASK
 Generate exactly one source-grounded procurement training record from the fixed
 blueprint and source passage below.
@@ -699,6 +790,8 @@ PLANNED CONTRACT
 - Return only task_type={row["planned_task_type"]}.
 - Return only question_type={row.get("planned_question_type", "direct_fact")}.
 - The fixed procurement task is {row["task"]}; the fixed persona is {row["persona"]}.
+- The fixed question style is {question_style}:
+  {QUESTION_STYLE_GUIDANCE[question_style]}
 - Use answer format {row.get("planned_answer_format", "concise_direct")}. This presentation contract is
   derived from the planned question intent; do not substitute a different style.
 - Answerability is fixed to {str(row["planned_answerable"]).lower()} and injected by
@@ -721,6 +814,10 @@ CONSTRAINTS
   not have to open the sentence. Phrase each question the way the assigned
   persona would actually ask it in their own working context, not as a generic
   reading-comprehension prompt.
+- Never begin with "According to", "As per", "In accordance with", or a cosmetic
+  "As a/an <role>" preamble. Persona is a semantic information need, not wording
+  decoration. Express this need naturally without naming the role unless the role
+  itself is the fact being asked about.
 - Break the answer into material claims. Every claim must contain one or more
   evidence quotes copied verbatim from
   the passage. The pipeline derives top-level evidence from the claims.
@@ -759,6 +856,7 @@ verbatim evidence_quotes supporting that statement.
 
 FIXED GROUNDED BLUEPRINT
 instruction_goal: {row["instruction_goal"]}
+persona_need: {row.get("persona_need", "role-neutral procurement information")}
 must_cover: {json.dumps(row["must_cover"], ensure_ascii=False)}
 blueprint_evidence: {json.dumps(row["blueprint_evidence"], ensure_ascii=False)}
 
@@ -787,11 +885,15 @@ matches the fixed task type.
         records = []
         for candidate in [response]:
             generated = candidate.model_dump()
+            structural_repairs = collect_structural_repairs(candidate)
             draft = {
                 "task_type": row["planned_task_type"],
                 "task": row["task"],
                 "persona": row["persona"],
                 "question_type": row["planned_question_type"],
+                "question_style": row.get(
+                    "planned_question_style", "plain_query"
+                ),
                 "question": generated["question"],
                 "answer": generated["answer"],
                 "answerable": row["planned_answerable"],
@@ -823,6 +925,9 @@ matches the fixed task type.
                 QUESTION_TYPE_ANSWER_FORMAT.get(draft["question_type"], "concise_direct"),
             )
             reasons.extend(validate_record(draft, row["passage"]))
+            reasons.extend(
+                question_style_issues(draft["question"], draft["persona"])
+            )
             reasons.extend(
                 answer_format_issues(
                     draft["answer"],
@@ -900,6 +1005,8 @@ matches the fixed task type.
                     "parent_request_id": row["planned_request_id"],
                     "blueprint_id": row["blueprint_id"],
                     "instruction_goal": row["instruction_goal"],
+                    "persona_need": row.get("persona_need", ""),
+                    "structural_repairs": structural_repairs,
                     "must_cover": row["must_cover"],
                     "_source_passage": row["passage"],
                     "generation_model": self.model_name,
@@ -971,6 +1078,13 @@ EVALUATION CONTRACT
   step must be necessary or useful, concise, logically connected, and supported by
   its exact evidence quotes; it must be an auditable teaching rationale rather than
   unsupported hidden reasoning.
+- question_natural=true only when the question is a concise, standalone workplace
+  request with no source-reading opener (for example "According to" or "As per"),
+  no cosmetic "As a/an <role>" preamble, and no awkward intent/style scaffolding.
+- persona_relevant=true only when the declared persona has a concrete work decision,
+  check, or action for which this question and answer are materially useful. A role
+  label, role preamble, or generic desire to know the rule is insufficient. For
+  general_user, require a genuinely role-neutral information need.
 - Independently select recommended_task from {json.dumps(TAXONOMY.get("tasks", []))}.
   Select the underlying procurement work, not the proposed label or QA/CoT format.
   Drafting NIT text is drafting; nit_filling is reserved for populating structured
@@ -989,8 +1103,8 @@ EVALUATION CONTRACT
   3 partially useful but requiring material correction; 4 fully usable with at most
   a minor non-substantive issue; 5 fully supported, complete, precise, and exemplary.
 - Scores 4-5 are acceptance-eligible only when every required boolean is true.
-- List concrete failure labels or short explanations in issues. Use an empty list
-  only when no issue is found.
+- Return at most four concise failure codes in issues; use an empty list only when
+  no issue is found. Do not restate the rubric or provide prose commentary.
 
 OUTPUT CONTRACT
 {output_contract}
@@ -1052,6 +1166,9 @@ and issues, and rejection of every unsupported claim or lost qualification.
             )
             record["judge"] = {
                 **decision,
+                "structural_repairs": collect_structural_repairs(
+                    judgment.decision
+                ),
                 "task_correct": task_correct,
                 "persona_correct": persona_correct,
                 "answerability_correct": quote_consistent,
@@ -1065,12 +1182,14 @@ and issues, and rejection of every unsupported claim or lost qualification.
                         "preserves_qualifications",
                         "authority_correct",
                         "reasoning_valid",
+                        "question_natural",
+                        "persona_relevant",
                     )
                 )
                 and task_correct
                 and persona_correct
                 and quote_consistent
-                and decision["score"] >= int(QUALITY.get("minimum_judge_score", 4)),
+                and decision["score"] >= _ACTIVE_JUDGE_THRESHOLD,
             }
             results.append(record)
         return results
@@ -1096,6 +1215,8 @@ def _judge_rows(records: list[dict[str, Any]], batch_size: int) -> Dataset:
                 "task_type": record["task_type"],
                 "task": record["task"],
                 "persona": record["persona"],
+                "persona_need": record.get("persona_need", ""),
+                "question_style": record.get("question_style", ""),
                 "reasoning_steps": record["reasoning_steps"],
                 "claims": record.get("claims", []),
                 "issuer": record["issuing_organization"],
@@ -1268,6 +1389,7 @@ def _final_manifest(
     duplicates: int,
     opener_overrepresented: int = 0,
     question_type_overrepresented: int = 0,
+    question_style_overrepresented: int = 0,
     extractive_overrepresented: int = 0,
     proposition_stats: dict[str, Any] | None = None,
     reasoning_path_stats: dict[str, Any] | None = None,
@@ -1311,6 +1433,7 @@ def _final_manifest(
         "near_duplicates_removed": duplicates,
         "question_opener_overrepresented_removed": opener_overrepresented,
         "question_type_overrepresented_removed": question_type_overrepresented,
+        "question_style_overrepresented_removed": question_style_overrepresented,
         "extractive_answer_overrepresented_removed": extractive_overrepresented,
         "manuals": manuals,
         "reproducibility": {
@@ -1414,7 +1537,12 @@ def _execute_cross_pass(
         judge = SingularCrossDocumentJudge(**_llm_kwargs(JUDGE))
         budgeted, judge_prompt_rejected = _budget_judge_rows(
             judge,
-            cross_judge_rows(generated, _singular_judge_batch_size()),
+            [
+                {**judge_row, "_minimum_judge_score": _ACTIVE_JUDGE_THRESHOLD}
+                for judge_row in cross_judge_rows(
+                    generated, _singular_judge_batch_size()
+                )
+            ],
             JUDGE,
         )
         _write_audit(
@@ -1498,7 +1626,7 @@ def _require_corpus_provenance_for_run(
 def main(argv: list[str] | None = None) -> None:
     """Run single- and cross-document generation through verified exports."""
     global _RESUME_MANAGER, _RUN_ATTEMPT_TERMINAL
-    global _RUN_STARTED_AT, _RUN_STARTED_MONOTONIC
+    global _RUN_STARTED_AT, _RUN_STARTED_MONOTONIC, _ACTIVE_JUDGE_THRESHOLD
     _RUN_STARTED_MONOTONIC = time.monotonic()
     _RUN_STARTED_AT = datetime.now(timezone.utc).isoformat()
     parser = argparse.ArgumentParser()
@@ -1545,6 +1673,22 @@ def main(argv: list[str] | None = None) -> None:
         )
     if args.max_passes is not None and args.max_passes < 1:
         parser.error("--max-passes must be at least 1")
+    calibration_required = bool(
+        args.limit is None
+        and CONFIG.get("judge_calibration", {}).get(
+            "required_for_full_runs", True
+        )
+    )
+    judge_calibration = load_judge_calibration(
+        CONFIG,
+        required=calibration_required,
+    )
+    _ACTIVE_JUDGE_THRESHOLD = int(
+        judge_calibration.get(
+            "recommended_threshold",
+            QUALITY.get("minimum_judge_score", 4),
+        )
+    )
     _require_structure_probes_for_run(args)
     run_id, files_dir = _run_layout(args.run_id)
     _RUN_ATTEMPT_TERMINAL = False
@@ -2155,6 +2299,7 @@ def main(argv: list[str] | None = None) -> None:
             "planned_request_id": row["planned_request_id"],
             "planned_task_type": row["planned_task_type"],
             "planned_question_type": row["planned_question_type"],
+            "planned_question_style": row["planned_question_style"],
             "planned_answer_format": row["planned_answer_format"],
             "manual_id": row["manual_id"],
         },
@@ -2183,6 +2328,7 @@ def main(argv: list[str] | None = None) -> None:
             "blueprint_id": row["blueprint_id"],
             "planned_task_type": row["planned_task_type"],
             "planned_question_type": row["planned_question_type"],
+            "planned_question_style": row["planned_question_style"],
             "planned_answer_format": row["planned_answer_format"],
             "task_type": row["planned_task_type"],
             "answerable": row["planned_answerable"],
@@ -2194,6 +2340,7 @@ def main(argv: list[str] | None = None) -> None:
             "parent_request_id": row["planned_request_id"],
             "planned_task_type": row["planned_task_type"],
             "planned_question_type": row["planned_question_type"],
+            "planned_question_style": row["planned_question_style"],
             "planned_answer_format": row["planned_answer_format"],
             "task_type": row["planned_task_type"],
             "answerable": row["planned_answerable"],
@@ -2237,7 +2384,7 @@ def main(argv: list[str] | None = None) -> None:
     generated, question_type_overrepresented = enforce_category_diversity(
         generated,
         "question_type",
-        float(QUALITY.get("max_question_type_share", 0.30)),
+        float(QUALITY.get("max_question_type_share", 0.20)),
     )
     kept_ids = {row["record_id"] for row in generated}
     portfolio_rejected.extend(
@@ -2246,6 +2393,24 @@ def main(argv: list[str] | None = None) -> None:
             "portfolio_checks": {
                 "accepted": False,
                 "issues": ["question_type_overrepresented"],
+            },
+        }
+        for row in before_portfolio
+        if row["record_id"] not in kept_ids
+    )
+    before_portfolio = generated
+    generated, question_style_overrepresented = enforce_category_diversity(
+        generated,
+        "question_style",
+        float(QUALITY.get("max_question_style_share", 0.20)),
+    )
+    kept_ids = {row["record_id"] for row in generated}
+    portfolio_rejected.extend(
+        {
+            **row,
+            "portfolio_checks": {
+                "accepted": False,
+                "issues": ["question_style_overrepresented"],
             },
         }
         for row in before_portfolio
@@ -2287,6 +2452,7 @@ def main(argv: list[str] | None = None) -> None:
                 duplicates=duplicates,
                 opener_overrepresented=opener_overrepresented,
                 question_type_overrepresented=question_type_overrepresented,
+                question_style_overrepresented=question_style_overrepresented,
                 extractive_overrepresented=extractive_overrepresented,
                 proposition_stats=proposition_stats,
                 reasoning_path_stats=reasoning_path_stats,
@@ -2349,7 +2515,7 @@ def main(argv: list[str] | None = None) -> None:
     accepted, post_judge_question_type_removed = enforce_category_diversity(
         accepted,
         "question_type",
-        float(QUALITY.get("max_question_type_share", 0.30)),
+        float(QUALITY.get("max_question_type_share", 0.20)),
     )
     question_type_overrepresented += post_judge_question_type_removed
     kept_ids = {row["record_id"] for row in accepted}
@@ -2359,6 +2525,25 @@ def main(argv: list[str] | None = None) -> None:
             "portfolio_checks": {
                 "accepted": False,
                 "issues": ["post_judge_question_type_overrepresented"],
+            },
+        }
+        for row in before_portfolio
+        if row["record_id"] not in kept_ids
+    )
+    before_portfolio = accepted
+    accepted, post_judge_question_style_removed = enforce_category_diversity(
+        accepted,
+        "question_style",
+        float(QUALITY.get("max_question_style_share", 0.20)),
+    )
+    question_style_overrepresented += post_judge_question_style_removed
+    kept_ids = {row["record_id"] for row in accepted}
+    portfolio_rejected.extend(
+        {
+            **row,
+            "portfolio_checks": {
+                "accepted": False,
+                "issues": ["post_judge_question_style_overrepresented"],
             },
         }
         for row in before_portfolio
@@ -2781,7 +2966,7 @@ def main(argv: list[str] | None = None) -> None:
         elif deterministic_drafting:
             judge_profile = JUDGE
             for row in deterministic_drafting:
-                row["_minimum_judge_score"] = int(QUALITY.get("minimum_judge_score", 4))
+                row["_minimum_judge_score"] = _ACTIVE_JUDGE_THRESHOLD
             os.environ["HOSTED_VLLM_API_KEY"] = _model_settings(judge_profile)[2]
             drafting_judged = _execute_llm_stage(
                 "drafting_judge",
@@ -2830,6 +3015,42 @@ def main(argv: list[str] | None = None) -> None:
             "skipped": True,
         }
 
+    cross_minimum = int(cross_config.get("minimum_accepted_records", 1))
+    drafting_minimum = int(
+        drafting_config.get("minimum_accepted_records", 1)
+    )
+    stage_quality_evidence = {
+        "cross_document": {
+            "required": bool(cross_config.get("enabled", False)),
+            "skipped": bool(args.skip_cross_document),
+            "accepted": len(cross_accepted),
+            "minimum_accepted": cross_minimum,
+            "passed": (
+                not cross_config.get("enabled", False)
+                or (
+                    not args.skip_cross_document
+                    and len(cross_accepted) >= cross_minimum
+                )
+            ),
+        },
+        "drafting": {
+            "required": bool(drafting_config.get("enabled", False)),
+            "skipped": bool(args.skip_drafting),
+            "accepted": len(drafting_accepted),
+            "minimum_accepted": drafting_minimum,
+            "passed": (
+                not drafting_config.get("enabled", False)
+                or (
+                    not args.skip_drafting
+                    and len(drafting_accepted) >= drafting_minimum
+                )
+            ),
+        },
+    }
+    stage_quality_evidence_complete = all(
+        stage["passed"] for stage in stage_quality_evidence.values()
+    )
+
     task_counts = {task_type: sum(row["task_type"] == task_type for row in accepted) for task_type in QUALITY.get("required_task_types", [])}
     required_missing = [task_type for task_type, count in task_counts.items() if count == 0]
     incomplete_requests = [
@@ -2874,6 +3095,26 @@ def main(argv: list[str] | None = None) -> None:
         <= float(QUALITY.get("max_question_type_share", 0.30))
         or int(question_type_report.get("top_count", 0)) <= 1
     )
+    effective_question_types = len(
+        [
+            category
+            for category, count in question_type_report.get("counts", {}).items()
+            if category != "missing" and int(count) > 0
+        ]
+    )
+    minimum_effective_question_types = min(
+        int(QUALITY.get("minimum_effective_question_types", 6)),
+        qa_total,
+    )
+    question_type_coverage_complete = (
+        effective_question_types >= minimum_effective_question_types
+    )
+    question_style_report = stats.get("question_style_diversity", {})
+    question_style_share_complete = (
+        float(question_style_report.get("top_share", 0.0))
+        <= float(QUALITY.get("max_question_style_share", 0.20))
+        or int(question_style_report.get("top_count", 0)) <= 1
+    )
     extractive_share = float(
         stats.get("answer_style_diversity", {}).get("extractive_answer_share", 0.0)
     )
@@ -2884,6 +3125,8 @@ def main(argv: list[str] | None = None) -> None:
         qa_cot_share_complete
         and opener_share_complete
         and question_type_share_complete
+        and question_type_coverage_complete
+        and question_style_share_complete
         and extractive_share_complete
     )
     status = (
@@ -2892,6 +3135,7 @@ def main(argv: list[str] | None = None) -> None:
         and not incomplete_requests
         and missing_temporal_judge_responses == 0
         and portfolio_quality_complete
+        and stage_quality_evidence_complete
         and (
             not cross_policy.enabled
             or args.skip_cross_document
@@ -2912,6 +3156,7 @@ def main(argv: list[str] | None = None) -> None:
         duplicates=duplicates + cross_duplicates,
         opener_overrepresented=opener_overrepresented,
         question_type_overrepresented=question_type_overrepresented,
+        question_style_overrepresented=question_style_overrepresented,
         extractive_overrepresented=extractive_overrepresented,
         proposition_stats=proposition_stats,
         reasoning_path_stats=reasoning_path_stats,
@@ -2923,6 +3168,7 @@ def main(argv: list[str] | None = None) -> None:
         evaluation_stats={
             "manual_folds": manual_folds,
             "frozen_external": frozen_registry,
+            "judge_calibration": judge_calibration,
             "frozen_overlap": frozen_overlap,
             "generated_validation_and_test_are_development_only": True,
         },
@@ -2936,6 +3182,7 @@ def main(argv: list[str] | None = None) -> None:
         "cross_document": cross_saturation.summary(),
     }
     final_manifest["missing_required_task_types"] = required_missing
+    final_manifest["stage_quality_evidence"] = stage_quality_evidence
     final_manifest["terminal_request_completeness"] = {
         "complete": (
             not incomplete_requests
@@ -2954,8 +3201,13 @@ def main(argv: list[str] | None = None) -> None:
         "qa_cot_share_complete": qa_cot_share_complete,
         "question_opener_share_complete": opener_share_complete,
         "question_type_share_complete": question_type_share_complete,
+        "effective_question_types": effective_question_types,
+        "minimum_effective_question_types": minimum_effective_question_types,
+        "question_type_coverage_complete": question_type_coverage_complete,
+        "question_style_share_complete": question_style_share_complete,
         "extractive_answer_share_complete": extractive_share_complete,
         "portfolio_quality_complete": portfolio_quality_complete,
+        "stage_quality_evidence_complete": stage_quality_evidence_complete,
     }
     if missing_judge_responses or missing_temporal_judge_responses:
         final_manifest["status"] = "partial"

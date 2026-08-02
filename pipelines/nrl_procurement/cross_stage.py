@@ -11,11 +11,17 @@ from collections import defaultdict
 from typing import Any
 
 from cross_document import evidence_location
-from schemas import CrossCandidateBatch, CrossJudgeBatch, CrossJudgedCandidate
+from schemas import (
+    CrossCandidateBatch,
+    CrossJudgeBatch,
+    CrossJudgedCandidate,
+    collect_structural_repairs,
+)
 from settings import CONFIG
 from validation import (
     judge_quotes_are_grounded,
     quarantine_invalid_judge_batch,
+    question_style_issues,
     recover_grounded_judge_quotes,
     validate_cross_record,
 )
@@ -143,6 +149,10 @@ preserved authority and qualifications, and task_type-consistent rationale struc
         )
         for candidate in response.examples:
             draft = candidate.model_dump()
+            structural_repairs = [
+                *collect_structural_repairs(response),
+                *collect_structural_repairs(candidate),
+            ]
             reasons = list(batch_issues)
             if draft["task_type"] != row["planned_task_type"]:
                 reasons.append(f"planned_task_type_mismatch:{row['planned_task_type']}")
@@ -150,6 +160,18 @@ preserved authority and qualifications, and task_type-consistent rationale struc
                 reasons.append(f"planned_answerability_mismatch:{row['planned_answerable']}")
             if draft["task"] not in TAXONOMY.get("tasks", []) or draft["persona"] not in TAXONOMY.get("personas", []):
                 reasons.append("unsupported_taxonomy_value")
+            if draft["question_type"] not in {
+                "comparison",
+                "temporal",
+                "complementary",
+                "bridge",
+                "cross_domain",
+                "unanswerable",
+            }:
+                reasons.append("unsupported_cross_question_type")
+            reasons.extend(
+                question_style_issues(draft["question"], draft["persona"])
+            )
             reasons.extend(validate_cross_record(draft, row["source_documents"]))
             reasons = sorted(set(reasons))
             claims, flat_evidence = [], {}
@@ -236,6 +258,9 @@ preserved authority and qualifications, and task_type-consistent rationale struc
                     "citations": citations,
                     "parent_request_id": row["planned_request_id"],
                     "generation_model": self.model_name,
+                    "structural_repairs": list(
+                        dict.fromkeys(structural_repairs)
+                    ),
                 }
             reasons.extend(cross_binding_issues(record))
             record["deterministic_checks"] = {
@@ -402,6 +427,11 @@ because it is cited.
 EVALUATION CONTRACT
 - Apply supported, relevant, preserves_qualifications, authority_correct, and
   reasoning_valid using the same strict meanings as a grounded procurement review.
+- question_natural=true only for a concise standalone workplace question with no
+  source-reading opener or cosmetic role preamble.
+- persona_relevant=true only when the declared actor has a material work need for
+  the synthesis; an attached role label or preamble is insufficient. Use
+  general_user for a role-neutral information need.
 - For cross_document_qa, reasoning_valid=true only when reasoning_steps is empty.
   For cross_document_qa_cot, it is true only when the concise rationale is valid,
   necessary or useful, source-supported, and connected across both sources.
@@ -496,9 +526,14 @@ and consistency among booleans, ablation list, score, and issues.
                 "full_context_supported",
                 "connected_reasoning",
                 "relationship_correct",
+                "question_natural",
+                "persona_relevant",
             )
             record["judge"] = {
                 **decision,
+                "structural_repairs": collect_structural_repairs(
+                    judgment.decision
+                ),
                 "source_ablation_passed": ablation_passed,
                 "task_correct": task_correct,
                 "persona_correct": persona_correct,
@@ -510,7 +545,13 @@ and consistency among booleans, ablation list, score, and issues.
                 and task_correct
                 and persona_correct
                 and answerability_correct
-                and decision["score"] >= int(QUALITY.get("minimum_judge_score", 4)),
+                and decision["score"]
+                >= int(
+                    row.get(
+                        "_minimum_judge_score",
+                        QUALITY.get("minimum_judge_score", 4),
+                    )
+                ),
             }
             results.append(record)
         return results

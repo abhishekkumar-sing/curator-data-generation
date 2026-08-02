@@ -17,13 +17,15 @@ STAGE_CONTRACT_VERSIONS = {
     # Increment only when persisted response semantics change. Source-only
     # edits remain reusable, while parser/judge contract changes cannot reuse
     # stale completed checkpoints.
-    "cross_generation": "3",
-    "cross_generation_pass": "3",
-    "cross_judge": "3",
-    "cross_judge_pass": "3",
-    "drafting_generation": "2",
-    "generation": "2",
-    "judge": "2",
+    "qa_blueprints": "2",
+    "cross_generation": "4",
+    "cross_generation_pass": "4",
+    "cross_judge": "4",
+    "cross_judge_pass": "4",
+    "drafting_generation": "3",
+    "drafting_judge": "2",
+    "generation": "3",
+    "judge": "3",
 }
 
 

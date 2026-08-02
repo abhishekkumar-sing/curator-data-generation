@@ -55,11 +55,15 @@ def prepare_review(
     seed: str = "nrl-human-review-v1",
 ) -> dict[str, int]:
     """Write a reproducible review template without inventing reviewer labels."""
-    accepted = _read_jsonl(files_dir / "canonical.jsonl")
+    accepted = [
+        *(_read_jsonl(files_dir / "canonical.jsonl")),
+        *(_read_jsonl(files_dir / "drafting_canonical.jsonl")),
+    ]
     rejected = [
         *(_read_jsonl(files_dir / "qa_rejected.jsonl")),
         *(_read_jsonl(files_dir / "cross_rejected.jsonl")),
         *(_read_jsonl(files_dir / "path_answers_rejected.jsonl")),
+        *(_read_jsonl(files_dir / "drafting_rejected.jsonl")),
     ]
     rows = []
     for disposition, candidates, count in (
@@ -71,6 +75,7 @@ def prepare_review(
                 row.get("record_id")
                 or row.get("parent_request_id")
                 or row.get("question_id")
+                or row.get("id")
             )
             rows.append(
                 {
@@ -109,7 +114,11 @@ def prepare_review(
     }
 
 
-def validate_reviews(path: Path) -> dict[str, Any]:
+def validate_reviews(
+    path: Path,
+    *,
+    minimum_accepted: int = 100,
+) -> dict[str, Any]:
     """Verify completeness and immutable record hashes for supplied labels."""
     rows = _read_jsonl(path)
     issues = []
@@ -140,11 +149,11 @@ def validate_reviews(path: Path) -> dict[str, Any]:
         reviewed_accepted += disposition == "accepted"
         reviewed_rejected += disposition == "rejected"
     return {
-        "passed": not issues and reviewed_accepted >= 100,
+        "passed": not issues and reviewed_accepted >= minimum_accepted,
         "issues": sorted(set(issues)),
         "reviewed_accepted": reviewed_accepted,
         "reviewed_rejected": reviewed_rejected,
-        "minimum_accepted_required": 100,
+        "minimum_accepted_required": minimum_accepted,
         "frozen_evaluation_complete": False,
         "frozen_evaluation_note": (
             "Reviewed generated training records are not an independent gold set."
