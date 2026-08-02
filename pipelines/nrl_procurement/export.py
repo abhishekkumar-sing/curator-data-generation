@@ -10,7 +10,7 @@ from typing import Any
 
 from jsonl_io import write_jsonl_rows
 from provenance import build_reasoning_graph, leakage_audit
-from validation import question_opener_key
+from validation import is_extractive_answer, question_opener_key
 
 
 def question_opener_diversity(records: list[dict[str, Any]]) -> dict[str, Any]:
@@ -25,12 +25,30 @@ def question_opener_diversity(records: list[dict[str, Any]]) -> dict[str, Any]:
     for row in records:
         opener_counts[question_opener_key(str(row.get("question", "")))] += 1
     if not records:
-        return {"unique_openers": 0, "top_opener": "", "top_opener_share": 0.0}
+        return {
+            "unique_openers": 0,
+            "top_opener": "",
+            "top_opener_count": 0,
+            "top_opener_share": 0.0,
+        }
     top_opener, top_count = max(opener_counts.items(), key=lambda item: item[1])
     return {
         "unique_openers": len(opener_counts),
         "top_opener": top_opener,
+        "top_opener_count": top_count,
         "top_opener_share": round(top_count / len(records), 4),
+    }
+
+
+def answer_style_diversity(records: list[dict[str, Any]]) -> dict[str, Any]:
+    """Report substantial evidence-span copying in accepted answers."""
+    eligible = [row for row in records if row.get("task_type") in {"qa", "qa_cot"}]
+    extractive = sum(is_extractive_answer(row) for row in eligible)
+    return {
+        "records_evaluated": len(eligible),
+        "extractive_answers": extractive,
+        "non_extractive_answers": len(eligible) - extractive,
+        "extractive_answer_share": round(extractive / len(eligible), 4) if eligible else 0.0,
     }
 
 
@@ -308,6 +326,7 @@ def export_records(
     stats["rag_records"] = len(rag)
     stats["eval_records"] = len(evaluation)
     stats["question_opener_diversity"] = question_opener_diversity(records)
+    stats["answer_style_diversity"] = answer_style_diversity(records)
     write_manifest(
         output_dir,
         {

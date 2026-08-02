@@ -1,6 +1,6 @@
 # NRL Procurement Pipeline — Session Handoff
 
-Last updated: 2026-07-31
+Last updated: 2026-08-02
 
 ## Current objective
 
@@ -135,9 +135,10 @@ headers — read those before changing any of this code further.
    the model no phrasing guidance across ~2,938 independent, stateless
    generation calls, so it converges on one default construction. Fixed at
    the corpus level: `validation.py::enforce_question_opener_diversity`
-   caps any single normalized 4-word opening n-gram to
-   `quality.max_question_opener_share` (default 0.15) of the deduplicated
-   pool, applied right after `deduplicate()` and before judging. Grounded in
+   caps any repeated normalized 4-word opening n-gram to
+   `quality.max_question_opener_share` (default 0.15) of the resulting pool,
+   applied after `deduplicate()`, before judging, and again after judge
+   attrition. Grounded in
    Self-Instruct's (ACL 2023) pool-similarity filtering, generalized from
    full-text near-duplicates to shared opening templates. A first attempt
    (a within-one-response check) was tried and explicitly reverted as
@@ -153,6 +154,36 @@ ruff: passed
 pytest: 105 passed, 3 dependency deprecation warnings
 ```
 
+## Fixes added 2026-08-02 after auditing `qa-qacot-full-002`
+
+The historical output was independently measured at 84.68% literal
+`According to` openers, 52.59% substantial normalized answer-in-evidence span
+copying, 13.24% accepted QA-CoT, and 100% record-ID overlap between its old SFT
+and eval files. The split fix above is present in current code, but the artifact
+predates it. Additional safeguards now:
+
+- calculate opener quotas against the resulting pool and re-apply them after
+  judge attrition;
+- preserve short exact labels/values while capping substantial extractive
+  answers of four or more words at 35%, before and after judging;
+- plan 40% QA-CoT requests and require at least 20% accepted QA-CoT for a
+  `complete` portfolio;
+- report answer-style distribution and portfolio removals, with removed rows
+  retained in `qa_rejected.jsonl`;
+- independently validate train-only SFT, non-train eval, zero ID overlap,
+  split-safe cardinality reconciliation, and portfolio-quality status.
+
+The 35% extractive ceiling, 40% planning allocation, and 20% accepted QA-CoT
+floor are project policies for the next experiment, not literature-derived
+universal optima. See the dated research record in `TASKS.md`.
+
+Focused verification after these additions:
+
+```text
+ruff: passed
+pytest: 108 passed, 3 dependency deprecation warnings
+```
+
 The LiteLLM pricing warning and PyArrow `null_placement` warning are
 non-blocking. Structural validation errors, permanent request failures, missing
 lineage, or empty core exports are blocking.
@@ -163,9 +194,10 @@ Full 3,006-chunk corpus, `--skip-cross-document --skip-drafting`,
 `path_qa`/`temporal`/`propositions`/`reasoning_paths` all disabled:
 
 - **2,493 accepted**: 2,163 `qa` + 330 `qa_cot` (~13% CoT rate).
-- Splits: 1,930 train / 305 validation / 258 test — independently verified
-  zero record_id overlap between `qa_sft.jsonl`+`qa_cot_sft.jsonl` and
-  `eval.jsonl`.
+- Splits: 1,930 train / 305 validation / 258 test in canonical assignments.
+  The historical task exports are unsafe: all 2,493 record IDs overlap between
+  `qa_sft.jsonl`+`qa_cot_sft.jsonl` and `eval.jsonl` because this artifact
+  predates the split-safe exporter.
 - All 3,567 citation spans across accepted records reconstruct exactly
   against the registered source chunks (re-verified independently, not just
   via the pipeline's own audit).
@@ -184,8 +216,9 @@ Full 3,006-chunk corpus, `--skip-cross-document --skip-drafting`,
 
 Earlier runs this session (`pilot-021` n=5, `pilot-022` n=50,
 `qa-qacot-full-001` n=5) were smaller smoke tests validating individual
-fixes as they landed; `qa-qacot-full-002` is the only full-corpus,
-all-fixes-applied result so far — and even it predates the last two fixes.
+fixes as they landed; `qa-qacot-full-002` is the latest full-corpus result,
+but it predates the split-safe export, opener, answer-style, and QA/CoT
+portfolio fixes.
 Do not treat `outputs/qa-qacot-full-002`'s files as final without both a
 fresh full run and the pending human review.
 
@@ -221,9 +254,12 @@ After that run:
 2. Check `question_opener_diversity` in manifest statistics — this is the
    first run where the corpus-level cap is actually active; confirm the
    top opener's share is at or below the configured 0.15 ceiling.
-3. Generate and complete the human-review sample (`review.py`) — this gate
+3. Check `answer_style_diversity.extractive_answer_share <= 0.35` and
+   `quality_acceptance.qa_cot_share >= 0.20`.
+4. Run `validate_run.py` and confirm zero training/eval ID overlap.
+5. Generate and complete the human-review sample (`review.py`) — this gate
    is independent of code correctness and nothing this session touched it.
-4. Only after that: decide whether to re-enable `path_qa`/`temporal`/
+6. Only after that: decide whether to re-enable `path_qa`/`temporal`/
    cross-document generation for a second scope, or proceed to SLM
    fine-tuning / RAG work on the qa/qa_cot-only dataset as-is.
 
@@ -249,8 +285,9 @@ contract versions.
   fixed this session; the audit was previously a false pass.
 - No single question-opener template should dominate — check
   `question_opener_diversity.top_opener_share` in manifest statistics; the
-  configured cap is a ceiling on generation, not a guarantee about the
-  final judged/deduplicated distribution.
+  configured cap is re-applied after judging.
+- Substantial extractive answers remain at or below 35%, and accepted QA-CoT
+  remains at or above 20%; both are explicit manifest release gates.
 - 100 accepted + 25 rejected records human-reviewed via `review.py`.
 - Manually inspect a representative sample of deterministic rejections in
   addition to the structured review above.

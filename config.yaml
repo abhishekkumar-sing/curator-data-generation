@@ -121,7 +121,9 @@ models:
 
 quality:
   examples_per_chunk: 3
-  qa_cot_fraction: 0.25
+  # CoT candidates have a lower validation/judge survival rate than direct QA.
+  # Plan 40% so the accepted pool can meet the separate 20% release floor.
+  qa_cot_fraction: 0.40
   cross_qa_cot_fraction: 0.25
   # Disabled until a dedicated adversarial construction and independent
   # answerability-verification stage is implemented.
@@ -135,6 +137,10 @@ quality:
   # Self-Instruct's pool-similarity filtering (ACL 2023) generalized from
   # near-duplicate full text to shared opening templates.
   max_question_opener_share: 0.15
+  # Preserve some exact-answer records, but prevent the SFT corpus from mostly
+  # teaching source-span copying. Answers shorter than four words are exempt.
+  max_extractive_answer_share: 0.35
+  minimum_qa_cot_share: 0.20
   allow_unjudged_exports: false
   require_independent_judge: true
   required_task_types:

@@ -78,6 +78,7 @@ from schemas import AblationTrialDraft, PathAnswerDraft, PathQuestionBatch
 from schemas import CandidateBatch, JudgeBatch, JudgedCandidate
 from validation import (
     deduplicate,
+    enforce_extractive_answer_diversity,
     enforce_question_opener_diversity,
     judge_quotes_are_grounded,
     quarantine_invalid_judge_batch,
@@ -493,6 +494,10 @@ CONSTRAINTS
   the passage. The top-level evidence list must contain exactly the union of the
   claim evidence, with no unused or missing quote.
 - For planned task_type=qa, use a direct answer and return reasoning_steps=[].
+- Write the answer as concise, natural guidance for the assigned persona. Use
+  exact source wording only for terms, names, values, or language whose precision
+  matters; otherwise synthesize the supported facts instead of copying an entire
+  evidence sentence as the answer. Evidence quotes themselves remain verbatim.
 - For planned task_type=qa_cot, answer only when it genuinely requires two to four
   evidence-linked operations for a scenario, temporal rule, condition, exception,
   procedure, or multi-section synthesis.
@@ -995,6 +1000,7 @@ def _final_manifest(
     drafting_stats: dict[str, Any],
     duplicates: int,
     opener_overrepresented: int = 0,
+    extractive_overrepresented: int = 0,
     proposition_stats: dict[str, Any] | None = None,
     reasoning_path_stats: dict[str, Any] | None = None,
     source_window_stats: dict[str, Any] | None = None,
@@ -1030,6 +1036,7 @@ def _final_manifest(
         or {"single_document": 0, "cross_document": 0},
         "near_duplicates_removed": duplicates,
         "question_opener_overrepresented_removed": opener_overrepresented,
+        "extractive_answer_overrepresented_removed": extractive_overrepresented,
         "manuals": manuals,
         "reproducibility": {
             "code_revision": _code_revision(),
@@ -1659,9 +1666,40 @@ def main() -> None:
     deterministic_rejected = [row for row in generated_audit if not row.get("deterministic_checks", {}).get("passed", False)]
     generated = [row for row in generated_audit if row.get("deterministic_checks", {}).get("passed", False)]
     generated, duplicates = deduplicate(generated, float(QUALITY.get("dedupe_threshold", 94)))
+    portfolio_rejected: list[dict[str, Any]] = []
+    before_portfolio = generated
     generated, opener_overrepresented = enforce_question_opener_diversity(
         generated,
         float(QUALITY.get("max_question_opener_share", 0.15)),
+    )
+    kept_ids = {row["record_id"] for row in generated}
+    portfolio_rejected.extend(
+        {
+            **row,
+            "portfolio_checks": {
+                "accepted": False,
+                "issues": ["question_opener_overrepresented"],
+            },
+        }
+        for row in before_portfolio
+        if row["record_id"] not in kept_ids
+    )
+    before_portfolio = generated
+    generated, extractive_overrepresented = enforce_extractive_answer_diversity(
+        generated,
+        float(QUALITY.get("max_extractive_answer_share", 0.35)),
+    )
+    kept_ids = {row["record_id"] for row in generated}
+    portfolio_rejected.extend(
+        {
+            **row,
+            "portfolio_checks": {
+                "accepted": False,
+                "issues": ["extractive_answer_overrepresented"],
+            },
+        }
+        for row in before_portfolio
+        if row["record_id"] not in kept_ids
     )
     if not generated:
         write_manifest(
@@ -1678,6 +1716,7 @@ def main() -> None:
                 drafting_stats={},
                 duplicates=duplicates,
                 opener_overrepresented=opener_overrepresented,
+                extractive_overrepresented=extractive_overrepresented,
                 proposition_stats=proposition_stats,
                 reasoning_path_stats=reasoning_path_stats,
                 source_window_stats=source_window_stats,
@@ -1715,6 +1754,44 @@ def main() -> None:
                 budgeted_judge_rows,
             )
         accepted = [row for row in judged if row["judge"]["accepted"]]
+    # Re-apply portfolio constraints after judging because differential judge
+    # attrition can re-concentrate a pool that passed before judge calls.
+    before_portfolio = accepted
+    accepted, post_judge_opener_removed = enforce_question_opener_diversity(
+        accepted,
+        float(QUALITY.get("max_question_opener_share", 0.15)),
+    )
+    opener_overrepresented += post_judge_opener_removed
+    kept_ids = {row["record_id"] for row in accepted}
+    portfolio_rejected.extend(
+        {
+            **row,
+            "portfolio_checks": {
+                "accepted": False,
+                "issues": ["post_judge_question_opener_overrepresented"],
+            },
+        }
+        for row in before_portfolio
+        if row["record_id"] not in kept_ids
+    )
+    before_portfolio = accepted
+    accepted, post_judge_extractive_removed = enforce_extractive_answer_diversity(
+        accepted,
+        float(QUALITY.get("max_extractive_answer_share", 0.35)),
+    )
+    extractive_overrepresented += post_judge_extractive_removed
+    kept_ids = {row["record_id"] for row in accepted}
+    portfolio_rejected.extend(
+        {
+            **row,
+            "portfolio_checks": {
+                "accepted": False,
+                "issues": ["post_judge_extractive_answer_overrepresented"],
+            },
+        }
+        for row in before_portfolio
+        if row["record_id"] not in kept_ids
+    )
     single_accepted = list(accepted)
     single_coverage = {
         "generated": single_generation_coverage,
@@ -1724,7 +1801,7 @@ def main() -> None:
         ),
         "accepted": request_coverage(planned_single, single_accepted),
     }
-    qa_rejected = deterministic_rejected + (
+    qa_rejected = deterministic_rejected + portfolio_rejected + (
             []
             if args.skip_judge
             else judge_prompt_rejected
@@ -1863,6 +1940,7 @@ def main() -> None:
                 drafting_stats={},
                 duplicates=duplicates + cross_duplicates,
                 opener_overrepresented=opener_overrepresented,
+                extractive_overrepresented=extractive_overrepresented,
                 proposition_stats=proposition_stats,
                 reasoning_path_stats=reasoning_path_stats,
                 source_window_stats=source_window_stats,
@@ -1992,11 +2070,36 @@ def main() -> None:
     missing_temporal_judge_responses = int(
         temporal_stats.get("missing_judge_responses", 0)
     )
+    single_ids = {row["record_id"] for row in single_accepted}
+    exported_single = [row for row in accepted if row["record_id"] in single_ids]
+    qa_total = sum(row["task_type"] in {"qa", "qa_cot"} for row in exported_single)
+    qa_cot_count = sum(row["task_type"] == "qa_cot" for row in exported_single)
+    qa_cot_share = qa_cot_count / qa_total if qa_total else 0.0
+    minimum_qa_cot_share = float(QUALITY.get("minimum_qa_cot_share", 0.20))
+    qa_cot_share_complete = qa_cot_share >= minimum_qa_cot_share
+    opener_report = stats.get("question_opener_diversity", {})
+    opener_share_complete = (
+        float(opener_report.get("top_opener_share", 0.0))
+        <= float(QUALITY.get("max_question_opener_share", 0.15))
+        or int(opener_report.get("top_opener_count", 0)) <= 1
+    )
+    extractive_share = float(
+        stats.get("answer_style_diversity", {}).get("extractive_answer_share", 0.0)
+    )
+    extractive_share_complete = extractive_share <= float(
+        QUALITY.get("max_extractive_answer_share", 0.35)
+    )
+    portfolio_quality_complete = (
+        qa_cot_share_complete
+        and opener_share_complete
+        and extractive_share_complete
+    )
     status = (
         "complete"
         if not required_missing
         and not incomplete_requests
         and missing_temporal_judge_responses == 0
+        and portfolio_quality_complete
         else "partial"
     )
     final_manifest = _final_manifest(
@@ -2011,6 +2114,7 @@ def main() -> None:
         drafting_stats=drafting_stats,
         duplicates=duplicates + cross_duplicates,
         opener_overrepresented=opener_overrepresented,
+        extractive_overrepresented=extractive_overrepresented,
         proposition_stats=proposition_stats,
         reasoning_path_stats=reasoning_path_stats,
         source_window_stats=source_window_stats,
@@ -2036,6 +2140,12 @@ def main() -> None:
     final_manifest["quality_acceptance"] = {
         "accepted_records": len(accepted),
         "required_task_types_complete": not required_missing,
+        "qa_cot_share": round(qa_cot_share, 4),
+        "minimum_qa_cot_share": minimum_qa_cot_share,
+        "qa_cot_share_complete": qa_cot_share_complete,
+        "question_opener_share_complete": opener_share_complete,
+        "extractive_answer_share_complete": extractive_share_complete,
+        "portfolio_quality_complete": portfolio_quality_complete,
     }
     if missing_judge_responses or missing_temporal_judge_responses:
         final_manifest["status"] = "partial"

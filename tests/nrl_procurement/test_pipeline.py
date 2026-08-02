@@ -36,7 +36,7 @@ from drafting import (  # noqa: E402
     normalize_drafting_response,
     read_drafting_seeds,
 )
-from export import assert_unique_record_ids, assign_splits, export_records, question_opener_diversity  # noqa: E402
+from export import answer_style_diversity, assert_unique_record_ids, assign_splits, export_records, question_opener_diversity  # noqa: E402
 from generate import (  # noqa: E402
     ProcurementGenerator,
     ProcurementJudge,
@@ -98,7 +98,9 @@ from source_windows import (  # noqa: E402
 from validate_run import validate_run  # noqa: E402
 from validation import (  # noqa: E402
     deduplicate,
+    enforce_extractive_answer_diversity,
     enforce_question_opener_diversity,
+    is_extractive_answer,
     judge_batch_identity_issues,
     judge_quotes_are_grounded,
     recover_grounded_judge_quotes,
@@ -1695,9 +1697,12 @@ def test_enforce_question_opener_diversity_caps_dominant_template() -> None:
     records = [{"record_id": f"template-{i}", "question": f"According to the manual, what is fact {i}?"} for i in range(17)]
     records += [{"record_id": f"varied-{i}", "question": f"Under Section {i}, who approves this step?"} for i in range(3)]
     kept, removed = enforce_question_opener_diversity(records, max_share=0.15)
-    assert removed == 14  # 20 total records * 0.15 -> limit 3 survivors of the dominant opener
+    # The quota applies to the resulting pool, not the original 20 rows. With
+    # only three alternatives, one repeated-template row is the irreducible
+    # deterministic minimum (1/4 > 15% is unavoidable in such a tiny pool).
+    assert removed == 16
     kept_templates = sum(1 for r in kept if r["record_id"].startswith("template-"))
-    assert kept_templates == 3
+    assert kept_templates == 1
     assert sum(1 for r in kept if r["record_id"].startswith("varied-")) == 3
     assert len(kept) + removed == len(records)
 
@@ -1715,8 +1720,52 @@ def test_question_opener_diversity_reports_top_share() -> None:
     report = question_opener_diversity(records)
     assert report["unique_openers"] == 2
     assert report["top_opener"] == "according to the manual"
+    assert report["top_opener_count"] == 3
     assert report["top_opener_share"] == 0.75
-    assert question_opener_diversity([]) == {"unique_openers": 0, "top_opener": "", "top_opener_share": 0.0}
+    assert question_opener_diversity([]) == {
+        "unique_openers": 0,
+        "top_opener": "",
+        "top_opener_count": 0,
+        "top_opener_share": 0.0,
+    }
+
+
+def test_extractive_answer_diversity_caps_final_pool_share() -> None:
+    copied = [
+        {
+            "record_id": f"copied-{index}",
+            "task_type": "qa",
+            "answer": f"The complete copied answer number {index} applies",
+            "evidence": [{"quote": f"The complete copied answer number {index} applies in this case."}],
+        }
+        for index in range(8)
+    ]
+    synthesized = [
+        {
+            "record_id": f"synthesized-{index}",
+            "task_type": "qa",
+            "answer": f"Use the applicable combined procedure {index}.",
+            "evidence": [{"quote": "First verify eligibility, and then obtain approval."}],
+        }
+        for index in range(4)
+    ]
+    kept, removed = enforce_extractive_answer_diversity(
+        [*copied, *synthesized],
+        max_share=0.35,
+    )
+    report = answer_style_diversity(kept)
+    assert removed == 6
+    assert report["extractive_answers"] == 2
+    assert report["extractive_answer_share"] <= 0.35
+
+
+def test_short_precise_answers_are_not_classified_as_span_copying() -> None:
+    assert not is_extractive_answer(
+        {
+            "answer": "Rs 10 crore",
+            "evidence": [{"quote": "The threshold is Rs 10 crore."}],
+        }
+    )
 
 
 def test_connected_split_targets_records_without_leaking_components() -> None:
@@ -2999,6 +3048,13 @@ def test_release_validation_requires_all_four_exports_and_human_review(
                 "run_id": "run",
                 "status": "complete",
                 "terminal_request_completeness": {"complete": True},
+                "required_task_type_counts": {
+                    "qa": 1,
+                    "qa_cot": 1,
+                    "cross_document_qa": 1,
+                    "cross_document_qa_cot": 1,
+                },
+                "quality_acceptance": {"portfolio_quality_complete": True},
             }
         ),
         encoding="utf-8",
@@ -3007,13 +3063,19 @@ def test_release_validation_requires_all_four_exports_and_human_review(
         json.dumps({"passed": True}),
         encoding="utf-8",
     )
-    for filename in (
-        "qa_sft.jsonl",
-        "qa_cot_sft.jsonl",
-        "cross_document_qa_sft.jsonl",
-        "cross_document_qa_cot_sft.jsonl",
+    for index, filename in enumerate(
+        (
+            "qa_sft.jsonl",
+            "qa_cot_sft.jsonl",
+            "cross_document_qa_sft.jsonl",
+            "cross_document_qa_cot_sft.jsonl",
+        )
     ):
-        (files_dir / filename).write_text("{}\n", encoding="utf-8")
+        (files_dir / filename).write_text(
+            json.dumps({"record_id": f"train-{index}", "split": "train"}) + "\n",
+            encoding="utf-8",
+        )
+    (files_dir / "eval.jsonl").write_text("", encoding="utf-8")
     (files_dir / "canonical.jsonl").write_text("{}\n" * 4, encoding="utf-8")
     report = validate_run(files_dir)
     assert not report["passed"]
@@ -3024,6 +3086,33 @@ def test_release_validation_requires_all_four_exports_and_human_review(
         "cross_document_qa_cot": 1,
     }
     assert report["issues"] == ["human_review_not_supplied"]
+
+
+def test_release_validation_detects_train_eval_overlap(tmp_path: Path) -> None:
+    files_dir = tmp_path / "files"
+    files_dir.mkdir()
+    (files_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "run_id": "run",
+                "status": "complete",
+                "terminal_request_completeness": {"complete": True},
+                "required_task_type_counts": {"qa": 1},
+                "quality_acceptance": {"portfolio_quality_complete": True},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (files_dir / "leakage_audit.json").write_text(
+        json.dumps({"passed": True}), encoding="utf-8"
+    )
+    row = json.dumps({"record_id": "shared", "split": "train"}) + "\n"
+    (files_dir / "qa_sft.jsonl").write_text(row, encoding="utf-8")
+    (files_dir / "eval.jsonl").write_text(row, encoding="utf-8")
+    (files_dir / "canonical.jsonl").write_text("{}\n" * 2, encoding="utf-8")
+    report = validate_run(files_dir)
+    assert "train_record_in_eval_export" in report["issues"]
+    assert "training_eval_record_id_overlap" in report["issues"]
 
 
 def test_run_layout_and_curator_cache_are_project_local(tmp_path: Path, monkeypatch) -> None:

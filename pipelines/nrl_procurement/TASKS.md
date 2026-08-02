@@ -4930,20 +4930,18 @@ Verified findings from primary sources:
   it. This is the established, primary-source-backed technique for exactly
   this class of problem (template/instruction collapse across many
   independent generations).
-- Synthetic-data diversity literature (arXiv 2601.17717, "LLM Data
-  Auditor"; arXiv 2505.18949, "The Price of Format: Diversity Collapse in
-  LLMs") (accessed 2026-07-31): templated prompting is documented to
-  measurably reduce output diversity, and "cross-batch mode collapse"
-  (progressive diversity loss across repeated stateless calls) is
-  specifically named as requiring either shared context across calls or
-  post-hoc filtering against accumulated output — prompt wording alone,
-  without a corpus-level check, is not treated as sufficient in this
-  literature.
-- Stratified-sampling/mode-collapse mitigation literature (arXiv
-  2604.07147; general dataset-curation surveys) (accessed 2026-07-31):
-  capping or stratifying by pattern/cluster share is a standard technique
-  for enforcing diversity in a curated corpus after generation, distinct
-  from and complementary to source-side prompt diversity.
+- [The LLM Data Auditor](https://arxiv.org/abs/2601.17717) (survey) and
+  [The Price of Format](https://arxiv.org/abs/2505.18949) (accessed
+  2026-08-02): the former motivates intrinsic synthetic-data diversity
+  measurement, while the latter provides evidence that rigid formatting can
+  reduce output diversity even at high sampling temperature. Neither paper is
+  the source of the term "cross-batch mode collapse."
+- [Dynamic Context Evolution](https://arxiv.org/abs/2604.07147) (accessed
+  2026-08-02) specifically defines cross-batch mode collapse for repeated
+  stateless generation. Its experiments support combining semantic-memory
+  deduplication with adaptive prompt evolution; a simple opener quota is only
+  a narrow observable guardrail, not an equivalent guarantee of semantic
+  diversity.
 - Local precedent: `validation.py::deduplicate` already implements exactly
   this shape of corpus-level filter — a deterministic, single-pass,
   growing-pool comparison (`rapidfuzz.fuzz.token_set_ratio` against
@@ -4996,8 +4994,9 @@ Rejected alternatives:
   generation prompt (true shared-context mitigation, closer to how
   Self-Instruct also varies its seed pool): deferred as a larger
   architectural change requiring per-request state threading through
-  Curator's stateless, concurrently-dispatched request model; the post-hoc
-  pool cap achieves the same corpus-level guarantee without it.
+  Curator's stateless, concurrently-dispatched request model. The post-hoc
+  pool cap enforces only its declared opening-ngram metric and must not be
+  described as providing the same semantic-diversity guarantee.
 
 Validation:
 
@@ -5010,3 +5009,69 @@ Validation:
 - A bounded user-run pilot remains required to measure the actual resulting
   opener-share distribution and yield impact; `max_share=0.15` is a
   reasoned default, not empirically calibrated against this corpus yet.
+
+## Capability research — answer-copy concentration and QA/CoT balance (2026-08-02)
+
+Status: researched and implemented locally; a fresh model-backed run is required.
+
+Observed defects in `qa-qacot-full-002` (independently recomputed from
+`canonical.jsonl` rather than copied from the manifest):
+
+- 2,111/2,493 questions (84.68%) begin with literal `According to`.
+- 1,311/2,493 answers (52.59%) are normalized contiguous substrings of one
+  evidence quote; 841 (33.73%) exactly equal a normalized evidence quote.
+- Only 330/2,493 accepted records (13.24%) are `qa_cot`, despite a 25%
+  pre-generation request allocation, confirming materially lower CoT survival.
+- The historical exports overlap on all 2,493 record IDs between training SFT
+  files and `eval.jsonl`; those files predate the split-safe exporter commit.
+
+Primary-source findings:
+
+- [Explicit Diversity Conditions for Effective Question Answer Generation
+  (LREC-COLING 2024)](https://aclanthology.org/2024.lrec-main.601/) reports
+  that redundant synthetic QA generation harms downstream QA and that explicit
+  diversity conditions outperform sampling-only diversity. It supports an
+  explicit portfolio constraint, but does not prescribe this pipeline's 35%
+  answer-copy ceiling.
+- [Self-Instruct (ACL 2023)](https://aclanthology.org/2023.acl-long.754/)
+  filters invalid and similar generated instructions before fine-tuning,
+  supporting deterministic pool-level selection rather than prompt wording
+  alone.
+- [The Flan Collection (ICML 2023)](https://research.google/pubs/the-flan-collection-designing-data-and-methods-for-effective-instruction-tuning/)
+  finds task balancing and mixing ordinary and chain-of-thought prompt settings
+  important for instruction-tuning performance. It supports an explicit QA/CoT
+  mixture gate, but does not establish a universal optimal CoT percentage.
+- [Hugging Face dataset repository structure](https://huggingface.co/docs/hub/main/datasets-data-files-configuration)
+  separates train/validation/test by files or declared split configuration,
+  reinforcing the already-landed train-only SFT and non-train eval exports.
+
+Decision:
+
+- [x] Preserve short exact names, values, and labels, where paraphrasing would
+  reduce precision. Classify only answers of four or more normalized words that
+  occur contiguously inside one evidence quote as substantial span copying.
+- [x] Cap substantial extractive answers at 35% of the resulting pool before
+  judging and again after judging. The 35% ceiling is a conservative project
+  policy chosen to retain some useful extractive QA; it is not a literature-
+  derived optimum and must be calibrated with downstream and human evaluation.
+- [x] Correct opener enforcement to calculate share against the resulting pool,
+  not the original pool, and re-apply it after judge attrition.
+- [x] Raise planned `qa_cot_fraction` from 0.25 to 0.40 and require at least
+  20% accepted QA-CoT for a complete manifest. These are explicit operational
+  targets, not claims of universal optimality.
+- [x] Add accepted-pool answer-style metrics and portfolio-removal counts to the
+  manifest; portfolio removals remain auditable in `qa_rejected.jsonl`.
+- [x] Make `validate_run.py` verify train-only SFT, non-train eval, zero ID
+  overlap, split-safe cardinality reconciliation, and portfolio-quality status.
+
+Rejected alternatives:
+
+- Reject every extractive answer: rejected because precise thresholds, names,
+  titles, and prescribed wording are valid extractive QA targets.
+- Relabel direct QA as CoT or discard QA until a target ratio appears: rejected
+  because it fabricates reasoning shape or hides yield. Increase preassigned CoT
+  opportunities and fail the release gate transparently if accepted yield stays
+  below target.
+- Treat opener diversity as semantic diversity: rejected; the opener metric is
+  deliberately narrow and must remain separately reported from full-question
+  deduplication and future embedding/cluster analysis.

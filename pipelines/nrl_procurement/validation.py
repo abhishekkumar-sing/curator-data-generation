@@ -422,6 +422,64 @@ def question_opener_key(question: str, words: int = 4) -> str:
     return " ".join(tokens[:words])
 
 
+def is_extractive_answer(record: dict[str, Any], minimum_words: int = 4) -> bool:
+    """Return whether an answer is a substantial verbatim evidence span.
+
+    Short names, values, and labels are excluded because paraphrasing them would
+    usually reduce precision rather than add useful supervision. Whitespace and
+    case are normalized, but lexical content is not changed.
+    """
+    if not record.get("answerable", True):
+        return False
+    answer_words = re.findall(r"[a-z0-9]+", str(record.get("answer", "")).casefold())
+    if len(answer_words) < minimum_words:
+        return False
+    answer = " ".join(answer_words)
+    return any(
+        answer in " ".join(re.findall(r"[a-z0-9]+", str(item.get("quote", "")).casefold()))
+        for item in record.get("evidence", [])
+    )
+
+
+def _cap_binary_share(
+    records: list[dict[str, Any]],
+    selected: list[bool],
+    max_share: float,
+) -> tuple[list[dict[str, Any]], int]:
+    """Keep the earliest selected rows while enforcing their final-pool share."""
+    if not 0 < max_share < 1:
+        raise ValueError("max_share must be between 0 and 1")
+    selected_count = sum(selected)
+    other_count = len(records) - selected_count
+    if not selected_count:
+        return records, 0
+    # k / (other_count + k) <= max_share
+    allowed = math.floor((max_share * other_count) / (1.0 - max_share))
+    selected_seen = 0
+    kept: list[dict[str, Any]] = []
+    for record, is_selected in zip(records, selected, strict=True):
+        if is_selected:
+            selected_seen += 1
+            if selected_seen > allowed:
+                continue
+        kept.append(record)
+    return kept, len(records) - len(kept)
+
+
+def enforce_extractive_answer_diversity(
+    records: Iterable[dict[str, Any]],
+    max_share: float = 0.35,
+    minimum_words: int = 4,
+) -> tuple[list[dict[str, Any]], int]:
+    """Cap substantial span-copied answers in the resulting record pool."""
+    records = list(records)
+    return _cap_binary_share(
+        records,
+        [is_extractive_answer(record, minimum_words) for record in records],
+        max_share,
+    )
+
+
 def enforce_question_opener_diversity(
     records: Iterable[dict[str, Any]],
     max_share: float = 0.15,
@@ -439,19 +497,28 @@ def enforce_question_opener_diversity(
     records = list(records)
     if not records:
         return [], 0
-    limit = max(1, math.ceil(max_share * len(records)))
-    opener_counts: dict[str, int] = {}
-    kept: list[dict[str, Any]] = []
-    removed = 0
-    for record in records:
-        key = question_opener_key(str(record.get("question", "")))
-        count = opener_counts.get(key, 0)
-        if key and count >= limit:
-            removed += 1
-            continue
-        opener_counts[key] = count + 1
-        kept.append(record)
-    return kept, removed
+    if not 0 < max_share < 1:
+        raise ValueError("max_share must be between 0 and 1")
+    keys = [question_opener_key(str(record.get("question", ""))) for record in records]
+    active = [True] * len(records)
+    counts = Counter(key for key in keys if key)
+    indexes: dict[str, list[int]] = {}
+    for index, key in enumerate(keys):
+        if key:
+            indexes.setdefault(key, []).append(index)
+    total = len(records)
+    while counts and total:
+        key, count = min(counts.items(), key=lambda item: (-item[1], item[0]))
+        # A single occurrence is diversity, not a repeated template. Very small
+        # pools may therefore have an unavoidable top share above the target.
+        if count <= 1 or count / total <= max_share:
+            break
+        index = indexes[key].pop()
+        active[index] = False
+        counts[key] -= 1
+        total -= 1
+    kept = [record for record, include in zip(records, active, strict=True) if include]
+    return kept, len(records) - len(kept)
 
 
 def validate_cross_record(record: dict[str, Any], documents: list[dict[str, Any]]) -> list[str]:

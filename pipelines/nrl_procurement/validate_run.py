@@ -34,6 +34,16 @@ def _jsonl_count(path: Path) -> int:
     return sum(bool(line.strip()) for line in path.read_text(encoding="utf-8").splitlines())
 
 
+def _jsonl_rows(path: Path) -> list[dict[str, Any]]:
+    if not path.is_file():
+        return []
+    return [
+        json.loads(line)
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+
 def _failure_distribution(
     working_dir: Path,
     manifest: dict[str, Any] | None = None,
@@ -93,16 +103,35 @@ def validate_run(
     if not terminal.get("complete", False):
         issues.append("incomplete_request_lineage")
 
-    export_counts = {
-        task: _jsonl_count(files_dir / filename)
+    export_rows = {
+        task: _jsonl_rows(files_dir / filename)
         for task, filename in REQUIRED_EXPORTS.items()
     }
-    for task, count in export_counts.items():
+    export_counts = {task: len(rows) for task, rows in export_rows.items()}
+    required_tasks = set(
+        manifest.get("required_task_type_counts", REQUIRED_EXPORTS).keys()
+    )
+    for task in required_tasks:
+        count = export_counts.get(task, 0)
         if count < 1:
             issues.append(f"empty_required_export:{task}")
+    evaluation_rows = _jsonl_rows(files_dir / "eval.jsonl")
+    training_rows = [row for rows in export_rows.values() for row in rows]
+    if any(row.get("split") != "train" for row in training_rows):
+        issues.append("non_train_record_in_training_export")
+    if any(row.get("split") == "train" for row in evaluation_rows):
+        issues.append("train_record_in_eval_export")
+    training_ids = {str(row.get("record_id", "")) for row in training_rows}
+    evaluation_ids = {str(row.get("record_id", "")) for row in evaluation_rows}
+    if training_ids & evaluation_ids:
+        issues.append("training_eval_record_id_overlap")
     canonical_count = _jsonl_count(files_dir / "canonical.jsonl")
-    if canonical_count != sum(export_counts.values()):
+    if canonical_count != len(training_rows) + len(evaluation_rows):
         issues.append("canonical_and_task_export_counts_do_not_reconcile")
+
+    quality_acceptance = manifest.get("quality_acceptance", {})
+    if not quality_acceptance.get("portfolio_quality_complete", False):
+        issues.append("portfolio_quality_incomplete")
 
     leakage_path = files_dir / "leakage_audit.json"
     leakage = (
@@ -139,6 +168,8 @@ def validate_run(
         "manifest_status": manifest.get("status"),
         "terminal_request_completeness": terminal,
         "export_counts": export_counts,
+        "eval_count": len(evaluation_rows),
+        "training_eval_record_id_overlap": len(training_ids & evaluation_ids),
         "canonical_count": canonical_count,
         "leakage_audit_passed": leakage.get("passed", False),
         "post_retry_model_failure_distribution": failures,
