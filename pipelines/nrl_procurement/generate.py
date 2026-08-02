@@ -55,6 +55,7 @@ from temporal import (
 )
 from resume import ResumeManager
 from source_windows import build_source_windows
+from structure_probe import require_successful_structure_probe
 from path_qa import (
     SourceAblationAnswerGenerator,
     SourceAblationJudge,
@@ -1296,6 +1297,16 @@ def _final_manifest(
     }
 
 
+def _require_structure_probes_for_run(args: argparse.Namespace) -> None:
+    """Require exact role probes before an unbounded production invocation."""
+    probe_config = CONFIG.get("structured_output_probe", {})
+    if not probe_config.get("required_for_full_runs", True) or args.limit is not None:
+        return
+    require_successful_structure_probe(CACHE_ROOT, "generation", GENERATION)
+    if not args.skip_judge:
+        require_successful_structure_probe(CACHE_ROOT, "judge", JUDGE)
+
+
 def main() -> None:
     """Run single- and cross-document generation through verified exports."""
     global _RESUME_MANAGER, _RUN_ATTEMPT_TERMINAL
@@ -1330,6 +1341,7 @@ def main() -> None:
         ),
     )
     args = parser.parse_args()
+    _require_structure_probes_for_run(args)
     run_id, files_dir = _run_layout(args.run_id)
     _RUN_ATTEMPT_TERMINAL = False
     _RESUME_MANAGER = ResumeManager(

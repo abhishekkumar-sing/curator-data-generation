@@ -36,7 +36,7 @@ Remaining engineering:
 - [ ] Complete the packaged `nrl-curate all` command and researched saturation
   controller. Preserve the direct Python entry point and share one orchestration
   implementation; do not ship a subprocess wrapper or an unbounded pass loop.
-- [ ] Add a reusable per-endpoint structured-output capability probe for every
+- [x] Add a reusable per-endpoint structured-output capability probe for every
   generation/judge profile, not only the embedding endpoint, and persist a
   secret-free result before allowing a new deployment into a large run.
 - [ ] Implement adversarial unanswerable QA with constructed same-type
@@ -72,6 +72,181 @@ External validation required before release:
 - [ ] Run downstream retrieval and SFT evaluations before claiming that a
   diversity threshold, temporal curriculum, or saturation rule improves model
   behavior.
+
+## Completed-run audit — `qa-qacot-full-003` (2026-08-02)
+
+Status: read-only baseline audit complete. This run was generated before commit
+`c3246913`: its logs and cache use `CandidateBatch`, and its output contains no
+`qa_blueprints_audit.jsonl`, `source_quality_rejected.jsonl`,
+`semantic_calibration.jsonl`, or `semantic_rejected.jsonl`. It therefore cannot
+validate the newly committed blueprint, singular-response, source-quality,
+question-type portfolio, or semantic-calibration implementation.
+
+Measured improvements relative to `qa-qacot-full-002`:
+
+- [x] Exported 1,572 accepted records: 1,048 QA and 524 QA-CoT. QA-CoT is
+  33.33% of canonical output and 407/1,159 (35.12%) of train-only SFT output,
+  up from 330/2,493 in the earlier reviewed corpus.
+- [x] `qa_sft.jsonl` and `qa_cot_sft.jsonl` contain only the 1,159 train IDs;
+  `eval.jsonl` contains 413 validation/test IDs, with zero record-ID overlap.
+  The leakage audit passes.
+- [x] Normalized exact-question duplicate groups are zero after 70 near-
+  duplicate removals.
+- [x] Substantial whole-answer evidence-span copying is 402/1,572 (25.57%),
+  below the provisional 35% ceiling and materially below the earlier roughly
+  one-half observation.
+- [x] All accepted records pass the current deterministic answer-completeness,
+  claim-support, modality, and incomplete-evidence-fragment checks that can be
+  replayed from canonical evidence without the removed source passage.
+- [x] A deterministic navigation-trivia scan found no page-number, contents,
+  section-location, or “where can this be found” questions.
+
+Remaining defects demonstrated by this run:
+
+- [ ] Question wording is still highly templated: 351/1,572 (22.33%) begin
+  `According to`, 741/1,572 (47.14%) begin `As a`/`As an`, and 124/1,572
+  (7.89%) begin `As per`. The largest exact four-word opener, `according to the
+  manual`, is 237/1,572 (15.08%). Passing the old 15% planning target did not
+  produce natural portfolio diversity; the manifest is correctly `partial`.
+- [ ] Intent concentration remains excessive: `procedure` is 780/1,572
+  (49.62%) and `direct_fact` is 354/1,572 (22.52%). The current 30% per-type
+  cap and deterministic intent planner were not active in this run.
+- [ ] Persona framing is often cosmetic. Role-prefixed questions are
+  765/1,572 (48.66%), while procurement officer, tendering officer, and contract
+  manager account for 895/1,572 (56.93%). A natural standalone question should
+  not acquire a role preamble merely to vary its surface form.
+- [ ] Generation lost 277/2,938 requests (9.43%) after retry: 192 list
+  containers serialized as strings, 56 invalid enum/field shapes, 14 missing
+  or wrong tool calls, and 15 other validation failures. These are exactly the
+  old `CandidateBatch` failure modes; successful API transport is not schema
+  success.
+- [ ] The judge lost 10/2,436 requests (0.41%) permanently to its 1,024-token
+  completion ceiling and logged 163 retry-time incomplete-output events. Those
+  ten missing judge responses keep terminal lineage incomplete.
+- [ ] Judge discrimination needs calibration: 1,290/1,572 accepted rows score
+  5 and 282 score 4, while free-text issue values include inconsistent no-issue
+  strings. A high judge score is not a substitute for stratified human review.
+- [ ] The 24-record deterministic inspection sample was mostly grounded and
+  operationally useful, with concise exact answers where precision matters.
+  It also exposed overlong role-prefixed questions, artificial “procedure” and
+  QA-CoT framing for lookup/composition tasks, clunky source-like answers, and
+  at least one threshold wording risk (`above Rupees two lakh` summarized as a
+  minimum of `Rupees two lakh`). This sample is diagnostic, not the required
+  100-record human review.
+- [ ] The release validator correctly fails the run for `partial` status,
+  incomplete request lineage, portfolio-quality failure, and absent human
+  review. Cross-document and drafting outputs are zero because those stages
+  were skipped, so this run provides no evidence about their quality.
+
+Decision:
+
+- Keep this output as a pre-fix baseline; do not merge it with a post-commit
+  evaluation or claim it validates commit `c3246913`.
+- Do not rerun at full scale yet. First add the researched endpoint structure
+  probe, then run a bounded post-commit pilot that exercises `qa_blueprints` and
+  `GroundedCandidateDraft`. Compare identical metrics and manually review both
+  accepted and rejected strata before approving a full regeneration.
+
+## Structured-output endpoint probe research refresh (2026-08-02)
+
+Status: research and local/reference audit completed before implementation.
+Implementation and offline verification are complete; live user-controlled
+generation and judge probes remain pending.
+
+Verified current findings:
+
+- [Curator structured output](https://docs.bespokelabs.ai/bespoke-curator/getting-started/structured-output)
+  treats a Pydantic response model as the parsing contract. The local Curator
+  processor deliberately trusts every explicitly configured non-`auto` mode,
+  so configuration acceptance is not an endpoint capability test.
+- [Curator recovery and caching](https://docs.bespokelabs.ai/bespoke-curator/getting-started/automatic-recovery-and-caching)
+  fingerprints input, prompt, response format, model, batching, and generation
+  parameters. It does not make a separate deployment transport probe a release
+  gate; the procurement pipeline must persist that evidence itself.
+- [Current vLLM tool-calling documentation](https://docs.vllm.ai/en/stable/features/tool_calling/)
+  states that `auto` tool calling requires an enabled model-specific parser and
+  that argument schema constraints under `tool_choice=auto` require strict
+  tools/structural tags. It also warns that a validly parseable tool call does
+  not guarantee a high-quality answer. Current generic vLLM support for named
+  or required tools does not override this repository's direct evidence that
+  the configured Nemotron deployment works only with its strict-auto path.
+- [Instructor mode guidance](https://python.useinstructor.com/modes-comparison/)
+  distinguishes native `JSON_SCHEMA`, tool-based `TOOLS`, and prompt-extracted
+  `MD_JSON`, explicitly says LiteLLM support depends on the provider, and
+  recommends testing the actual provider/model/mode combination.
+- The reference project has no real per-endpoint schema probe. It only patches
+  Curator's hosted-vLLM name-based capability check and verifies that the patch
+  returns true. Copying that behavior would repeat the defect: a boolean local
+  override cannot prove the server returns the configured nested structure.
+- Run 003 confirms a scalar or `/models` health check is insufficient. The
+  endpoint was reachable, yet nested list fields, enum assignments, and exact
+  tool invocation still failed in 277 generation requests.
+
+Proposed design before implementation:
+
+- Probe generation and judge roles independently through the exact Curator/
+  Instructor transport used in production, including `tools_auto` and schema
+  dereferencing behavior. Do not implement a second approximate raw-HTTP
+  request builder.
+- Use a small nested probe schema containing an enum, a list of objects, and a
+  nested list, then verify exact sentinel values after Pydantic parsing. A
+  simple scalar JSON object would not cover the observed failures.
+- Persist one atomic, secret-free result under `.curator_working` keyed by
+  served model, deployment identity or endpoint, role, configured structured-
+  output mode, schema-dereference setting, probe schema/prompt version, and
+  relevant generation parameters. Never include the API key or authorization
+  headers.
+- Require a matching successful probe before a new deployment fingerprint can
+  start a non-pilot run. Permit an explicit standalone probe command and a
+  bounded pilot path; do not silently probe thousands of requests or accept a
+  stale result from another endpoint/mode.
+- Record timestamp, latency, parsed sentinel checks, configured mode, and safe
+  failure class. Do not persist raw provider responses because they may contain
+  unexpected text; exact diagnostic errors remain local logs.
+- Test fingerprint invalidation, secret redaction, nested-shape rejection,
+  wrong/missing tool calls, stale/missing result behavior, role independence,
+  and successful gating without contacting a live model. The user performs the
+  live endpoint probes.
+
+Rejected alternatives:
+
+- Infer support from model family, `/models`, HTTP 200, or LiteLLM's static
+  registry: none exercises the configured response transport and nested schema.
+- Treat `tool_choice=required` as universally safer: current vLLM may support
+  it, but the exact Nemotron deployment has already returned no usable tool
+  call under required/named forcing.
+- Probe only `CandidateBatch`: rejected because that obsolete schema would
+  preserve the old failure surface. The generic nested contract should detect
+  container/tool transport defects, while bounded stage pilots separately test
+  the real blueprint, final-record, and judge schemas.
+
+Implementation record:
+
+- [x] Added `structure_probe.py` with a nested enum/object/list Pydantic
+  contract and exact sentinel checks. It runs through the same Curator/
+  Instructor configuration used by production rather than a parallel HTTP
+  approximation.
+- [x] Added `probe_structure.py --role generation --role judge`; omitting
+  `--role` probes both configured roles. Results contain only safe identity,
+  boolean checks, latency, timestamp, and failure class. Raw output, API keys,
+  authorization headers, and exception text are not persisted.
+- [x] Fingerprint role, profile, served model, base URL, deployment identity,
+  structured-output mode, schema dereferencing, generation parameters, probe
+  contract, and Curator/Instructor/LiteLLM versions. Reject credential-bearing
+  URLs and secret-named generation fields before persistence.
+- [x] Execute every live probe in a temporary working directory so an old
+  Curator response cache cannot masquerade as a fresh endpoint check. Persist
+  the final gate result atomically under `.curator_working/structure_probes/`.
+- [x] Require successful current generation and judge fingerprints before an
+  unbounded run. A bounded `--limit` pilot bypasses the gate for diagnosis;
+  `--skip-judge` requires only the generation result.
+- [x] Added offline tests for exact sentinels, role gating, endpoint/mode
+  invalidation, failed-result rejection, and URL/parameter secret rejection.
+  Full local verification passes: Ruff clean, `git diff --check` clean, and
+  115 procurement tests passing.
+- [ ] User must run the two live probes and inspect their secret-free results.
+  Passing the generic probe authorizes a bounded post-commit stage pilot, not a
+  full quality claim about blueprint, final-record, or judge behavior.
 
 ## Mandatory research-first gate
 
@@ -1066,7 +1241,7 @@ Decision:
   supports JSON Schema.
 - [x] Support configurable `auto`, `tools`, `json_schema`, `json`, and
   prompt-validated `md_json` modes without model-name conditionals.
-- [ ] Add a mandatory per-endpoint structure probe before a newly configured
+- [x] Add a mandatory per-endpoint structure probe before a newly configured
   model is allowed to generate production data; do not infer support from a
   model-family name.
 - [ ] Run a small local-model pilot and manually review grounding, omissions,

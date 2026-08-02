@@ -40,6 +40,23 @@ structure probe after changing an endpoint. Native `json_schema` is preferred
 when verified; `md_json` provides prompt-based JSON plus Pydantic validation
 when the server's native modes are broken or unavailable.
 
+Before an unbounded generation, probe both exact role deployments through their
+configured production transports:
+
+```bash
+.curator/bin/python pipelines/nrl_procurement/probe_structure.py
+```
+
+Use `--role generation` or `--role judge` to probe one role. The probe verifies
+a nested enum/object/list contract with exact sentinels and writes only a
+secret-free, fingerprinted result under `.curator_working/structure_probes/`.
+Changing the endpoint, served model, deployment identity, transport mode,
+schema dereferencing, generation parameters, probe contract, or relevant
+transport-library version requires a new probe. Full runs fail closed without
+matching successful generation and judge results; bounded `--limit` pilots can
+still run for diagnosis. A successful transport probe does not replace the
+bounded data-quality pilot or human review.
+
 `config.yaml` contains committed, non-secret defaults for paths, model
 parameters, model environment-variable names, and privacy behavior. `.env`
 overrides its Curator switches and supplies endpoint-specific values and

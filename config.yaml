@@ -8,6 +8,12 @@ curator:
   telemetry_enabled: false
   cache_dir: .curator_working
 
+# A full, unbounded generation requires a successful nested structured-output
+# probe for the exact generation and judge deployment/mode fingerprints.
+# Bounded --limit pilots remain available to diagnose a newly configured role.
+structured_output_probe:
+  required_for_full_runs: true
+
 paths:
   source_dir: data/source
   ocr_dir: data/interim/ocr
