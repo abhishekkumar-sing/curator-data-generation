@@ -15,6 +15,64 @@ with stricter multi-source necessity checks:
 - explicit authority and temporal boundaries;
 - leakage-safe evaluation.
 
+## Current pipeline-wide release blockers (reconciled 2026-08-02)
+
+This index does not replace the research and implementation records below. It
+separates code that can be completed locally from evidence that cannot be
+created by unit tests or inferred from a successful structured response.
+
+Implemented and locally verified in the current working tree:
+
+- [x] Source-quality screening, intent planning, grounded QA blueprints,
+  singular final generation, exact evidence/claim checks, independent judging,
+  portfolio diversity gates, and leakage-safe train/eval exports.
+- [x] Disabled-by-default NVIDIA question embeddings, secret-free endpoint
+  probe/statistics, persistent ID-and-question-hash cache, human calibration
+  pairs, and quality-aware semantic cluster selection guarded by an explicit
+  calibrated threshold.
+
+Remaining engineering:
+
+- [ ] Complete the packaged `nrl-curate all` command and researched saturation
+  controller. Preserve the direct Python entry point and share one orchestration
+  implementation; do not ship a subprocess wrapper or an unbounded pass loop.
+- [ ] Add a reusable per-endpoint structured-output capability probe for every
+  generation/judge profile, not only the embedding endpoint, and persist a
+  secret-free result before allowing a new deployment into a large run.
+- [ ] Implement adversarial unanswerable QA with constructed same-type
+  distractors and an independent answerability judge. Ordinary retrieval/OCR
+  failures must not become negative training examples.
+- [ ] Finish the cross-document atomic claim-to-source/path bindings,
+  quality-aware best-of-N family selection, optional novelty passes, and
+  retrieval-evaluation contexts (oracle, missing-source, wrong-edition,
+  wrong-authority, and hard topical distractors).
+- [ ] Finish explicit held-out manual/fold configuration, a frozen external
+  human-reviewed evaluation set, and regression reporting. Generated test rows
+  alone are not a gold evaluation set.
+- [ ] Finish OCR/source-registry provenance and corpus coverage work still
+  listed below, including model/package revision, registered-source uniqueness,
+  image-caption removal, and stratified rather than prefix-based pilot limits.
+- [ ] Finish the remaining drafting field/claim extraction and validate
+  citation/detail completeness on regenerated drafting outputs.
+
+External validation required before release:
+
+- [ ] Rotate the exposed embedding credential, enable the profile with the new
+  key, and run the non-sensitive endpoint probe. Never commit the key or put it
+  in a URL.
+- [ ] Label duplicate/related/distinct calibration pairs, choose a development
+  threshold at the required precision, and confirm it on a separate reviewed
+  holdout before enabling semantic deletion.
+- [ ] Run a user-controlled, fixed-seed, model-backed pilot spanning manuals,
+  authority classes, QA/QA-CoT, cross-document relationships, and drafting;
+  reconcile every planned request to a terminal lineage state.
+- [ ] Perform stratified human review of accepted and rejected records, record
+  reviewer disagreement where possible, and calibrate opener/type/extraction/
+  length thresholds only from that evidence.
+- [ ] Run downstream retrieval and SFT evaluations before claiming that a
+  diversity threshold, temporal curriculum, or saturation rule improves model
+  behavior.
+
 ## Mandatory research-first gate
 
 This gate applies to **every capability, feature, fix, refactor, integration,
@@ -5075,3 +5133,168 @@ Rejected alternatives:
 - Treat opener diversity as semantic diversity: rejected; the opener metric is
   deliberately narrow and must remain separately reported from full-question
   deduplication and future embedding/cluster analysis.
+
+## Capability research — intent-planned, grounded diversity portfolio (2026-08-02)
+
+Status: deterministic first production slice and the disabled-by-default
+embedding/calibration infrastructure are implemented. Human threshold validation,
+adversarial abstentions, and downstream threshold calibration remain staged work.
+
+Reference implementation audit:
+
+- `/home/abhishek/nrl_curator_native_glm52` is comparative evidence, not the
+  target repository. Its useful separation is topic -> grounded QA blueprint ->
+  one final QA record. Its `QABlueprint` fixes question type, task, persona,
+  answer style, goal, required facts, and exact evidence before final wording.
+- The reference's open-ended "create ALL" multi-pass saturation is not copied.
+  It adds another model-selected taxonomy surface, its stopping quality depends
+  on fuzzy wording thresholds, and its working tree is materially dirty. Curator
+  instead assigns feasible intent/format contracts deterministically, requests
+  one compact grounded blueprint, and requests one final record from that plan.
+- In the interrupted `qa-qacot-full-003` generation cache, 215/2,494 requests
+  (8.62%) have response errors. Failures include list containers serialized as
+  strings, swapped task/persona fields, invented enum values, empty evidence,
+  and arbitrary eight-character evidence rejection. Separately, successful
+  schema responses generated page-number questions from contents pages. These
+  are distinct structural-output and source-selection defects.
+
+External benchmark used only for aggregate comparison:
+`/home/abhishek/review.jsonl` contains 200 records supplied by another user. It
+is not approved for copying into prompts, fixtures, or training exports. Its
+useful aggregate signals are 3% literal `According to` openings, 199/200 unique
+normalized questions, broad question/answer forms, and very low whole-answer
+source-span copying. Its defects (empty human-review fields, systematic missing
+Consultancy citation metadata, false abstentions, unsupported teaching examples,
+and one exact duplicate) are explicit reasons not to ingest it.
+
+Primary-source findings:
+
+- [Self-Instruct (ACL 2023)](https://aclanthology.org/2023.acl-long.754/)
+  supports invalid/similar-example filtering, but does not make lexical filters
+  a substitute for semantic skill coverage.
+- [InsTag (ICLR 2024)](https://proceedings.iclr.cc/paper_files/paper/2024/hash/9dae2a90bae49dc874ce1ca8fcc20879-Abstract-Conference.html)
+  supports fine-grained intent tagging and diversity-aware selection. This
+  pipeline already has the necessary `question_type`, task, and persona labels;
+  adding a duplicate intent schema would create drift.
+- [Measuring Data Diversity for Instruction Tuning / NovelSum (ACL 2025)](https://aclanthology.org/2025.acl-long.908/)
+  finds that useful diversity measurement must consider both inter-sample
+  difference and local information density. Lexical uniqueness and opener
+  entropy are therefore monitoring signals, not semantic-diversity proof.
+- [SemDeDup](https://arxiv.org/abs/2303.09540) supports embedding-based semantic
+  duplicate detection as a second-stage selector after cheap exact/lexical
+  filtering.
+- [FActScore (EMNLP 2023)](https://aclanthology.org/2023.emnlp-main.741/)
+  motivates atomic-fact support; the existing claim/evidence model is retained
+  and extended rather than replaced with answer/source similarity.
+- [QAFactEval (NAACL 2022)](https://aclanthology.org/2022.naacl-main.187/)
+  finds question filtering and answerability classification critical and shows
+  QA- and entailment-style signals are complementary.
+- [SQuAD 2.0](https://nlp.stanford.edu/pubs/rajpurkar2018squad.pdf) constructs
+  unanswerable questions deliberately around plausible distractors. Retrieval
+  failures, contents pages, and empty tables are not acceptable negative QA.
+- [Judging LLM-as-a-Judge (NeurIPS 2023)](https://papers.neurips.cc/paper_files/paper/2023/hash/91f18a1287b398d378ef22505bf41832-Abstract-Datasets_and_Benchmarks.html)
+  documents verbosity and other judge biases. Deterministic format and length
+  checks must complement the independent judge.
+- [NVIDIA llama-nemotron-embed-1b-v2 API reference](https://docs.api.nvidia.com/nim/re/reference/nvidia-llama-nemotron-embed-1b-v2-infer)
+  defines the OpenAI-compatible embeddings request, including the required
+  `input_type`, float encoding, truncation policy, and optional dimensions.
+- [NVIDIA llama-nemotron-embed-1b-v2 model card](https://build.nvidia.com/nvidia/llama-nemotron-embed-1b-v2/modelcard)
+  documents an 8,192-token maximum, a 2,048 base dimension, and supported
+  reduced dimensions. Curator uses `input_type=query` and a configurable 1,024-
+  dimensional profile for generated-question comparison; this is an operational
+  choice, not a claim that 1,024 is universally optimal.
+- [NVIDIA NeMo Retriever embedding NIM reference](https://docs.nvidia.com/nim/nemo-retriever/text-embedding/2.2.0/reference.html)
+  confirms the current query/passage distinction. Only generated question text
+  may leave the Curator host; answers, evidence, source passages, and credentials
+  are excluded from the embedding payload.
+
+Implemented decisions:
+
+- [x] Add high-confidence `corpus.py::source_quality_issues` screening for
+  front matter, contents-only chunks, abbreviation-only chunks, effectively
+  blank forms/tables, and undersized text. Preserve mixed prose/tables by
+  failing open. Persist every exclusion in `source_quality_rejected.jsonl` and
+  expose reason counts in `corpus_quality.json`.
+- [x] Reuse the existing `QuestionType` schema. Add deterministic
+  `eligible_question_types` source-signal classification and deficit-balanced
+  `plan_question_types`; attach `planned_question_type` to every single-source
+  request and reject model substitutions.
+- [x] Derive `answer_format` deterministically from the planned question type:
+  concise direct, ordered steps, audit check, compact comparison,
+  rule-and-exception, responsibility summary, or dated-scope summary. Do not add
+  another model-selected response-schema enum.
+- [x] Add a real `qa_blueprints` stage between source planning and final
+  generation. It produces exactly one compact, evidence-grounded goal with
+  `must_cover`, task, and persona. Persist every result or terminal failure in
+  `qa_blueprints_audit.jsonl` and expose blueprint request coverage.
+- [x] Make final generation singular (`GroundedCandidateDraft`), not
+  `CandidateBatch.examples`. Inject task type, question type, answerability,
+  task, persona, answer format, and blueprint identity from the fixed plan; the
+  final model emits only question, answer, atomic claims, and auditable rationale
+  steps. Derive top-level evidence from claim evidence instead of asking the
+  model to duplicate the same list.
+- [x] Permit short exact evidence such as `Buyer` or `Seller`; validate exact
+  grounding and claim support rather than imposing an unrelated eight-character
+  schema minimum.
+- [x] Add per-format answer-length limits and high-confidence rejection of
+  unsupported lecture, role-play, discussion, and case-study embellishments.
+- [x] Reject unsupported answer acronyms in addition to the existing unsupported
+  quantity and legal-modality checks.
+- [x] Lower the provisional four-word opener ceiling from 15% to 8%. This is a
+  project pilot target informed by the external benchmark, not a universal
+  literature-derived optimum.
+- [x] Cap any one accepted single-document `question_type` at 30% before and
+  after judge attrition, with auditable portfolio rejection reasons.
+- [x] Report question-type and answer-format concentration/entropy, answer
+  lengths by format, eight-gram source coverage, and copied-sentence fraction in
+  the export manifest.
+- [x] Keep exact structured evidence offsets as citation truth. Human-readable
+  citations, if added later, must be rendered from structured provenance rather
+  than parsed back from answer prose.
+
+Deferred staged work:
+
+- [x] Add an optional OpenAI-compatible NVIDIA embedding profile, mandatory
+  capability probe, and persistent record-ID plus question-hash keyed cache.
+  Keep it disabled by default and do not add Torch/`sentence-transformers`.
+  Emit nearest-neighbor review pairs to `semantic_calibration.jsonl`; never send
+  source passages, answers, or evidence to the public endpoint.
+- [ ] Hand-label a calibration set of duplicate/related/distinct question pairs
+  before selecting a cosine threshold; no universal embedding threshold is
+  accepted without calibration for the deployed model. The implemented
+  `semantic_calibration.py calibrate` command requires both classes and a minimum
+  sample before producing a development recommendation; validate it on a
+  separate reviewed holdout before enabling deletion.
+- [x] Replace order-based retention inside semantic clusters with a
+  quality-aware selector using deterministic validity, independent judge score,
+  qualification preservation, grounded-claim/evidence completeness, and stable
+  record-ID tie-breaking. It is unreachable while `selection_enabled: false` and
+  refuses to start without an explicit calibrated threshold.
+- [ ] Implement adversarial unanswerable generation as an isolated stage with a
+  plausible same-type distractor and an independent full-passage answerability
+  judge. Keep `quality.unanswerable_fraction=0.0` until that stage exists.
+- [ ] Calibrate the 8% opener, 30% question-type, answer-length, and extraction
+  targets using a 200-500 record model-backed pilot plus stratified human review
+  and downstream evaluation. A manifest passing provisional thresholds is not
+  a substitute for that evidence.
+
+Rejected alternatives:
+
+- Copy the externally supplied records or their wording into this dataset:
+  rejected for ownership/provenance and because their review annotations are
+  empty.
+- Force uniform question types or manuals regardless of source support:
+  rejected because it creates fabricated questions. Planning operates only on
+  types for which the passage has observable support signals.
+- Treat zero source overlap as the goal: rejected because exact terms,
+  thresholds, authorities, and prescribed language legitimately require exact
+  wording. Atomic support and controlled extraction are separate dimensions.
+- Expand the already failure-prone `CandidateBatch` tool schema with cosmetic
+  style labels: rejected. The batch was removed from final single-document
+  generation; answer format is derived outside the model response.
+- Copy the reference's "all distinct blueprints" saturation loop: rejected for
+  the first production slice because it multiplies calls and schema failures
+  without a calibrated semantic stopping rule. A later saturation feature must
+  stop on accepted semantic novelty, not model assertion or a raw pass count.
+- Train on ordinary TOC/retrieval failures as abstentions: rejected; these teach
+  retrieval accidents, not calibrated refusal behavior.

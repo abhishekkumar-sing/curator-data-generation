@@ -45,6 +45,37 @@ parameters, model environment-variable names, and privacy behavior. `.env`
 overrides its Curator switches and supplies endpoint-specific values and
 credentials.
 
+### Optional semantic-diversity calibration
+
+The checked-in embedding profile is disabled by default. It uses NVIDIA's
+OpenAI-compatible `llama-nemotron-embed-1b-v2` endpoint only for generated
+question text; source passages, answers, evidence, and credentials are never
+included in the embedding input. Configure a newly issued key in the untracked
+`.env`, set `embeddings.enabled: true` in `config.yaml`, and probe the exact
+deployment before generation:
+
+```bash
+.curator/bin/python pipelines/nrl_procurement/semantic_calibration.py probe
+```
+
+An enabled run caches question vectors under
+`.curator_working/semantic_embeddings/` and writes nearest-neighbor pairs to
+`outputs/<run-id>/files/semantic_calibration.jsonl`. Reviewers set
+`human_label` to `duplicate`, `related`, or `distinct`. Produce a secret-free
+development calibration report with:
+
+```bash
+.curator/bin/python pipelines/nrl_procurement/semantic_calibration.py calibrate \
+  --input outputs/<run-id>/files/semantic_calibration.jsonl \
+  --output outputs/<run-id>/files/semantic_calibration_report.json
+```
+
+The command will not recommend a threshold without at least 50 labeled pairs,
+including at least 10 duplicates and 10 non-duplicates. Its recommendation is
+still in-sample: validate the proposed threshold on a separate reviewed holdout
+before setting `embeddings.selection_enabled: true`. Until then, embedding
+analysis emits candidates and metrics but removes no records.
+
 `CURATOR_LOCAL_ONLY=1` is a hard guard around Curator's hosted Viewer, including
 explicit `push_to_viewer()` calls. Telemetry is disabled by default and also
 suppressed by local-only mode. The pipeline rejects public generation and OCR
@@ -155,6 +186,10 @@ That `files/` directory contains:
 - `path_missing_hop_contrasts.jsonl`: traceable one-source-withheld negatives
 - `path_false_premise_quarantine.jsonl`: non-exportable candidates awaiting a
   contradiction verifier
+- `semantic_calibration.jsonl`: nearest generated-question pairs awaiting
+  duplicate/related/distinct human labels when embeddings are enabled
+- `semantic_rejected.jsonl`: quality-ranked semantic-cluster removals; empty
+  until a separately validated threshold is explicitly enabled
 - `qa_sft.jsonl`: concise QA chat training data
 - `qa_cot_sft.jsonl`: QA with short evidence-based teaching rationales
 - `rag.jsonl`: questions, contexts, and answerability labels

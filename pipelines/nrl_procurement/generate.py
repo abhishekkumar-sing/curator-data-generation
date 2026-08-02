@@ -19,7 +19,7 @@ from typing import Any
 from datasets import Dataset
 
 from settings import CONFIG, PROJECT_ROOT, require_private_endpoint, require_setting
-from corpus import corpus_quality_report, load_corpus, representative_rows
+from corpus import corpus_quality_report, load_corpus, representative_rows, source_quality_issues
 from cross_document import build_bundles
 from cross_stage import (
     CrossDocumentGenerator,
@@ -43,6 +43,7 @@ from propositions import (
     write_proposition_cache,
 )
 from reasoning_paths import build_reasoning_paths
+from semantic_diversity import run_semantic_diversity
 from temporal import (
     TemporalAlignmentJudge,
     build_temporal_alignments,
@@ -75,9 +76,11 @@ from bespokelabs.curator.request_processor.online.litellm_online_request_process
     build_auto_tool_request,
 )
 from schemas import AblationTrialDraft, PathAnswerDraft, PathQuestionBatch
-from schemas import CandidateBatch, JudgeBatch, JudgedCandidate
+from schemas import GroundedCandidateDraft, JudgeBatch, JudgedCandidate, QABlueprintDraft
 from validation import (
+    answer_format_issues,
     deduplicate,
+    enforce_category_diversity,
     enforce_extractive_answer_diversity,
     enforce_question_opener_diversity,
     judge_quotes_are_grounded,
@@ -110,11 +113,27 @@ LLM_STAGE_NAMES = {
     "path_ablation_trials",
     "path_ablation_judge",
     "generation",
+    "qa_blueprints",
     "judge",
     "cross_generation",
     "cross_judge",
     "drafting_generation",
     "drafting_judge",
+}
+
+QUESTION_TYPE_ANSWER_FORMAT = {
+    "direct_fact": "concise_direct",
+    "definition": "concise_direct",
+    "procedure": "ordered_steps",
+    "sequence": "ordered_steps",
+    "threshold": "concise_direct",
+    "exception": "rule_and_exception",
+    "negative_rule": "rule_and_exception",
+    "role_responsibility": "responsibility_summary",
+    "comparison": "compact_comparison",
+    "compliance_check": "audit_check",
+    "drafting_knowledge": "concise_direct",
+    "currentness": "dated_scope_summary",
 }
 
 
@@ -285,6 +304,87 @@ def _reasoning_suitability(row: dict[str, Any]) -> tuple[int, str]:
     return score, tie
 
 
+def eligible_question_types(row: dict[str, Any]) -> set[str]:
+    """Return question intents supported by observable passage structure."""
+    passage = f" {str(row.get('generation_passage', '')).casefold()} "
+    eligible = {"direct_fact"}
+    if re.search(r"\b(?:means|defined as|refers to|stands for)\b", passage):
+        eligible.add("definition")
+    if re.search(r"(?:^|\n)\s*(?:[-*]|\d+[.)])\s+", passage) or re.search(
+        r"\b(?:procedure|process|steps?|first|second|thereafter)\b",
+        passage,
+    ):
+        eligible.update({"procedure", "sequence"})
+    if re.search(
+        r"(?:₹|\brs\.?\s*\d|\b\d+(?:\.\d+)?\s*(?:%|per\s+cent|days?|months?|years?|lakhs?|crores?))",
+        passage,
+    ):
+        eligible.add("threshold")
+    if re.search(r"\b(?:except|unless|provided that|subject to)\b", passage):
+        eligible.add("exception")
+    if re.search(r"\b(?:shall not|must not|may not|prohibited|not permitted|no bidder|no tenderer)\b", passage):
+        eligible.add("negative_rule")
+    if re.search(r"\b(?:shall|must|required to|responsible for|authority|committee|officer)\b", passage):
+        eligible.update({"role_responsibility", "compliance_check"})
+    if re.search(r"\b(?:whereas|compared with|in contrast|either|alternative|different from)\b", passage):
+        eligible.add("comparison")
+    if re.search(r"\b(?:revised|amended|effective from|as of|supersed|dated)\b", passage):
+        eligible.add("currentness")
+    return eligible
+
+
+def plan_question_types(
+    rows: list[dict[str, Any]],
+    seed: str,
+) -> dict[str, str]:
+    """Assign feasible question intents using deterministic deficit balancing."""
+    raw_weights = QUALITY.get("question_type_weights", {"direct_fact": 1.0})
+    weights = {
+        str(question_type): float(weight)
+        for question_type, weight in raw_weights.items()
+        if str(question_type) in QUESTION_TYPE_ANSWER_FORMAT and float(weight) > 0
+    }
+    if not weights:
+        weights = {"direct_fact": 1.0}
+    weight_total = sum(weights.values())
+    targets = {
+        question_type: len(rows) * weight / weight_total
+        for question_type, weight in weights.items()
+    }
+    counts = {question_type: 0 for question_type in weights}
+    assignments: dict[str, str] = {}
+    ordered = sorted(
+        rows,
+        key=lambda row: (
+            len(eligible_question_types(row) & weights.keys()),
+            hashlib.sha256(f"{seed}:intent:{row['chunk_id']}".encode()).hexdigest(),
+        ),
+    )
+    for row in ordered:
+        chunk_id = str(row["chunk_id"])
+        eligible = eligible_question_types(row) & weights.keys()
+        if not eligible:
+            eligible = {"direct_fact"} if "direct_fact" in weights else {next(iter(weights))}
+
+        def priority(
+            question_type: str,
+            chunk_id: str = chunk_id,
+        ) -> tuple[float, str]:
+            deficit = (targets[question_type] - counts[question_type]) / max(
+                targets[question_type],
+                1.0,
+            )
+            tie = hashlib.sha256(
+                f"{seed}:{chunk_id}:{question_type}".encode()
+            ).hexdigest()
+            return deficit, tie
+
+        selected = max(eligible, key=priority)
+        assignments[chunk_id] = selected
+        counts[selected] += 1
+    return assignments
+
+
 def plan_single_document_requests(rows: list[dict[str, Any]], seed: str) -> list[dict[str, Any]]:
     """Assign explicit QA/rationale and answerability contracts before calls."""
     if not rows:
@@ -295,14 +395,19 @@ def plan_single_document_requests(rows: list[dict[str, Any]], seed: str) -> list
         max(1 if len(rows) >= 2 and cot_fraction > 0 else 0, round(len(rows) * cot_fraction)),
     )
     cot_ids = {row["chunk_id"] for row in sorted(rows, key=_reasoning_suitability, reverse=True)[:cot_count]}
+    planned_question_types = plan_question_types(rows, seed)
     planned = []
     for row in rows:
         task_type = "qa_cot" if row["chunk_id"] in cot_ids else "qa"
+        question_type = planned_question_types[str(row["chunk_id"])]
+        answer_format = QUESTION_TYPE_ANSWER_FORMAT[question_type]
         # Arbitrary answer-bearing chunks cannot safely be assigned a negative
         # answerability label. A future adversarial stage must construct and
         # independently verify such examples.
         answerable = True
-        request_id = hashlib.sha256(f"{seed}:single:{row['chunk_id']}:{task_type}:{answerable}".encode()).hexdigest()[:20]
+        request_id = hashlib.sha256(
+            f"{seed}:single:{row['chunk_id']}:{task_type}:{question_type}:{answerable}".encode()
+        ).hexdigest()[:20]
         planned.append(
             {
                 **row,
@@ -310,6 +415,8 @@ def plan_single_document_requests(rows: list[dict[str, Any]], seed: str) -> list
                 "passage": row["generation_passage"],
                 "planned_request_id": f"single-{request_id}",
                 "planned_task_type": task_type,
+                "planned_question_type": question_type,
+                "planned_answer_format": answer_format,
                 "planned_answerable": answerable,
             }
         )
@@ -446,21 +553,118 @@ def _non_secret_model_manifest(profile: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-class ProcurementGenerator(curator.LLM):
-    """Generate explicit QA or concise, auditable QA-with-rationale records."""
+class ProcurementBlueprintGenerator(curator.LLM):
+    """Plan one grounded QA target before any final question wording."""
 
-    response_format = CandidateBatch
+    response_format = QABlueprintDraft
+
+    def prompt(self, row: dict) -> str:
+        """Render a compact planning request with a fixed intent contract."""
+        return f"""TASK
+Create exactly one grounded procurement QA blueprint for the source passage.
+Do not write the final question or answer.
+
+FIXED CONTRACT
+- question_type: {row["planned_question_type"]}
+- answer_format: {row["planned_answer_format"]}
+- training shape: {row["planned_task_type"]}
+- answerable: true
+
+Choose task only from {json.dumps(TAXONOMY.get("tasks", []))} and persona only
+from {json.dumps(TAXONOMY.get("personas", []))}. The task is the procurement work,
+not the question form. Use a specific persona only when the passage supports that
+actor's authentic need; otherwise use general_user.
+
+Return a concrete instruction_goal, one to four concise must_cover facts, and one
+to four exact source quotes that jointly support them. Preserve the issuer, scope,
+date, modality, thresholds, conditions, and exceptions. Do not invent a scenario,
+authority, standard, number, or current-policy conclusion. Avoid page-number,
+contents-list, glossary, and document-navigation trivia.
+
+SOURCE METADATA
+manual_id: {row["manual_id"]}
+title: {row["title"]}
+issuer: {row["issuing_organization"]}
+policy_scope: {row["policy_scope"]}
+revision_date: {row["revision_date"]}
+as_of_date: {row["as_of_date"]}
+page: {row["page"]}
+section: {row["section"]}
+
+---BEGIN UNTRUSTED SOURCE PASSAGE---
+{row["passage"]}
+---END UNTRUSTED SOURCE PASSAGE---
+"""
+
+    def parse(self, row: dict, response: QABlueprintDraft) -> dict:
+        """Ground the blueprint evidence and attach a stable identity."""
+        draft = response.model_dump()
+        reasons: list[str] = []
+        repairs: list[str] = []
+        allowed_tasks = set(TAXONOMY.get("tasks", []))
+        allowed_personas = set(TAXONOMY.get("personas", []))
+        # Recover only an unambiguous field swap observed in pilot-003. No
+        # invented or approximate label is silently mapped into the taxonomy.
+        if draft["task"] in allowed_personas and draft["persona"] in allowed_tasks:
+            draft["task"], draft["persona"] = draft["persona"], draft["task"]
+            repairs.append("swapped_task_and_persona")
+        quotes = [item["quote"] for item in draft["evidence"]]
+        if any(not str(item).strip() for item in draft["must_cover"]):
+            reasons.append("empty_blueprint_must_cover")
+        for quote in quotes:
+            if quote not in row["passage"]:
+                reasons.append("blueprint_non_verbatim_evidence")
+        if draft["task"] not in allowed_tasks:
+            reasons.append("unsupported_blueprint_task")
+        if draft["persona"] not in allowed_personas:
+            reasons.append("unsupported_blueprint_persona")
+        blueprint_id = "qabp-" + hashlib.sha256(
+            json.dumps(
+                [
+                    row["planned_request_id"],
+                    row["planned_question_type"],
+                    draft["instruction_goal"],
+                    quotes,
+                ],
+                ensure_ascii=False,
+            ).encode()
+        ).hexdigest()[:20]
+        return {
+            **row,
+            "parent_request_id": row["planned_request_id"],
+            "blueprint_id": blueprint_id,
+            "task": draft["task"],
+            "persona": draft["persona"],
+            "instruction_goal": draft["instruction_goal"],
+            "must_cover": draft["must_cover"],
+            "blueprint_evidence": draft["evidence"],
+            "blueprint_repairs": repairs,
+            "blueprint_checks": {
+                "passed": not reasons,
+                "issues": sorted(set(reasons)),
+            },
+        }
+
+
+class ProcurementGenerator(curator.LLM):
+    """Generate one final record from an already-grounded QA blueprint."""
+
+    response_format = GroundedCandidateDraft
 
     def prompt(self, row: dict) -> str:
         """Render a grounded single-document generation request."""
         return f"""TASK
-Generate zero to {QUALITY.get("examples_per_chunk", 3)} diverse, source-grounded
-procurement training records from the single passage below. Return zero records
-when the passage cannot support a useful record without guessing.
+Generate exactly one source-grounded procurement training record from the fixed
+blueprint and source passage below.
 
 PLANNED CONTRACT
 - Return only task_type={row["planned_task_type"]}.
-- Set answerable={str(row["planned_answerable"]).lower()} for every returned record.
+- Return only question_type={row.get("planned_question_type", "direct_fact")}.
+- The fixed procurement task is {row["task"]}; the fixed persona is {row["persona"]}.
+- Use answer format {row.get("planned_answer_format", "concise_direct")}. This presentation contract is
+  derived from the planned question intent; do not substitute a different style.
+- Answerability is fixed to {str(row["planned_answerable"]).lower()} and injected by
+  the pipeline; do not return an answerability field.
 - This contract is assigned before generation to make run coverage auditable. Do not
   substitute another task type or answerability class.
 
@@ -473,31 +677,29 @@ SOURCE POLICY
   amendments exactly. Do not fill missing information from outside knowledge.
 
 CONSTRAINTS
-- Select task from {json.dumps(TAXONOMY.get("tasks", []))}. It describes the
-  underlying procurement work, independently of QA/CoT format. Use drafting when
-  the user asks to compose document text; use nit_filling only for entering or
-  completing structured NIT fields, not merely because an NIT is discussed.
-- Select persona from {json.dumps(TAXONOMY.get("personas", []))}. It is the actor
-  whose authentic work or information need the question represents. Choose a
-  specific role only when supported by the passage; otherwise use general_user.
 - Each question must stand alone and identify the organization, manual, domain, or
   date needed to make its authority and temporal scope unambiguous. That
   identifying detail may appear anywhere a natural question places it; it does
   not have to open the sentence. Phrase each question the way the assigned
   persona would actually ask it in their own working context, not as a generic
   reading-comprehension prompt.
-- Allowed question_type values are direct_fact, definition, procedure, sequence,
-  threshold, exception, negative_rule, role_responsibility, comparison,
-  compliance_check, drafting_knowledge, and currentness.
-- For an answerable record, set answerable=true and break the answer into material
-  claims. Every claim must contain one or more evidence quotes copied verbatim from
-  the passage. The top-level evidence list must contain exactly the union of the
-  claim evidence, with no unused or missing quote.
+- Break the answer into material claims. Every claim must contain one or more
+  evidence quotes copied verbatim from
+  the passage. The pipeline derives top-level evidence from the claims.
 - For planned task_type=qa, use a direct answer and return reasoning_steps=[].
 - Write the answer as concise, natural guidance for the assigned persona. Use
   exact source wording only for terms, names, values, or language whose precision
   matters; otherwise synthesize the supported facts instead of copying an entire
   evidence sentence as the answer. Evidence quotes themselves remain verbatim.
+- Do not add lectures, role-play, discussion invitations, checks for understanding,
+  or invented case studies. Never introduce hypothetical numbers, thresholds,
+  standards, dates, authorities, or named entities that are absent from the source.
+- concise_direct is one compact answer; ordered_steps uses a short numbered or
+  bulleted sequence; audit_check states what to verify and the pass condition;
+  compact_comparison contrasts only source-supported dimensions; rule_and_exception
+  states the rule with its supported condition or exception; responsibility_summary
+  identifies the actor and duty; dated_scope_summary states the dated scope without
+  inferring currentness.
 - For planned task_type=qa_cot, answer only when it genuinely requires two to four
   evidence-linked operations for a scenario, temporal rule, condition, exception,
   procedure, or multi-section synthesis.
@@ -506,24 +708,21 @@ CONSTRAINTS
   the exact passage quotes used in evidence_quotes. Each step must add grounded
   information used by a later step or the final answer.
 - Never provide private hidden chain-of-thought.
-- When planned answerable=false, generate a plausible question whose required
-  fact is absent and choose its natural question_type from the allowed taxonomy.
-  Set answerable=false, answer exactly
-  "Not answerable from the provided sources.", and return empty evidence and
-  reasoning_steps. Do not claim that an absent statement proves a rule does not
-  exist.
-- When planned answerable=true, do not return an unanswerable record.
 - Avoid duplicates, trivia with no procurement value, and questions that reveal
   the answer in their wording.
 
 OUTPUT CONTRACT
-Return CandidateBatch.examples under the enforced response schema. Every example
-must contain task_type, task, persona, question_type, question, answer, answerable,
-claims, evidence, and reasoning_steps. Each claim contains one material statement
-and its exact evidence. Top-level evidence repeats the exact union of claim evidence
-for backward-compatible export. Rationale steps contain an explicit operation,
+Return one GroundedCandidateDraft under the enforced response schema. It contains
+only question, answer, claims, and reasoning_steps. Do not return contract labels;
+the pipeline injects those from the blueprint. Each claim contains one material
+statement and its exact evidence. Rationale steps contain an explicit operation,
 concise statement, and the
 verbatim evidence_quotes supporting that statement.
+
+FIXED GROUNDED BLUEPRINT
+instruction_goal: {row["instruction_goal"]}
+must_cover: {json.dumps(row["must_cover"], ensure_ascii=False)}
+blueprint_evidence: {json.dumps(row["blueprint_evidence"], ensure_ascii=False)}
 
 UNTRUSTED SOURCE METADATA
 manual_id: {row["manual_id"]}
@@ -541,33 +740,59 @@ section: {row["section"]}
 
 FINAL CHECK
 Before returning, verify that every quote is exact, every answer claim is supported,
-all qualifications and authority boundaries are preserved, task_type matches the
-rationale shape, and every unanswerable record uses the required exact answer.
+all qualifications and authority boundaries are preserved, and the rationale shape
+matches the fixed task type.
 """
 
-    def parse(self, row: dict, response: CandidateBatch) -> list[dict]:
+    def parse(self, row: dict, response: GroundedCandidateDraft) -> list[dict]:
         """Verify drafts and attach stable source provenance."""
         records = []
-        for candidate in response.examples:
-            draft = candidate.model_dump()
+        for candidate in [response]:
+            generated = candidate.model_dump()
+            draft = {
+                "task_type": row["planned_task_type"],
+                "task": row["task"],
+                "persona": row["persona"],
+                "question_type": row["planned_question_type"],
+                "question": generated["question"],
+                "answer": generated["answer"],
+                "answerable": row["planned_answerable"],
+                "claims": generated["claims"],
+                "reasoning_steps": generated["reasoning_steps"],
+            }
             claim_quotes = []
             for claim in draft["claims"]:
                 claim_quotes.extend(item["quote"] for item in claim["evidence"])
-            # Evidence remains a stable top-level output field, but provenance is
-            # derived from atomic bindings rather than trusting a separate list.
-            declared_quotes = [item["quote"] for item in draft["evidence"]]
-            if sorted(set(claim_quotes)) == sorted(set(declared_quotes)):
-                draft["evidence"] = [
-                    {"quote": quote} for quote in dict.fromkeys(claim_quotes)
-                ]
+            # Evidence is a stable top-level output field, derived from atomic
+            # bindings rather than asking the model to duplicate a container.
+            draft["evidence"] = [
+                {"quote": quote} for quote in dict.fromkeys(claim_quotes)
+            ]
             reasons = []
-            if draft["task_type"] != row["planned_task_type"]:
-                reasons.append(f"planned_task_type_mismatch:{row['planned_task_type']}")
-            if draft["answerable"] != row["planned_answerable"]:
-                reasons.append(f"planned_answerability_mismatch:{row['planned_answerable']}")
-            if draft["task"] not in TAXONOMY.get("tasks", []) or draft["persona"] not in TAXONOMY.get("personas", []):
-                reasons.append("unsupported_taxonomy_value")
+            blueprint_quotes = [
+                str(item.get("quote", ""))
+                for item in row.get("blueprint_evidence", [])
+                if item.get("quote")
+            ]
+            if blueprint_quotes and not any(
+                final_quote in blueprint_quote or blueprint_quote in final_quote
+                for final_quote in claim_quotes
+                for blueprint_quote in blueprint_quotes
+            ):
+                reasons.append("final_evidence_ignores_blueprint")
+            planned_answer_format = row.get(
+                "planned_answer_format",
+                QUESTION_TYPE_ANSWER_FORMAT.get(draft["question_type"], "concise_direct"),
+            )
             reasons.extend(validate_record(draft, row["passage"]))
+            reasons.extend(
+                answer_format_issues(
+                    draft["answer"],
+                    "\n".join(item["quote"] for item in draft["evidence"]),
+                    planned_answer_format,
+                    QUALITY.get("answer_length_by_format", {}),
+                )
+            )
             evidence = []
             source_text = row.get("source_passage", row["passage"])
             for item in draft["evidence"]:
@@ -608,6 +833,7 @@ rationale shape, and every unanswerable record uses the required exact answer.
                 {
                     "record_id": record_id,
                     **draft,
+                    "answer_format": planned_answer_format,
                     "evidence": evidence,
                     "manual_id": row["manual_id"],
                     "manual_title": row["title"],
@@ -634,6 +860,9 @@ rationale shape, and every unanswerable record uses the required exact answer.
                         for item in evidence
                     ],
                     "parent_request_id": row["planned_request_id"],
+                    "blueprint_id": row["blueprint_id"],
+                    "instruction_goal": row["instruction_goal"],
+                    "must_cover": row["must_cover"],
                     "_source_passage": row["passage"],
                     "generation_model": self.model_name,
                     "deterministic_checks": {
@@ -1000,6 +1229,7 @@ def _final_manifest(
     drafting_stats: dict[str, Any],
     duplicates: int,
     opener_overrepresented: int = 0,
+    question_type_overrepresented: int = 0,
     extractive_overrepresented: int = 0,
     proposition_stats: dict[str, Any] | None = None,
     reasoning_path_stats: dict[str, Any] | None = None,
@@ -1007,6 +1237,7 @@ def _final_manifest(
     path_qa_stats: dict[str, Any] | None = None,
     temporal_stats: dict[str, Any] | None = None,
     judge_batch_integrity_rejections: dict[str, int] | None = None,
+    semantic_diversity_stats: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return {
         "run_id": run_id,
@@ -1032,10 +1263,12 @@ def _final_manifest(
         "source_windows": source_window_stats or {"enabled": False},
         "path_qa": path_qa_stats or {"enabled": False},
         "temporal": temporal_stats or {"enabled": False},
+        "semantic_diversity": semantic_diversity_stats or {"enabled": False},
         "judge_batch_integrity_rejections": judge_batch_integrity_rejections
         or {"single_document": 0, "cross_document": 0},
         "near_duplicates_removed": duplicates,
         "question_opener_overrepresented_removed": opener_overrepresented,
+        "question_type_overrepresented_removed": question_type_overrepresented,
         "extractive_answer_overrepresented_removed": extractive_overrepresented,
         "manuals": manuals,
         "reproducibility": {
@@ -1117,6 +1350,21 @@ def main() -> None:
     (files_dir / "corpus_quality.json").write_text(
         json.dumps(corpus_report, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
+    )
+    source_quality_rejected = [
+        {
+            "chunk_id": row["chunk_id"],
+            "manual_id": row["manual_id"],
+            "page": row["page"],
+            "section": row["section"],
+            "rejection_reasons": source_quality_issues(row),
+        }
+        for row in all_rows
+        if source_quality_issues(row)
+    ]
+    _write_audit(
+        files_dir / "source_quality_rejected.jsonl",
+        source_quality_rejected,
     )
     source_window_stats: dict[str, Any] = {"enabled": False}
     source_window_config = CONFIG.get("source_windows", {})
@@ -1641,25 +1889,77 @@ def main() -> None:
         }
 
     os.environ["HOSTED_VLLM_API_KEY"] = _model_settings(GENERATION)[2]
+    blueprint_audit = _execute_llm_stage(
+        "qa_blueprints",
+        "generation",
+        ProcurementBlueprintGenerator(**_llm_kwargs(GENERATION)),
+        planned_single,
+    )
+    blueprint_audit = materialize_terminal_failures(
+        planned_single,
+        blueprint_audit,
+        planned_id=lambda row: row["planned_request_id"],
+        record_id=lambda row: row.get("planned_request_id"),
+        stage="qa_blueprints",
+        base_fields=lambda row: {
+            "parent_request_id": row["planned_request_id"],
+            "planned_request_id": row["planned_request_id"],
+            "planned_task_type": row["planned_task_type"],
+            "planned_question_type": row["planned_question_type"],
+            "planned_answer_format": row["planned_answer_format"],
+            "manual_id": row["manual_id"],
+        },
+    )
+    _write_audit(files_dir / "qa_blueprints_audit.jsonl", blueprint_audit)
+    single_blueprint_coverage = request_coverage(planned_single, blueprint_audit)
+    valid_blueprints = [
+        row
+        for row in blueprint_audit
+        if row.get("blueprint_checks", {}).get("passed", False)
+    ]
     generated_audit = _execute_llm_stage(
         "generation",
         "generation",
         ProcurementGenerator(**_llm_kwargs(GENERATION)),
-        planned_single,
+        valid_blueprints,
     )
     generated_audit = materialize_terminal_failures(
-        planned_single,
+        valid_blueprints,
         generated_audit,
-        planned_id=lambda row: row["planned_request_id"],
-        record_id=lambda row: row.get("parent_request_id"),
+        planned_id=lambda row: row["blueprint_id"],
+        record_id=lambda row: row.get("blueprint_id"),
         stage="generation",
         base_fields=lambda row: {
             "parent_request_id": row["planned_request_id"],
+            "blueprint_id": row["blueprint_id"],
             "planned_task_type": row["planned_task_type"],
+            "planned_question_type": row["planned_question_type"],
+            "planned_answer_format": row["planned_answer_format"],
             "task_type": row["planned_task_type"],
             "answerable": row["planned_answerable"],
             "manual_id": row["manual_id"],
         },
+    )
+    generated_audit.extend(
+        {
+            "parent_request_id": row["planned_request_id"],
+            "planned_task_type": row["planned_task_type"],
+            "planned_question_type": row["planned_question_type"],
+            "planned_answer_format": row["planned_answer_format"],
+            "task_type": row["planned_task_type"],
+            "answerable": row["planned_answerable"],
+            "manual_id": row["manual_id"],
+            "terminal_state": "blueprint_rejected_or_failed",
+            "terminal_stage": "qa_blueprints",
+            "deterministic_checks": {
+                "passed": False,
+                "issues": row.get("blueprint_checks", {}).get(
+                    "issues", ["model_failure_after_retries"]
+                ),
+            },
+        }
+        for row in blueprint_audit
+        if not row.get("blueprint_checks", {}).get("passed", False)
     )
     _write_audit(files_dir / "qa_generated_audit.jsonl", generated_audit)
     single_generation_coverage = request_coverage(planned_single, generated_audit)
@@ -1670,7 +1970,7 @@ def main() -> None:
     before_portfolio = generated
     generated, opener_overrepresented = enforce_question_opener_diversity(
         generated,
-        float(QUALITY.get("max_question_opener_share", 0.15)),
+        float(QUALITY.get("max_question_opener_share", 0.08)),
     )
     kept_ids = {row["record_id"] for row in generated}
     portfolio_rejected.extend(
@@ -1679,6 +1979,24 @@ def main() -> None:
             "portfolio_checks": {
                 "accepted": False,
                 "issues": ["question_opener_overrepresented"],
+            },
+        }
+        for row in before_portfolio
+        if row["record_id"] not in kept_ids
+    )
+    before_portfolio = generated
+    generated, question_type_overrepresented = enforce_category_diversity(
+        generated,
+        "question_type",
+        float(QUALITY.get("max_question_type_share", 0.30)),
+    )
+    kept_ids = {row["record_id"] for row in generated}
+    portfolio_rejected.extend(
+        {
+            **row,
+            "portfolio_checks": {
+                "accepted": False,
+                "issues": ["question_type_overrepresented"],
             },
         }
         for row in before_portfolio
@@ -1711,11 +2029,15 @@ def main() -> None:
                 manuals=manuals,
                 corpus_report=corpus_report,
                 selected_rows=rows,
-                single_coverage={"generated": single_generation_coverage},
+                single_coverage={
+                    "blueprinted": single_blueprint_coverage,
+                    "generated": single_generation_coverage,
+                },
                 cross_coverage={},
                 drafting_stats={},
                 duplicates=duplicates,
                 opener_overrepresented=opener_overrepresented,
+                question_type_overrepresented=question_type_overrepresented,
                 extractive_overrepresented=extractive_overrepresented,
                 proposition_stats=proposition_stats,
                 reasoning_path_stats=reasoning_path_stats,
@@ -1759,7 +2081,7 @@ def main() -> None:
     before_portfolio = accepted
     accepted, post_judge_opener_removed = enforce_question_opener_diversity(
         accepted,
-        float(QUALITY.get("max_question_opener_share", 0.15)),
+        float(QUALITY.get("max_question_opener_share", 0.08)),
     )
     opener_overrepresented += post_judge_opener_removed
     kept_ids = {row["record_id"] for row in accepted}
@@ -1769,6 +2091,25 @@ def main() -> None:
             "portfolio_checks": {
                 "accepted": False,
                 "issues": ["post_judge_question_opener_overrepresented"],
+            },
+        }
+        for row in before_portfolio
+        if row["record_id"] not in kept_ids
+    )
+    before_portfolio = accepted
+    accepted, post_judge_question_type_removed = enforce_category_diversity(
+        accepted,
+        "question_type",
+        float(QUALITY.get("max_question_type_share", 0.30)),
+    )
+    question_type_overrepresented += post_judge_question_type_removed
+    kept_ids = {row["record_id"] for row in accepted}
+    portfolio_rejected.extend(
+        {
+            **row,
+            "portfolio_checks": {
+                "accepted": False,
+                "issues": ["post_judge_question_type_overrepresented"],
             },
         }
         for row in before_portfolio
@@ -1794,6 +2135,7 @@ def main() -> None:
     )
     single_accepted = list(accepted)
     single_coverage = {
+        "blueprinted": single_blueprint_coverage,
         "generated": single_generation_coverage,
         "judged": request_coverage(
             judge_eligible_planned(planned_single, generated, judge_prompt_rejected),
@@ -1949,6 +2291,38 @@ def main() -> None:
             ),
         )
         raise SystemExit("No records passed the quality judge")
+    accepted, semantic_rejected, semantic_candidates, semantic_stats = (
+        run_semantic_diversity(
+            accepted,
+            CONFIG,
+            CACHE_ROOT / "semantic_embeddings",
+        )
+    )
+    _write_audit(
+        files_dir / "semantic_calibration.jsonl",
+        semantic_candidates,
+    )
+    _write_audit(
+        files_dir / "semantic_rejected.jsonl",
+        semantic_rejected,
+    )
+    kept_after_semantic = {row["record_id"] for row in accepted}
+    single_accepted = [
+        row for row in single_accepted if row["record_id"] in kept_after_semantic
+    ]
+    cross_accepted = [
+        row for row in cross_accepted if row["record_id"] in kept_after_semantic
+    ]
+    single_coverage["accepted"] = request_coverage(
+        planned_single,
+        single_accepted,
+    )
+    cross_coverage["accepted"] = request_coverage(
+        planned_cross,
+        cross_accepted,
+    )
+    if not accepted:
+        raise SystemExit("Semantic selection removed every accepted record")
     for record in accepted:
         record.pop("_source_passage", None)
     assert_unique_record_ids(accepted, key="record_id", dataset_name="accepted procurement records")
@@ -2080,8 +2454,14 @@ def main() -> None:
     opener_report = stats.get("question_opener_diversity", {})
     opener_share_complete = (
         float(opener_report.get("top_opener_share", 0.0))
-        <= float(QUALITY.get("max_question_opener_share", 0.15))
+        <= float(QUALITY.get("max_question_opener_share", 0.08))
         or int(opener_report.get("top_opener_count", 0)) <= 1
+    )
+    question_type_report = stats.get("question_type_diversity", {})
+    question_type_share_complete = (
+        float(question_type_report.get("top_share", 0.0))
+        <= float(QUALITY.get("max_question_type_share", 0.30))
+        or int(question_type_report.get("top_count", 0)) <= 1
     )
     extractive_share = float(
         stats.get("answer_style_diversity", {}).get("extractive_answer_share", 0.0)
@@ -2092,6 +2472,7 @@ def main() -> None:
     portfolio_quality_complete = (
         qa_cot_share_complete
         and opener_share_complete
+        and question_type_share_complete
         and extractive_share_complete
     )
     status = (
@@ -2114,12 +2495,14 @@ def main() -> None:
         drafting_stats=drafting_stats,
         duplicates=duplicates + cross_duplicates,
         opener_overrepresented=opener_overrepresented,
+        question_type_overrepresented=question_type_overrepresented,
         extractive_overrepresented=extractive_overrepresented,
         proposition_stats=proposition_stats,
         reasoning_path_stats=reasoning_path_stats,
         source_window_stats=source_window_stats,
         path_qa_stats=path_qa_stats,
         temporal_stats=temporal_stats,
+        semantic_diversity_stats=semantic_stats,
         judge_batch_integrity_rejections={
             "single_document": _batch_integrity_rejections(judged),
             "cross_document": _batch_integrity_rejections(cross_judged),
@@ -2144,6 +2527,7 @@ def main() -> None:
         "minimum_qa_cot_share": minimum_qa_cot_share,
         "qa_cot_share_complete": qa_cot_share_complete,
         "question_opener_share_complete": opener_share_complete,
+        "question_type_share_complete": question_type_share_complete,
         "extractive_answer_share_complete": extractive_share_complete,
         "portfolio_quality_complete": portfolio_quality_complete,
     }

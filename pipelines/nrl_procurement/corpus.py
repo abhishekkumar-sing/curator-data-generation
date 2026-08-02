@@ -16,6 +16,14 @@ CHANDRA_PAGE_PATTERN = re.compile(r"(?m)^\s*(\d+)-{20,}\s*$")
 HEADING_PATTERN = re.compile(r"^(#{1,6})\s+(.+)$", re.MULTILINE)
 IMAGE_LINE_PATTERN = re.compile(r"(?m)^\s*!\[[^\]]*]\([^)]+\).*$")
 HTML_IMAGE_PATTERN = re.compile(r"(?is)<(?:img|figure)\b[^>]*>.*?</figure>|<img\b[^>]*>")
+TOC_LINE_PATTERN = re.compile(
+    r"(?im)^\s*(?:\|\s*)?(?:\d+(?:\.\d+)*\s+)?[^\n|]{3,100}?"
+    r"(?:\.{3,}|\|\s*)\s*\d{1,4}\s*(?:\|)?\s*$"
+)
+ABBREVIATION_LINE_PATTERN = re.compile(
+    r"(?im)^\s*(?:\|\s*)?(?:<b>)?[A-Z][A-Z&/.-]{1,14}(?:</b>)?\s*"
+    r"(?:[-:|]|\s{2,})\s*[A-Za-z][^\n]{1,100}$"
+)
 
 
 def _sha256(path: Path) -> str:
@@ -129,16 +137,62 @@ def _document_family(manual_id: str) -> str:
 def _content_class(row: dict[str, Any]) -> str:
     passage = row["generation_passage"]
     section = str(row.get("section") or "").casefold()
+    page = int(row.get("page") or 1)
+    start_page = int(row.get("start_page", 1))
+    # Introductory policy chapters later in a manual are substantive. Only
+    # position-independent labels that are unambiguously apparatus belong here;
+    # the early-page rule already covers a manual's opening introduction.
+    if page <= start_page + 7 or any(
+        label in section for label in ("foreword", "preface", "contents")
+    ):
+        return "front_matter"
     if "<table" in passage.casefold():
         return "table"
-    if int(row.get("page") or 1) <= int(row.get("start_page", 1)) + 7 or any(label in section for label in ("foreword", "preface", "introduction", "contents")):
-        return "front_matter"
     return "policy"
+
+
+def source_quality_issues(row: dict[str, Any]) -> list[str]:
+    """Identify high-confidence non-answer-bearing source chunks.
+
+    The classifier intentionally fails open for mixed prose/tables. It removes
+    only structures that repeatedly produce retrieval failures: front matter,
+    contents listings, abbreviation-only pages, and effectively blank forms.
+    """
+    passage = str(row.get("generation_passage") or "").strip()
+    issues: list[str] = []
+    if len(passage) < 200:
+        issues.append("source_too_short")
+    if row.get("content_class") == "front_matter":
+        issues.append("front_matter")
+
+    nonempty_lines = [line.strip() for line in passage.splitlines() if line.strip()]
+    toc_lines = TOC_LINE_PATTERN.findall(passage)
+    abbreviation_lines = ABBREVIATION_LINE_PATTERN.findall(passage)
+    prose_sentences = re.findall(r"[A-Z][^.!?\n]{25,}[.!?](?:\s|$)", passage)
+    normalized_prefix = re.sub(r"<[^>]+>|\s+", " ", passage[:800]).casefold()
+    if "table of contents" in normalized_prefix and (
+        passage.casefold().count("<tr") >= 4 or not prose_sentences
+    ):
+        issues.append("table_of_contents_only")
+    if len(toc_lines) >= 5 and len(toc_lines) / max(len(nonempty_lines), 1) >= 0.45:
+        issues.append("table_of_contents_only")
+    if (
+        len(abbreviation_lines) >= 6
+        and len(abbreviation_lines) / max(len(nonempty_lines), 1) >= 0.55
+        and not prose_sentences
+    ):
+        issues.append("abbreviation_glossary_only")
+
+    table_cells = re.findall(r"(?s)<t[dh][^>]*>(.*?)</t[dh]>", passage)
+    empty_cells = sum(not re.sub(r"<[^>]+>|\s|&nbsp;", "", cell) for cell in table_cells)
+    if len(table_cells) >= 8 and empty_cells / len(table_cells) >= 0.6 and not prose_sentences:
+        issues.append("blank_form_or_table")
+    return sorted(set(issues))
 
 
 def representative_rows(rows: list[dict[str, Any]], limit: int | None, seed: str) -> list[dict[str, Any]]:
     """Select a deterministic diversity-first pilot instead of a corpus prefix."""
-    eligible = [row for row in rows if len(row["generation_passage"]) >= 200 and row["content_class"] != "front_matter"]
+    eligible = [row for row in rows if not source_quality_issues(row)]
     if limit is None or limit >= len(eligible):
         return eligible
     if limit < 1:
@@ -198,6 +252,11 @@ def representative_rows(rows: list[dict[str, Any]], limit: int | None, seed: str
 
 def corpus_quality_report(rows: list[dict[str, Any]], manuals: list[dict[str, Any]]) -> dict[str, Any]:
     """Return deterministic corpus coverage and extraction-risk metrics."""
+    source_rejections = [
+        issue
+        for row in rows
+        for issue in source_quality_issues(row)
+    ]
     return {
         "manuals": len(manuals),
         "chunks": len(rows),
@@ -209,6 +268,9 @@ def corpus_quality_report(rows: list[dict[str, Any]], manuals: list[dict[str, An
         "chunks_with_html_tables": sum("<table" in row["passage"].casefold() for row in rows),
         "chunks_with_replacement_characters": sum("\ufffd" in row["passage"] for row in rows),
         "empty_generation_chunks": sum(not row["generation_passage"] for row in rows),
+        "answer_bearing_chunks": sum(not source_quality_issues(row) for row in rows),
+        "source_quality_rejected_chunks": sum(bool(source_quality_issues(row)) for row in rows),
+        "source_quality_rejection_reasons": dict(sorted(Counter(source_rejections).items())),
     }
 
 

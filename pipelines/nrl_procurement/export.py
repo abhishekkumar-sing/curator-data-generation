@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections import defaultdict
+import math
+import re
+from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
 
@@ -41,14 +43,110 @@ def question_opener_diversity(records: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def answer_style_diversity(records: list[dict[str, Any]]) -> dict[str, Any]:
-    """Report substantial evidence-span copying in accepted answers."""
+    """Report full-answer and partial evidence-span copying."""
     eligible = [row for row in records if row.get("task_type") in {"qa", "qa_cot"}]
     extractive = sum(is_extractive_answer(row) for row in eligible)
+    eight_gram_coverages: list[float] = []
+    copied_sentence_fractions: list[float] = []
+    for row in eligible:
+        answer_tokens = re.findall(r"[a-z0-9]+", str(row.get("answer", "")).casefold())
+        evidence_text = " ".join(
+            str(item.get("quote", "")) for item in row.get("evidence", [])
+        )
+        evidence_tokens = re.findall(r"[a-z0-9]+", evidence_text.casefold())
+        evidence_normalized = " ".join(evidence_tokens)
+        grams = [
+            " ".join(answer_tokens[index : index + 8])
+            for index in range(max(0, len(answer_tokens) - 7))
+        ]
+        eight_gram_coverages.append(
+            sum(gram in evidence_normalized for gram in grams) / len(grams)
+            if grams
+            else 0.0
+        )
+        sentences = [
+            " ".join(re.findall(r"[a-z0-9]+", sentence.casefold()))
+            for sentence in re.split(r"(?<=[.!?])\s+|\n+", str(row.get("answer", "")))
+            if len(re.findall(r"[a-z0-9]+", sentence.casefold())) >= 5
+        ]
+        copied_sentence_fractions.append(
+            sum(sentence in evidence_normalized for sentence in sentences) / len(sentences)
+            if sentences
+            else 0.0
+        )
     return {
         "records_evaluated": len(eligible),
         "extractive_answers": extractive,
         "non_extractive_answers": len(eligible) - extractive,
         "extractive_answer_share": round(extractive / len(eligible), 4) if eligible else 0.0,
+        "mean_eight_gram_source_coverage": (
+            round(sum(eight_gram_coverages) / len(eight_gram_coverages), 4)
+            if eight_gram_coverages
+            else 0.0
+        ),
+        "mean_copied_sentence_fraction": (
+            round(sum(copied_sentence_fractions) / len(copied_sentence_fractions), 4)
+            if copied_sentence_fractions
+            else 0.0
+        ),
+    }
+
+
+def categorical_diversity(
+    records: list[dict[str, Any]],
+    field: str,
+) -> dict[str, Any]:
+    """Summarize category concentration and normalized entropy."""
+    counts = Counter(str(row.get(field, "")).strip() or "missing" for row in records)
+    if not records:
+        return {
+            "counts": {},
+            "top_category": "",
+            "top_count": 0,
+            "top_share": 0.0,
+            "normalized_entropy": 0.0,
+        }
+    top_category, top_count = max(counts.items(), key=lambda item: item[1])
+    probabilities = [count / len(records) for count in counts.values()]
+    entropy = -sum(probability * math.log(probability) for probability in probabilities)
+    normalized_entropy = entropy / math.log(len(counts)) if len(counts) > 1 else 0.0
+    return {
+        "counts": dict(sorted(counts.items())),
+        "top_category": top_category,
+        "top_count": top_count,
+        "top_share": round(top_count / len(records), 4),
+        "normalized_entropy": round(normalized_entropy, 4),
+    }
+
+
+def answer_length_statistics(records: list[dict[str, Any]]) -> dict[str, Any]:
+    """Report answer lengths globally and by deterministic format."""
+    by_format: dict[str, list[int]] = defaultdict(list)
+    for row in records:
+        count = len(re.findall(r"[A-Za-z0-9]+(?:['’-][A-Za-z0-9]+)?", str(row.get("answer", ""))))
+        by_format[str(row.get("answer_format", "missing"))].append(count)
+
+    def summarize(values: list[int]) -> dict[str, Any]:
+        ordered = sorted(values)
+        if not ordered:
+            return {"records": 0, "minimum": 0, "median": 0, "p90": 0, "maximum": 0}
+        def at(share: float) -> int:
+            return ordered[round((len(ordered) - 1) * share)]
+        return {
+            "records": len(ordered),
+            "minimum": ordered[0],
+            "median": at(0.5),
+            "p90": at(0.9),
+            "maximum": ordered[-1],
+        }
+
+    all_values = [value for values in by_format.values() for value in values]
+    return {
+        "overall": summarize(all_values),
+        "by_format": {
+            answer_format: summarize(values)
+            for answer_format, values in sorted(by_format.items())
+        },
     }
 
 
@@ -327,6 +425,19 @@ def export_records(
     stats["eval_records"] = len(evaluation)
     stats["question_opener_diversity"] = question_opener_diversity(records)
     stats["answer_style_diversity"] = answer_style_diversity(records)
+    single_document_qa = [
+        row for row in records if row.get("task_type") in {"qa", "qa_cot"}
+    ]
+    stats["question_type_diversity"] = categorical_diversity(
+        single_document_qa,
+        "question_type",
+    )
+    stats["answer_format_diversity"] = categorical_diversity(
+        single_document_qa,
+        "answer_format",
+    )
+    stats["manual_diversity"] = categorical_diversity(records, "manual_id")
+    stats["answer_length"] = answer_length_statistics(single_document_qa)
     write_manifest(
         output_dir,
         {

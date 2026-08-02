@@ -120,7 +120,6 @@ models:
     output_dir_env: OCR_OUTPUT_DIR
 
 quality:
-  examples_per_chunk: 3
   # CoT candidates have a lower validation/judge survival rate than direct QA.
   # Plan 40% so the accepted pool can meet the separate 20% release floor.
   qa_cot_fraction: 0.40
@@ -132,11 +131,35 @@ quality:
   # The configured Gemma judge server has an 8,192-token runtime context.
   judge_batch_size: 1
   dedupe_threshold: 94
+  # Plan feasible semantic intents before generation. The generator must honor
+  # the assigned type; weights are portfolio targets, not permission to force
+  # an intent that the source passage cannot support.
+  question_type_weights:
+    direct_fact: 0.15
+    definition: 0.05
+    procedure: 0.12
+    sequence: 0.08
+    threshold: 0.10
+    exception: 0.10
+    negative_rule: 0.08
+    role_responsibility: 0.10
+    comparison: 0.07
+    compliance_check: 0.12
+    currentness: 0.03
+  max_question_type_share: 0.30
+  answer_length_by_format:
+    concise_direct: [5, 100]
+    ordered_steps: [20, 220]
+    audit_check: [15, 180]
+    compact_comparison: [20, 180]
+    rule_and_exception: [15, 160]
+    responsibility_summary: [10, 140]
+    dated_scope_summary: [15, 160]
   # Corpus-level cap: no single normalized 4-word question opener may exceed
   # this share of the deterministic-pass, deduplicated pool. Grounded in
   # Self-Instruct's pool-similarity filtering (ACL 2023) generalized from
   # near-duplicate full text to shared opening templates.
-  max_question_opener_share: 0.15
+  max_question_opener_share: 0.08
   # Preserve some exact-answer records, but prevent the SFT corpus from mostly
   # teaching source-span copying. Answers shorter than four words are exempt.
   max_extractive_answer_share: 0.35
@@ -146,6 +169,24 @@ quality:
   required_task_types:
     - qa
     - qa_cot
+
+# Optional semantic-diversity analysis. Only generated questions are sent to
+# this endpoint; source passages, answers, evidence, and credentials are not.
+# Selection stays disabled until `semantic_calibration.jsonl` has human labels
+# and a model-specific threshold is justified from those labels.
+embeddings:
+  enabled: false
+  api_key_env: EMBEDDING_API_KEY
+  base_url_env: EMBEDDING_BASE_URL
+  model_env: EMBEDDING_MODEL
+  input_type: query
+  dimensions: 1024
+  truncate: NONE
+  batch_size: 64
+  timeout_seconds: 120
+  calibration_neighbors_per_record: 5
+  selection_enabled: false
+  similarity_threshold: null
 
 propositions:
   # Only path_qa and temporal consume propositions; both are disabled below

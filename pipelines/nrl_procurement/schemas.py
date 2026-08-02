@@ -104,28 +104,28 @@ QuestionType = Literal[
 
 
 class EvidenceDraft(BaseModel):
-    quote: str = Field(min_length=8)
+    # Short source labels such as "Buyer" and "Seller" can be complete,
+    # material evidence. Grounding and claim support are validated separately;
+    # an arbitrary character minimum only turns valid short spans into schema
+    # failures before those checks can run.
+    quote: str = Field(min_length=1)
 
 
 class AnswerClaimDraft(BaseModel):
     """One material answer claim and its exact supporting source spans."""
 
-    statement: str = Field(min_length=8)
-    evidence: list[EvidenceDraft] = Field(min_length=1)
+    # Parse incomplete model objects so deterministic validation can persist a
+    # precise rejection instead of losing the entire request to Pydantic.
+    statement: str = ""
+    evidence: list[EvidenceDraft] = Field(default_factory=list)
 
 
 class ReasoningStepDraft(BaseModel):
-    operation: Literal[
-        "lookup",
-        "compare",
-        "apply_condition",
-        "resolve_authority",
-        "resolve_time",
-        "combine",
-        "calculate",
-        "conclude",
-    ]
-    statement: str = Field(min_length=8)
+    # Intermediate model output is intentionally permissive. The validator
+    # enforces the operation vocabulary and grounded inputs while preserving
+    # malformed rows in the audit trail.
+    operation: str = ""
+    statement: str = ""
     evidence_quotes: list[str] = Field(default_factory=list)
 
 
@@ -144,6 +144,33 @@ class Candidate(BaseModel):
 
 class CandidateBatch(BaseModel):
     examples: list[Candidate]
+
+
+class QABlueprintDraft(BaseModel):
+    """A grounded plan produced before final question wording."""
+
+    # Keep the allowed vocabulary in the prompt and validate it in parse. This
+    # prevents one invented label from erasing the whole response before an
+    # auditable rejection can be written.
+    task: str
+    persona: str
+    instruction_goal: str = Field(min_length=12)
+    must_cover: list[str] = Field(min_length=1, max_length=4)
+    evidence: list[EvidenceDraft] = Field(min_length=1, max_length=4)
+
+
+class GroundedCandidateDraft(BaseModel):
+    """Final wording for one already-fixed blueprint.
+
+    Contract labels deliberately do not appear here. The pipeline injects the
+    blueprint's task, persona, question type, answer format, task type, and
+    answerability so the final model cannot rename or swap them.
+    """
+
+    question: str = Field(min_length=12)
+    answer: str = Field(min_length=1)
+    claims: list[AnswerClaimDraft] = Field(default_factory=list)
+    reasoning_steps: list[ReasoningStepDraft] = Field(default_factory=list)
 
 
 class PropositionDraft(BaseModel):

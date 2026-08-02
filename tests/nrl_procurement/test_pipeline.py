@@ -14,10 +14,12 @@ sys.path.insert(0, str(PIPELINE))
 import generate as generation_pipeline  # noqa: E402
 import resume as resume_module  # noqa: E402
 from corpus import (  # noqa: E402
+    _content_class,
     corpus_quality_report,
     generation_text,
     load_corpus,
     representative_rows,
+    source_quality_issues,
 )
 from cross_document import build_bundles  # noqa: E402
 from cross_stage import (  # noqa: E402
@@ -36,17 +38,28 @@ from drafting import (  # noqa: E402
     normalize_drafting_response,
     read_drafting_seeds,
 )
-from export import answer_style_diversity, assert_unique_record_ids, assign_splits, export_records, question_opener_diversity  # noqa: E402
+from export import (  # noqa: E402
+    answer_length_statistics,
+    answer_style_diversity,
+    assert_unique_record_ids,
+    assign_splits,
+    categorical_diversity,
+    export_records,
+    question_opener_diversity,
+)
 from generate import (  # noqa: E402
+    ProcurementBlueprintGenerator,
     ProcurementGenerator,
     ProcurementJudge,
     SingularProcurementJudge,
     _budget_judge_rows,
     _judge_prompt_budget,
     _singular_judge_batch_size,
+    eligible_question_types,
     judge_eligible_planned,
     materialize_terminal_failures,
     plan_cross_document_requests,
+    plan_question_types,
     plan_single_document_requests,
     request_coverage,
 )
@@ -81,15 +94,16 @@ from reasoning_paths import build_reasoning_paths, validate_reasoning_path  # no
 from resume import ResumeManager  # noqa: E402
 from review import REVIEW_DIMENSIONS, prepare_review, validate_reviews  # noqa: E402
 from schemas import (  # noqa: E402
-    CandidateBatch,
     CrossCandidateBatch,
     CrossJudgeBatch,
     CrossJudgedCandidate,
     DraftingBlock,
     DraftingResult,
+    GroundedCandidateDraft,
     JudgeBatch,
     JudgedCandidate,
     PropositionBatch,
+    QABlueprintDraft,
 )
 from source_windows import (  # noqa: E402
     build_source_windows,
@@ -97,7 +111,9 @@ from source_windows import (  # noqa: E402
 )
 from validate_run import validate_run  # noqa: E402
 from validation import (  # noqa: E402
+    answer_format_issues,
     deduplicate,
+    enforce_category_diversity,
     enforce_extractive_answer_diversity,
     enforce_question_opener_diversity,
     is_extractive_answer,
@@ -448,28 +464,44 @@ def test_cot_rejects_repeated_steps_with_identical_evidence() -> None:
     assert "cot_reuses_identical_evidence_for_all_steps" in issues
 
 
-def test_empty_generation_materializes_terminal_lineage() -> None:
+def test_grounded_blueprint_is_singular_and_auditable() -> None:
     row = {
         "planned_request_id": "single-request",
         "planned_task_type": "qa",
+        "planned_question_type": "direct_fact",
+        "planned_answer_format": "concise_direct",
+        "planned_answerable": True,
+        "passage": "The buyer shall retain the procurement record.",
     }
-    result = ProcurementGenerator.parse(
+    result = ProcurementBlueprintGenerator.parse(
         SimpleNamespace(model_name="generator"),
         row,
-        CandidateBatch(examples=[]),
+        QABlueprintDraft(
+            task="compliance_and_audit",
+            persona="auditor",
+            instruction_goal="Determine which procurement record must be retained.",
+            must_cover=["The buyer must retain the procurement record."],
+            evidence=[{"quote": row["passage"]}],
+        ),
     )
-    assert result == [
-        {
-            "parent_request_id": "single-request",
-            "planned_task_type": "qa",
-            "terminal_state": "empty_generation",
-            "generation_model": "generator",
-            "deterministic_checks": {
-                "passed": False,
-                "issues": ["generator_returned_no_examples"],
-            },
-        }
-    ]
+    assert result["blueprint_checks"] == {"passed": True, "issues": []}
+    assert result["blueprint_id"].startswith("qabp-")
+    assert result["task"] == "compliance_and_audit"
+
+    swapped = ProcurementBlueprintGenerator.parse(
+        SimpleNamespace(model_name="generator"),
+        row,
+        QABlueprintDraft(
+            task="auditor",
+            persona="compliance_and_audit",
+            instruction_goal="Determine which procurement record must be retained.",
+            must_cover=["The buyer must retain the procurement record."],
+            evidence=[{"quote": row["passage"]}],
+        ),
+    )
+    assert swapped["task"] == "compliance_and_audit"
+    assert swapped["persona"] == "auditor"
+    assert swapped["blueprint_repairs"] == ["swapped_task_and_persona"]
 
 
 def test_manifest_metadata_and_stable_chunk(tmp_path: Path) -> None:
@@ -1873,23 +1905,27 @@ def test_deterministic_rejections_are_materialized_for_audit() -> None:
         **_cross_row("manual", "chunk-1", passage),
         "planned_request_id": "single-request",
         "planned_task_type": "qa",
+        "planned_question_type": "threshold",
+        "planned_answer_format": "concise_direct",
         "planned_answerable": True,
+        "blueprint_id": "qabp-test",
+        "task": "compliance_and_audit",
+        "persona": "auditor",
+        "instruction_goal": "Determine the required retention period.",
+        "must_cover": ["The record is retained for the stated period."],
+        "blueprint_evidence": [{"quote": passage}],
     }
-    single_response = CandidateBatch.model_validate(
+    single_response = GroundedCandidateDraft.model_validate(
         {
-            "examples": [
+            "question": "How long must the record be retained?",
+            "answer": "The record must be retained for 10 years.",
+            "claims": [
                 {
-                    "task_type": "qa",
-                    "task": "compliance_and_audit",
-                    "persona": "auditor",
-                    "question_type": "threshold",
-                    "question": "How long must the record be retained?",
-                    "answer": "The record must be retained for 10 years.",
-                    "answerable": True,
+                    "statement": "The record must be retained for 10 years.",
                     "evidence": [{"quote": passage}],
-                    "reasoning_steps": [],
                 }
-            ]
+            ],
+            "reasoning_steps": [],
         }
     )
     single = ProcurementGenerator.parse(
@@ -1971,29 +2007,27 @@ def test_qa_evidence_offsets_resolve_against_original_source_chunk() -> None:
         "source_passage": f"![page image](image.png)\n\n{quote}",
         "planned_request_id": "single-request",
         "planned_task_type": "qa",
+        "planned_question_type": "threshold",
+        "planned_answer_format": "concise_direct",
         "planned_answerable": True,
+        "blueprint_id": "qabp-test",
+        "task": "compliance_and_audit",
+        "persona": "auditor",
+        "instruction_goal": "Determine the required retention period.",
+        "must_cover": ["The record is retained for five years."],
+        "blueprint_evidence": [{"quote": quote}],
     }
-    response = CandidateBatch.model_validate(
+    response = GroundedCandidateDraft.model_validate(
         {
-            "examples": [
+            "question": "How long must the record be retained?",
+            "answer": "The record must be retained for 5 years.",
+            "claims": [
                 {
-                    "task_type": "qa",
-                    "task": "compliance_and_audit",
-                    "persona": "auditor",
-                    "question_type": "threshold",
-                    "question": "How long must the record be retained?",
-                    "answer": "The record must be retained for 5 years.",
-                    "answerable": True,
+                    "statement": "The record must be retained for 5 years.",
                     "evidence": [{"quote": quote}],
-                    "claims": [
-                        {
-                            "statement": "The record must be retained for 5 years.",
-                            "evidence": [{"quote": quote}],
-                        }
-                    ],
-                    "reasoning_steps": [],
                 }
-            ]
+            ],
+            "reasoning_steps": [],
         }
     )
     result = ProcurementGenerator.parse(
@@ -2017,29 +2051,27 @@ def test_qa_evidence_rejects_unresolvable_citation_offset() -> None:
         "source_passage": "This chunk text no longer contains the quoted sentence at all.",
         "planned_request_id": "single-request",
         "planned_task_type": "qa",
+        "planned_question_type": "threshold",
+        "planned_answer_format": "concise_direct",
         "planned_answerable": True,
+        "blueprint_id": "qabp-test",
+        "task": "compliance_and_audit",
+        "persona": "auditor",
+        "instruction_goal": "Determine the required retention period.",
+        "must_cover": ["The record is retained for five years."],
+        "blueprint_evidence": [{"quote": quote}],
     }
-    response = CandidateBatch.model_validate(
+    response = GroundedCandidateDraft.model_validate(
         {
-            "examples": [
+            "question": "How long must the record be retained?",
+            "answer": "The record must be retained for 5 years.",
+            "claims": [
                 {
-                    "task_type": "qa",
-                    "task": "compliance_and_audit",
-                    "persona": "auditor",
-                    "question_type": "threshold",
-                    "question": "How long must the record be retained?",
-                    "answer": "The record must be retained for 5 years.",
-                    "answerable": True,
+                    "statement": "The record must be retained for 5 years.",
                     "evidence": [{"quote": quote}],
-                    "claims": [
-                        {
-                            "statement": "The record must be retained for 5 years.",
-                            "evidence": [{"quote": quote}],
-                        }
-                    ],
-                    "reasoning_steps": [],
                 }
-            ]
+            ],
+            "reasoning_steps": [],
         }
     )
     result = ProcurementGenerator.parse(
@@ -2218,30 +2250,43 @@ def test_single_document_prompts_preserve_specification_contract() -> None:
         "section": "Bid security",
         "passage": "The bidder shall submit bid security.",
         "planned_task_type": "qa_cot",
+        "planned_question_type": "compliance_check",
+        "planned_answer_format": "audit_check",
         "planned_answerable": True,
+        "task": "security_and_guarantees",
+        "persona": "technical_evaluator",
+        "instruction_goal": "Verify whether the bidder submitted bid security.",
+        "must_cover": ["The bidder shall submit bid security."],
+        "blueprint_evidence": [
+            {"quote": "The bidder shall submit bid security."}
+        ],
     }
     prompt = ProcurementGenerator.prompt(None, row)
     for required in (
         "TASK",
         "PLANNED CONTRACT",
-        "underlying procurement work",
-        "nit_filling",
-        "persona",
+        "fixed procurement task is security_and_guarantees",
+        "fixed persona is technical_evaluator",
         "SOURCE POLICY",
         "CONSTRAINTS",
         "OUTPUT CONTRACT",
+        "FIXED GROUNDED BLUEPRINT",
         "FINAL CHECK",
         "qa_cot",
         "two to four",
         "private hidden chain-of-thought",
         "evidence_quotes",
-        "Not answerable from the provided sources.",
         "Government",
         "guidance as NRL policy",
         "---BEGIN UNTRUSTED SOURCE PASSAGE---",
         "---END UNTRUSTED SOURCE PASSAGE---",
     ):
         assert required in prompt
+
+    blueprint_prompt = ProcurementBlueprintGenerator.prompt(None, row)
+    assert "Do not write the final question or answer" in blueprint_prompt
+    assert "question_type: compliance_check" in blueprint_prompt
+    assert "Avoid page-number" in blueprint_prompt
 
     review = {
         "judge_items": [
@@ -2412,6 +2457,159 @@ def test_generation_text_and_representative_pilot_selection() -> None:
     report = corpus_quality_report(rows, [])
     assert report["chunks_with_image_markdown"] == 4
     assert report["chunks_with_html_tables"] == 4
+
+
+def test_source_quality_preflight_rejects_non_answer_bearing_structures() -> None:
+    toc = "\n".join(
+        f"{index}. Procurement topic ........ {index + 10}"
+        for index in range(1, 8)
+    )
+    toc_row = {
+        "generation_passage": toc,
+        "content_class": "policy",
+    }
+    assert "table_of_contents_only" in source_quality_issues(toc_row)
+
+    html_toc = {
+        "generation_passage": (
+            "MANUAL FOR PROCUREMENT\nTable of Contents\n<table>"
+            + "".join(
+                f"<tr><td>{index}. Rule</td><td>{index + 20}</td></tr>"
+                for index in range(8)
+            )
+            + "</table>"
+        ),
+        "content_class": "table",
+    }
+    assert "table_of_contents_only" in source_quality_issues(html_toc)
+
+    glossary = "\n".join(
+        (
+            "ABC - Alpha Buying Committee",
+            "DEF - Department Evaluation Form",
+            "GHI - General Handling Instruction",
+            "JKL - Joint Knowledge List",
+            "MNO - Manual Notice Office",
+            "PQR - Procurement Quality Review",
+        )
+    )
+    glossary_row = {
+        "generation_passage": glossary,
+        "content_class": "policy",
+    }
+    assert "abbreviation_glossary_only" in source_quality_issues(glossary_row)
+
+    policy = {
+        "generation_passage": (
+            "The tendering officer shall record the evaluation before award. "
+            "The approving authority may request clarification when the record "
+            "is incomplete, but no bidder may alter its quoted price. " * 3
+        ),
+        "content_class": "policy",
+    }
+    assert source_quality_issues(policy) == []
+
+
+def test_late_introduction_is_policy_not_front_matter() -> None:
+    row = {
+        "generation_passage": "The contractor shall submit the work programme.",
+        "section": "7.4.1 Introduction to contract monitoring",
+        "page": 185,
+        "start_page": 1,
+    }
+    assert _content_class(row) == "policy"
+
+
+def test_short_exact_evidence_is_schema_valid() -> None:
+    draft = QABlueprintDraft(
+        task="general_reference",
+        persona="general_user",
+        instruction_goal="Identify the party named in the source table.",
+        must_cover=["The named party is Seller."],
+        evidence=[{"quote": "Seller"}],
+    )
+    assert draft.evidence[0].quote == "Seller"
+
+
+def test_question_intent_planning_is_feasible_balanced_and_deterministic(
+    monkeypatch,
+) -> None:
+    monkeypatch.setitem(
+        generation_pipeline.QUALITY,
+        "question_type_weights",
+        {
+            "direct_fact": 0.2,
+            "threshold": 0.4,
+            "exception": 0.4,
+        },
+    )
+    rows = [
+        {
+            "chunk_id": "threshold",
+            "generation_passage": "The security shall be 5% and remain valid for 30 days.",
+        },
+        {
+            "chunk_id": "exception",
+            "generation_passage": "The bidder shall submit the form unless the stated exception applies.",
+        },
+        {
+            "chunk_id": "plain",
+            "generation_passage": "The procurement record contains the approved title.",
+        },
+    ]
+    assert eligible_question_types(rows[0]) >= {"threshold", "direct_fact"}
+    first = plan_question_types(rows, "seed")
+    second = plan_question_types(rows, "seed")
+    assert first == second
+    assert first["threshold"] in eligible_question_types(rows[0])
+    assert first["exception"] in eligible_question_types(rows[1])
+    assert first["plain"] == "direct_fact"
+
+
+def test_answer_format_and_category_portfolio_checks() -> None:
+    bounds = {
+        "concise_direct": [3, 12],
+        "ordered_steps": [3, 30],
+    }
+    assert answer_format_issues(
+        "The authority approves the tender.",
+        "The authority approves the tender.",
+        "concise_direct",
+        bounds,
+    ) == []
+    issues = answer_format_issues(
+        "Lecture point: imagine a bidder using 99 percent.",
+        "The bidder shall submit its tender.",
+        "ordered_steps",
+        bounds,
+    )
+    assert "unsupported_instructional_embellishment:lecture_point" in issues
+    assert "ordered_steps_format_missing_structure" in issues
+
+    records = [
+        {"question_type": "direct_fact", "record_id": f"direct-{index}"}
+        for index in range(8)
+    ] + [
+        {"question_type": "threshold", "record_id": "threshold"},
+        {"question_type": "exception", "record_id": "exception"},
+    ]
+    kept, removed = enforce_category_diversity(
+        records,
+        "question_type",
+        0.5,
+    )
+    report = categorical_diversity(kept, "question_type")
+    assert removed == 6
+    assert report["top_share"] == 0.5
+
+    lengths = answer_length_statistics(
+        [
+            {"answer": "one two three", "answer_format": "concise_direct"},
+            {"answer": "one two three four five", "answer_format": "concise_direct"},
+        ]
+    )
+    assert lengths["overall"]["median"] in {3, 5}
+    assert lengths["overall"]["maximum"] == 5
 
 
 def test_explicit_task_planning_and_request_coverage(monkeypatch) -> None:

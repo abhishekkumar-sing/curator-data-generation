@@ -134,6 +134,16 @@ ANSWER_DANGLING_FINAL_WORD = re.compile(
 )
 TRUNCATED_TERMINAL = re.compile(r"(?:[,;:]|\.{3}|…)\s*$")
 BRACKET_PAIRS = (("(", ")"), ("[", "]"), ("{", "}"))
+ACRONYM = re.compile(r"\b[A-Z][A-Z0-9&/-]{1,15}\b")
+INSTRUCTIONAL_EMBELLISHMENTS = (
+    "case study",
+    "check for understanding",
+    "role-play",
+    "role play",
+    "lecture point",
+    "let's dive",
+    "feel free to share",
+)
 
 
 def _canonical_unit(unit: str) -> str:
@@ -185,6 +195,56 @@ def answer_completeness_issues(answer: str) -> list[str]:
     if any(text.count(opening) != text.count(closing) for opening, closing in BRACKET_PAIRS):
         issues.append("incomplete_answer_unbalanced_brackets")
     return sorted(set(issues))
+
+
+def answer_format_issues(
+    answer: str,
+    support_text: str,
+    answer_format: str,
+    bounds: dict[str, list[int] | tuple[int, int]],
+) -> list[str]:
+    """Validate concise, source-grounded response presentation.
+
+    Formats are assigned deterministically from the planned question type;
+    they are not another model-selected label. The checks stay deliberately
+    high precision so normal prose variation is not mistaken for a defect.
+    """
+    text = str(answer or "").strip()
+    issues: list[str] = []
+    word_count = len(re.findall(r"[A-Za-z0-9]+(?:['’-][A-Za-z0-9]+)?", text))
+    configured = bounds.get(answer_format)
+    if configured and len(configured) == 2:
+        minimum, maximum = map(int, configured)
+        if word_count < minimum:
+            issues.append(f"answer_too_short_for_format:{answer_format}:{word_count}")
+        if word_count > maximum:
+            issues.append(f"answer_too_long_for_format:{answer_format}:{word_count}")
+    normalized_answer = text.casefold()
+    normalized_support = str(support_text or "").casefold()
+    for phrase in INSTRUCTIONAL_EMBELLISHMENTS:
+        if phrase in normalized_answer and phrase not in normalized_support:
+            issues.append(f"unsupported_instructional_embellishment:{phrase.replace(' ', '_')}")
+    if answer_format == "ordered_steps" and not re.search(
+        r"(?im)(?:^|\n)\s*(?:step\s+\d+|\d+[.)]|[-*])\s+",
+        text,
+    ):
+        issues.append("ordered_steps_format_missing_structure")
+    if answer_format == "audit_check" and not re.search(
+        r"(?i)\b(?:verify|confirm|check|evidence|compliance|compliant)\b",
+        text,
+    ):
+        issues.append("audit_check_format_missing_verification_action")
+    return sorted(set(issues))
+
+
+def _unsupported_acronyms(answer: str, support_text: str) -> list[str]:
+    supported = set(ACRONYM.findall(str(support_text or "")))
+    ignored = {"QA", "SOP"} if not support_text else {"QA"}
+    return sorted(
+        acronym
+        for acronym in set(ACRONYM.findall(str(answer or "")))
+        if acronym not in supported and acronym not in ignored
+    )
 
 
 _QUOTE_MARK_PAIRS = (('"', '"'), ("'", "'"), ("“", "”"), ("‘", "’"))
@@ -328,6 +388,8 @@ def validate_record(record: dict[str, Any], passage: str) -> list[str]:
             reasons.append("incomplete_evidence_fragment")
     claim_quotes: list[str] = []
     for claim in claims:
+        if not str(claim.get("statement", "")).strip():
+            reasons.append("claim_without_statement")
         claim_evidence = [
             item["quote"].strip() for item in claim.get("evidence", [])
         ]
@@ -359,6 +421,11 @@ def validate_record(record: dict[str, Any], passage: str) -> list[str]:
     reasons.extend(semantic_support_issues(record["answer"], support))
     for number in _unsupported_quantities(record["answer"], support):
         reasons.append(f"unsupported_number:{number}")
+    for acronym in _unsupported_acronyms(
+        record["answer"],
+        f"{passage}\n{record.get('question', '')}",
+    ):
+        reasons.append(f"unsupported_acronym:{acronym}")
     answer = record["answer"]
     for qualifier, patterns in QUALIFIER_EQUIVALENTS.items():
         if _has_pattern(support, (patterns[0],)) and not _has_pattern(answer, patterns) and len(quotes) == 1:
@@ -482,7 +549,7 @@ def enforce_extractive_answer_diversity(
 
 def enforce_question_opener_diversity(
     records: Iterable[dict[str, Any]],
-    max_share: float = 0.15,
+    max_share: float = 0.08,
 ) -> tuple[list[dict[str, Any]], int]:
     """Cap how much of the accepted pool may share one opening template.
 
@@ -511,6 +578,37 @@ def enforce_question_opener_diversity(
         key, count = min(counts.items(), key=lambda item: (-item[1], item[0]))
         # A single occurrence is diversity, not a repeated template. Very small
         # pools may therefore have an unavoidable top share above the target.
+        if count <= 1 or count / total <= max_share:
+            break
+        index = indexes[key].pop()
+        active[index] = False
+        counts[key] -= 1
+        total -= 1
+    kept = [record for record, include in zip(records, active, strict=True) if include]
+    return kept, len(records) - len(kept)
+
+
+def enforce_category_diversity(
+    records: Iterable[dict[str, Any]],
+    field: str,
+    max_share: float,
+) -> tuple[list[dict[str, Any]], int]:
+    """Cap a categorical portfolio field while preserving small-pool coverage."""
+    records = list(records)
+    if not records:
+        return [], 0
+    if not 0 < max_share < 1:
+        raise ValueError("max_share must be between 0 and 1")
+    keys = [str(record.get(field, "")).strip() for record in records]
+    active = [True] * len(records)
+    counts = Counter(key for key in keys if key)
+    indexes: dict[str, list[int]] = {}
+    for index, key in enumerate(keys):
+        if key:
+            indexes.setdefault(key, []).append(index)
+    total = len(records)
+    while counts and total:
+        key, count = min(counts.items(), key=lambda item: (-item[1], item[0]))
         if count <= 1 or count / total <= max_share:
             break
         index = indexes[key].pop()
