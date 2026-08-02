@@ -204,8 +204,23 @@ def assign_splits(
     train: float,
     validation: float,
     seed: str,
+    manual_folds: dict[str, str] | None = None,
 ) -> None:
     """Assign whole connected components near configured record targets."""
+    if manual_folds is not None:
+        for record in records:
+            manual_ids = [
+                str(document["manual_id"])
+                for document in record.get("source_documents", [])
+            ] or [str(record["manual_id"])]
+            folds = {manual_folds[manual_id] for manual_id in manual_ids}
+            if len(folds) != 1:
+                raise ValueError(
+                    "One record spans explicit manual folds: "
+                    f"{record.get('record_id')}: {sorted(folds)}"
+                )
+            record["split"] = folds.pop()
+        return
     components = _components(manuals, records)
     test = 1.0 - train - validation
     fractions = {"train": train, "validation": validation, "test": test}

@@ -131,7 +131,9 @@ def evidence_location(
     start = document["passage"].find(quote)
     if start < 0:
         return None
+    quote_hash = hashlib.sha256(quote.encode()).hexdigest()[:12]
     return {
+        "citation_id": f"{source_id}:{document['chunk_id']}:{quote_hash}",
         "source_id": source_id,
         "manual_id": document["manual_id"],
         "chunk_id": document["chunk_id"],

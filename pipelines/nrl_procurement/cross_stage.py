@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
+from collections import defaultdict
 from typing import Any
 
 from cross_document import evidence_location
@@ -51,8 +53,8 @@ class CrossDocumentGenerator(curator.LLM):
     def prompt(self, row: dict) -> str:
         """Render two explicitly related source passages."""
         return f"""TASK
-Generate exactly one genuinely cross-document procurement training record when the
-pair supports one; otherwise return zero records.
+Generate distinct genuinely cross-document procurement training records when the
+pair supports them; otherwise return zero records.
 Every answerable record must require a connected synthesis of both source_a and
 source_b. Return zero records if the pair cannot support that requirement.
 
@@ -103,7 +105,8 @@ CONSTRAINTS
   negative policy claim.
 
 OUTPUT CONTRACT
-Return CrossCandidateBatch.examples under the enforced response schema. Every example
+Return up to {int(CONFIG.get("cross_document", {}).get("best_of_n", 1))} distinct
+CrossCandidateBatch.examples under the enforced response schema. Every example
 contains task_type, task, persona, question_type, question, answer, answerable,
 claims, and reasoning_steps. Each claim contains one material statement and one or more evidence
 items with source_id and a verbatim quote. Each rationale step contains an allowed
@@ -113,6 +116,11 @@ RELATIONSHIP METADATA
 relationship_type: {row["relationship_type"]}
 pair_id: {row["pair_id"]}
 alignment_terms: {json.dumps(row["shared_terms"], ensure_ascii=False)}
+prior_questions_to_avoid: {json.dumps(row.get("prior_questions", []), ensure_ascii=False)}
+
+Do not repeat or lightly rephrase any prior_questions_to_avoid. A later novelty
+pass is useful only when it contributes a substantively different supported
+question; return zero examples when no such question remains.
 
 ---BEGIN UNTRUSTED SOURCES---
 {_render_sources(row)}
@@ -127,9 +135,15 @@ preserved authority and qualifications, and task_type-consistent rationale struc
     def parse(self, row: dict, response: CrossCandidateBatch) -> list[dict]:
         """Attach stable identity and source-specific evidence provenance."""
         results = []
+        maximum = int(CONFIG.get("cross_document", {}).get("best_of_n", 1))
+        batch_issues = (
+            [f"cross_best_of_n_exceeded:{len(response.examples)}>{maximum}"]
+            if len(response.examples) > maximum
+            else []
+        )
         for candidate in response.examples:
             draft = candidate.model_dump()
-            reasons = []
+            reasons = list(batch_issues)
             if draft["task_type"] != row["planned_task_type"]:
                 reasons.append(f"planned_task_type_mismatch:{row['planned_task_type']}")
             if draft["answerable"] != row["planned_answerable"]:
@@ -147,7 +161,19 @@ preserved authority and qualifications, and task_type-consistent rationale struc
                     if located is not None:
                         evidence.append(located)
                         flat_evidence[(located["source_id"], located["chunk_id"], located["quote"])] = located
-                claims.append({"claim_id": claim_id, "statement": claim["statement"], "evidence": evidence})
+                claims.append(
+                    {
+                        "claim_id": claim_id,
+                        "statement": claim["statement"],
+                        "evidence": evidence,
+                        "source_ids": sorted(
+                            {item["source_id"] for item in evidence}
+                        ),
+                        "citation_ids": sorted(
+                            {item["citation_id"] for item in evidence}
+                        ),
+                    }
+                )
             steps = []
             for index, step in enumerate(draft["reasoning_steps"], 1):
                 evidence = [
@@ -172,7 +198,7 @@ preserved authority and qualifications, and task_type-consistent rationale struc
                 document = documents[item["source_id"]]
                 citations.append(
                     {
-                        "citation_id": f"{item['source_id']}:{item['chunk_id']}",
+                        "citation_id": item["citation_id"],
                         "source_id": item["source_id"],
                         "manual_id": item["manual_id"],
                         "manual_title": document["title"],
@@ -187,11 +213,18 @@ preserved authority and qualifications, and task_type-consistent rationale struc
                 )
             identity = f"{row['source_bundle_id']}:{draft['task_type']}:{draft['question']}"
             record_id = "nrlxd-" + hashlib.sha256(identity.encode()).hexdigest()[:20]
-            results.append(
-                {
+            record = {
                     "record_id": record_id,
                     **draft,
                     "claims": claims,
+                    "claim_source_bindings": [
+                        {
+                            "claim_id": claim["claim_id"],
+                            "source_ids": claim["source_ids"],
+                            "citation_ids": claim["citation_ids"],
+                        }
+                        for claim in claims
+                    ],
                     "evidence": list(flat_evidence.values()),
                     "relationship_type": row["relationship_type"],
                     "source_bundle_id": row["source_bundle_id"],
@@ -203,12 +236,13 @@ preserved authority and qualifications, and task_type-consistent rationale struc
                     "citations": citations,
                     "parent_request_id": row["planned_request_id"],
                     "generation_model": self.model_name,
-                    "deterministic_checks": {
-                        "passed": not reasons,
-                        "issues": reasons,
-                    },
                 }
-            )
+            reasons.extend(cross_binding_issues(record))
+            record["deterministic_checks"] = {
+                "passed": not reasons,
+                "issues": sorted(set(reasons)),
+            }
+            results.append(record)
         if results:
             return results
         return [
@@ -223,6 +257,101 @@ preserved authority and qualifications, and task_type-consistent rationale struc
                 },
             }
         ]
+
+
+def cross_binding_issues(record: dict[str, Any]) -> list[str]:
+    """Verify bidirectional atomic claim/source/citation bindings."""
+    issues: list[str] = []
+    citations = {
+        str(item.get("citation_id")): item for item in record.get("citations", [])
+    }
+    claims = {
+        str(item.get("claim_id")): item for item in record.get("claims", [])
+    }
+    bindings = record.get("claim_source_bindings", [])
+    if len(bindings) != len(claims):
+        issues.append("cross_claim_binding_count_mismatch")
+    for binding in bindings:
+        claim_id = str(binding.get("claim_id", ""))
+        claim = claims.get(claim_id)
+        if claim is None:
+            issues.append("cross_binding_unknown_claim")
+            continue
+        expected_sources = sorted(
+            {str(item.get("source_id", "")) for item in claim.get("evidence", [])}
+        )
+        expected_citations = sorted(
+            {str(item.get("citation_id", "")) for item in claim.get("evidence", [])}
+        )
+        if sorted(binding.get("source_ids", [])) != expected_sources:
+            issues.append(f"cross_binding_source_mismatch:{claim_id}")
+        if sorted(binding.get("citation_ids", [])) != expected_citations:
+            issues.append(f"cross_binding_citation_mismatch:{claim_id}")
+        if any(citation_id not in citations for citation_id in expected_citations):
+            issues.append(f"cross_binding_dangling_citation:{claim_id}")
+    return sorted(set(issues))
+
+
+def select_best_cross_candidates(
+    rows: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Keep one quality-ranked sibling per planned cross-document request."""
+    by_parent: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        by_parent[str(row.get("parent_request_id", ""))].append(row)
+    selected: list[dict[str, Any]] = []
+    rejected: list[dict[str, Any]] = []
+
+    def score(row: dict[str, Any]) -> tuple[Any, ...]:
+        judge = row.get("judge", {})
+        bindings = row.get("claim_source_bindings", [])
+        bound_sources = {
+            source_id
+            for binding in bindings
+            for source_id in binding.get("source_ids", [])
+        }
+        tokens = set(re.findall(r"[a-z0-9]+", str(row.get("question", "")).casefold()))
+        return (
+            bool(judge.get("accepted", False)),
+            not cross_binding_issues(row),
+            set(row.get("required_source_ids", [])).issubset(bound_sources),
+            bool(judge.get("preserves_qualifications", False)),
+            int(judge.get("score", 0)),
+            len(tokens),
+            str(row.get("record_id", "")),
+        )
+
+    for _parent, siblings in sorted(by_parent.items()):
+        ordered = sorted(siblings, key=score, reverse=True)
+        winner = ordered[0]
+        if winner.get("judge", {}).get("accepted", False) and not cross_binding_issues(
+            winner
+        ):
+            winner["best_of_n"] = {
+                "family_size": len(siblings),
+                "selected": True,
+                "selection_basis": "validity_judge_binding_qualification_novelty",
+            }
+            selected.append(winner)
+        for loser in ordered[1:] if winner in selected else ordered:
+            rejected.append(
+                {
+                    **loser,
+                    "best_of_n": {
+                        "family_size": len(siblings),
+                        "selected": False,
+                        "winner_record_id": (
+                            winner.get("record_id") if winner in selected else None
+                        ),
+                        "issues": [
+                            "lower_quality_sibling"
+                            if winner in selected
+                            else "no_eligible_sibling"
+                        ],
+                    },
+                }
+            )
+    return selected, rejected
 
 
 class CrossDocumentJudge(curator.LLM):

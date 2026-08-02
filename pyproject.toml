@@ -6,6 +6,7 @@ authors = ["Bespoke Labs <company@bespokelabs.ai>"]
 readme = "README.md"
 packages = [
     {include = "bespokelabs", from = "src"},
+    {include = "pipelines"},
 ]
 include = [
     "src/bespokelabs/curator/viewer/static/**/*"
@@ -91,6 +92,7 @@ build-backend = "poetry.core.masonry.api"
 
 [tool.poetry.scripts]
 curator-viewer = "bespokelabs.curator.viewer.__main__:main"
+nrl-curate = "pipelines.nrl_procurement.cli:main"
 
 [tool.ruff]
 line-length = 160

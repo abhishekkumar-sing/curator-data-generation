@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -73,6 +74,10 @@ def build_drafting_inputs(seeds: list[DraftingSeed], corpus_rows: list[dict[str,
         manual_context = "\n\n".join(
             (f"[{chunk['chunk_id']} | page {chunk['page']} | " f"{chunk.get('section') or 'section unavailable'}]\n{chunk['passage']}") for chunk in selected
         )
+        tender_citation_ids = [
+            f"{seed.tender_id}:fact:{hashlib.sha256(fact.encode()).hexdigest()[:12]}"
+            for fact in tender_context
+        ]
         inputs.append(
             {
                 **seed.model_dump(),
@@ -80,8 +85,12 @@ def build_drafting_inputs(seeds: list[DraftingSeed], corpus_rows: list[dict[str,
                 "manual_passages": [chunk["passage"] for chunk in selected],
                 "manual_sources": selected,
                 "combined_source_text": "\n".join(tender_context) + "\n\n" + manual_context,
-                "candidate_citation_ids": [*seed.manual_chunk_ids, seed.tender_id],
+                "candidate_citation_ids": [
+                    *seed.manual_chunk_ids,
+                    *tender_citation_ids,
+                ],
                 "require_block_attribution": True,
+                "require_field_claims": True,
             }
         )
     return inputs
@@ -182,6 +191,51 @@ def drafting_validation_issues(row: dict[str, Any], result: DraftingResult) -> l
             issues.append("drafting_manual_evidence_aggregate_mismatch")
         if aggregate_facts != result.tender_facts_used:
             issues.append("drafting_tender_fact_aggregate_mismatch")
+    if row.get("require_field_claims", False):
+        block_claims: dict[int, list[Any]] = {}
+        claimed_manual: list[str] = []
+        claimed_facts: list[str] = []
+        for claim_index, claim in enumerate(result.field_claims):
+            if claim.block_index >= len(result.document_blocks):
+                issues.append(f"field_claim_invalid_block:{claim_index}")
+                continue
+            block = result.document_blocks[claim.block_index]
+            block_claims.setdefault(claim.block_index, []).append(claim)
+            if claim.value not in block.text:
+                issues.append(f"field_claim_value_not_in_block:{claim_index}")
+            support = [
+                *claim.manual_evidence_quotes,
+                *claim.tender_facts_used,
+                *claim.instruction_evidence_quotes,
+            ]
+            if not support:
+                issues.append(f"unsupported_field_claim:{claim_index}")
+            for quote in claim.manual_evidence_quotes:
+                if quote not in manual_text or quote not in block.manual_evidence_quotes:
+                    issues.append(f"field_claim_invalid_manual_support:{claim_index}")
+                if quote not in claimed_manual:
+                    claimed_manual.append(quote)
+            for fact in claim.tender_facts_used:
+                if fact not in tender_facts or fact not in block.tender_facts_used:
+                    issues.append(f"field_claim_invalid_tender_support:{claim_index}")
+                if fact not in claimed_facts:
+                    claimed_facts.append(fact)
+            for quote in claim.instruction_evidence_quotes:
+                if (
+                    not quote
+                    or quote not in row["instruction"]
+                    or quote not in block.instruction_evidence_quotes
+                ):
+                    issues.append(f"field_claim_invalid_instruction_support:{claim_index}")
+        for index, block in enumerate(result.document_blocks):
+            if (block.manual_evidence_quotes or block.tender_facts_used) and not block_claims.get(index):
+                issues.append(f"material_block_without_field_claim:{index}")
+        for quote in result.manual_evidence_quotes:
+            if quote not in claimed_manual:
+                issues.append("unclaimed_manual_evidence")
+        for fact in result.tender_facts_used:
+            if fact not in claimed_facts:
+                issues.append("unclaimed_tender_fact")
     return sorted(set(issues))
 
 
@@ -191,6 +245,7 @@ def drafting_citation_integrity_issues(
     *,
     tender_id: str,
     evidence_quote_count: int,
+    tender_fact_count: int = 1,
 ) -> list[str]:
     """Require complete, bidirectional drafting citation traceability."""
     issues: list[str] = []
@@ -216,12 +271,19 @@ def drafting_citation_integrity_issues(
         detail
         for detail in citation_details
         if detail.get("source_type") == "tender_seed"
-        and str(detail.get("citation_id", "")) == tender_id
         and str(detail.get("tender_id", "")) == tender_id
     ]
-    if len(tender_details) != 1:
+    valid_tender_details = [
+        detail
+        for detail in tender_details
+        if str(detail.get("citation_id", "")).startswith(f"{tender_id}:fact:")
+        and isinstance(detail.get("fact_index"), int)
+        and bool(str(detail.get("fact", "")).strip())
+    ]
+    if len(valid_tender_details) != tender_fact_count:
         issues.append(
-            f"invalid_tender_seed_provenance:expected=1,resolved={len(tender_details)}"
+            "invalid_tender_seed_provenance:"
+            f"expected={tender_fact_count},resolved={len(valid_tender_details)}"
         )
     return sorted(set(issues))
 
@@ -271,6 +333,11 @@ CONSTRAINTS
   material policy language in the completed document.
 - tender_facts_used must contain every tender fact used in the response, with each
   entry copied as one complete verbatim item from TENDER FACTS.
+- Return one field_claims entry for every material name, number, contact, tender
+  particular, policy statement, condition, exception, threshold, and remedy. Bind
+  it to the exact document block and copy its block-local support exactly. Headings
+  supported only by the instruction may also be represented, but instruction text
+  never supports a factual or policy claim.
 
 OUTPUT CONTRACT
 Return DraftingResult under the enforced response schema:
@@ -279,6 +346,8 @@ Return DraftingResult under the enforced response schema:
   tender_facts_used, and instruction_evidence_quotes.
 - manual_evidence_quotes: stable first-use union of the block-local manual quotes.
 - tender_facts_used: stable first-use union of the block-local tender facts.
+- field_claims: atomic material values/claims with block_index, field_name, exact
+  value as rendered in that block, and its exact block-local support arrays.
 
 REQUEST METADATA
 tender_id: {row['tender_id']}
@@ -343,15 +412,20 @@ and tender-fact lists, and absence of unsupported content.
                         }
                     )
                     break
-        citation_details.append(
-            {
-                "citation_id": row["tender_id"],
-                "source_type": "tender_seed",
-                "tender_id": row["tender_id"],
-                "seed_id": row["id"],
-                "facts": normalized.tender_facts_used,
-            }
-        )
+        for fact_index, fact in enumerate(normalized.tender_facts_used):
+            fact_hash = hashlib.sha256(fact.encode()).hexdigest()[:12]
+            citation_details.append(
+                {
+                    "citation_id": f"{row['tender_id']}:fact:{fact_hash}",
+                    "source_type": "tender_seed",
+                    "tender_id": row["tender_id"],
+                    "seed_id": row["id"],
+                    "fact_index": fact_index,
+                    "fact": fact,
+                    "start_char": 0,
+                    "end_char": len(fact),
+                }
+            )
         citations = list(
             dict.fromkeys(
                 str(detail["citation_id"]) for detail in citation_details
@@ -363,6 +437,7 @@ and tender-fact lists, and absence of unsupported content.
                 citation_details,
                 tender_id=row["tender_id"],
                 evidence_quote_count=len(normalized.manual_evidence_quotes),
+                tender_fact_count=len(normalized.tender_facts_used),
             )
         )
         return [
@@ -377,6 +452,9 @@ and tender-fact lists, and absence of unsupported content.
                 "citation_details": citation_details,
                 "evidence_quotes": normalized.manual_evidence_quotes,
                 "tender_facts_used": normalized.tender_facts_used,
+                "field_claims": [
+                    claim.model_dump() for claim in normalized.field_claims
+                ],
                 "manual_chunk_ids": row["manual_chunk_ids"],
                 "generation_model": self.model_name,
                 "surface_repairs": repairs,
@@ -477,6 +555,7 @@ def compact_drafting(row: dict[str, Any]) -> dict[str, Any]:
         "instruction": row["instruction"],
         "context": row["context"],
         "response": row["response"],
+        "field_claims": row["field_claims"],
         "citation_details": row["citation_details"],
         "citations": row["citations"],
     }

@@ -17,11 +17,24 @@ STAGE_CONTRACT_VERSIONS = {
     # Increment only when persisted response semantics change. Source-only
     # edits remain reusable, while parser/judge contract changes cannot reuse
     # stale completed checkpoints.
-    "cross_generation": "2",
-    "cross_judge": "2",
+    "cross_generation": "3",
+    "cross_generation_pass": "3",
+    "cross_judge": "3",
+    "cross_judge_pass": "3",
+    "drafting_generation": "2",
     "generation": "2",
     "judge": "2",
 }
+
+
+def _stage_contract_version(stage: str) -> str:
+    """Resolve exact or numbered-pass contract versions fail-safely."""
+    if stage in STAGE_CONTRACT_VERSIONS:
+        return STAGE_CONTRACT_VERSIONS[stage]
+    for prefix in ("cross_generation_pass_", "cross_judge_pass_"):
+        if stage.startswith(prefix):
+            return STAGE_CONTRACT_VERSIONS[prefix.removesuffix("_")]
+    return "1"
 
 
 def _canonical_hash(value: Any) -> str:
@@ -189,10 +202,7 @@ class ResumeManager:
                 "schema_version": RESUME_SCHEMA_VERSION,
                 "stage": stage,
                 "config_sha256": self.config_hash,
-                "stage_contract_version": STAGE_CONTRACT_VERSIONS.get(
-                    stage,
-                    "1",
-                ),
+                "stage_contract_version": _stage_contract_version(stage),
             }
         )
 

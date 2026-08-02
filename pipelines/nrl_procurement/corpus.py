@@ -53,12 +53,40 @@ def _ocr_provenance(ocr_dir: Path, source: Path, markdown: Path) -> dict[str, An
     markdown_hash = payload.get("markdown_sha256")
     if markdown_hash and markdown_hash != _sha256(markdown):
         raise ValueError(f"Stale OCR cache for {source.name}: Markdown hash mismatch")
+    source_pages = payload.get("source_page_count")
+    markdown_pages = payload.get("markdown_page_count")
+    if source_pages and markdown_pages and int(source_pages) != int(markdown_pages):
+        raise ValueError(
+            f"Incomplete OCR output for {source.name}: source has {source_pages} "
+            f"pages but Markdown records {markdown_pages}"
+        )
+    required = (
+        "contract_version",
+        "model",
+        "model_revision",
+        "chandra_ocr_version",
+        "package_revision",
+        "source_page_count",
+        "markdown_page_count",
+        "markdown_sha256",
+    )
     return {
-        "status": "complete" if markdown_hash and payload.get("model") else "legacy",
+        "status": (
+            "complete"
+            if payload.get("contract_version") == "nrl-ocr-provenance-v2"
+            and all(payload.get(field) for field in required)
+            else "legacy"
+        ),
         "cache_file": str(cache),
+        "contract_version": payload.get("contract_version"),
         "model": payload.get("model"),
+        "model_revision": payload.get("model_revision"),
         "engine": payload.get("engine"),
         "chandra_ocr_version": payload.get("chandra_ocr_version"),
+        "package_revision": payload.get("package_revision"),
+        "generated_at": payload.get("generated_at"),
+        "source_page_count": source_pages,
+        "markdown_page_count": markdown_pages,
         "markdown_sha256": markdown_hash,
     }
 
@@ -125,6 +153,13 @@ def generation_text(passage: str) -> str:
     value = re.sub(r"\n[ \t]+\n", "\n\n", value)
     value = re.sub(r"\n{3,}", "\n\n", value)
     return value.strip()
+
+
+def image_artifact_count(passage: str) -> int:
+    """Count model-generated image/figure blocks removed from generation text."""
+    return len(IMAGE_LINE_PATTERN.findall(passage)) + len(
+        HTML_IMAGE_PATTERN.findall(passage)
+    )
 
 
 def _document_family(manual_id: str) -> str:
@@ -265,12 +300,54 @@ def corpus_quality_report(rows: list[dict[str, Any]], manuals: list[dict[str, An
         "chunks_by_source_category": dict(sorted(Counter(row["source_category"] for row in rows).items())),
         "chunks_by_content_class": dict(sorted(Counter(row["content_class"] for row in rows).items())),
         "chunks_with_image_markdown": sum("![" in row["passage"] for row in rows),
+        "removed_image_or_caption_blocks": sum(
+            image_artifact_count(row["passage"]) for row in rows
+        ),
         "chunks_with_html_tables": sum("<table" in row["passage"].casefold() for row in rows),
         "chunks_with_replacement_characters": sum("\ufffd" in row["passage"] for row in rows),
         "empty_generation_chunks": sum(not row["generation_passage"] for row in rows),
         "answer_bearing_chunks": sum(not source_quality_issues(row) for row in rows),
         "source_quality_rejected_chunks": sum(bool(source_quality_issues(row)) for row in rows),
         "source_quality_rejection_reasons": dict(sorted(Counter(source_rejections).items())),
+    }
+
+
+def selection_coverage_report(
+    all_rows: list[dict[str, Any]],
+    selected_rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Report stratified pilot coverage rather than only selected IDs."""
+
+    def values(rows: list[dict[str, Any]], field: str) -> set[str]:
+        return {str(row.get(field, "missing")) for row in rows}
+
+    dimensions = {
+        "manual": (values(all_rows, "manual_id"), values(selected_rows, "manual_id")),
+        "source_category": (
+            values(all_rows, "source_category"),
+            values(selected_rows, "source_category"),
+        ),
+        "content_class": (
+            values(all_rows, "content_class"),
+            values(selected_rows, "content_class"),
+        ),
+    }
+    return {
+        "strategy": "deterministic_weighted_round_robin",
+        "eligible_chunks": sum(not source_quality_issues(row) for row in all_rows),
+        "selected_chunks": len(selected_rows),
+        "dimensions": {
+            name: {
+                "available": sorted(available),
+                "selected": sorted(selected),
+                "covered": len(selected),
+                "total": len(available),
+                "coverage": round(len(selected) / len(available), 4)
+                if available
+                else 1.0,
+            }
+            for name, (available, selected) in dimensions.items()
+        },
     }
 
 
@@ -289,6 +366,8 @@ def load_corpus(
         raise ValueError(f"No manuals registered in {manifest_path}")
 
     seen_manuals: set[str] = set()
+    seen_source_paths: dict[Path, str] = {}
+    seen_source_hashes: dict[str, str] = {}
     seen_chunks: set[str] = set()
     rows: list[dict[str, Any]] = []
     normalized_manuals: list[dict[str, Any]] = []
@@ -299,11 +378,37 @@ def load_corpus(
             raise ValueError(f"Duplicate manual_id: {manual_id}")
         seen_manuals.add(manual_id)
         source_path = (source_dir / manual["file"]).resolve()
+        try:
+            source_path.relative_to(source_dir.resolve())
+        except ValueError as exc:
+            raise ValueError(
+                f"Registered source escapes source_dir: {manual['file']}"
+            ) from exc
         if not source_path.is_file():
             raise FileNotFoundError(source_path)
         content_path = _ocr_markdown(ocr_dir, source_path) if source_path.suffix.lower() == ".pdf" else source_path
         ocr_provenance = _ocr_provenance(ocr_dir, source_path, content_path) if source_path.suffix.lower() == ".pdf" else None
         source_hash = _sha256(source_path)
+        if source_path in seen_source_paths:
+            raise ValueError(
+                "Duplicate registered source path for manuals "
+                f"{seen_source_paths[source_path]} and {manual_id}: {source_path}"
+            )
+        if source_hash in seen_source_hashes:
+            raise ValueError(
+                "Duplicate registered source content for manuals "
+                f"{seen_source_hashes[source_hash]} and {manual_id}: {source_hash}"
+            )
+        expected_hash = str(
+            (manual.get("official_verification") or {}).get("source_sha256", "")
+        ).strip()
+        if expected_hash and expected_hash != source_hash:
+            raise ValueError(
+                f"Registered source hash mismatch for {manual_id}: "
+                f"expected {expected_hash}, got {source_hash}"
+            )
+        seen_source_paths[source_path] = manual_id
+        seen_source_hashes[source_hash] = manual_id
         content_hash = _sha256(content_path)
         defaults = {
             "source_category": "government_manual",

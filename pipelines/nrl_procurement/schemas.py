@@ -173,6 +173,25 @@ class GroundedCandidateDraft(BaseModel):
     reasoning_steps: list[ReasoningStepDraft] = Field(default_factory=list)
 
 
+class UnanswerableQuestionDraft(BaseModel):
+    """One adversarial question derived from a valid answerable seed."""
+
+    question: str = Field(min_length=12)
+    missing_premise: str = Field(min_length=4)
+
+
+class AnswerabilityDecision(BaseModel):
+    """Independent full-context verification of an adversarial negative."""
+
+    record_id: str = Field(min_length=1)
+    full_context_answerable: bool
+    altered_premise_absent: bool
+    distractor_is_same_type: bool
+    abstention_is_appropriate: bool
+    score: int = Field(ge=1, le=5)
+    issues: list[str] = Field(default_factory=list)
+
+
 class PropositionDraft(BaseModel):
     """One source-language procurement proposition and its complete witness."""
 
@@ -322,6 +341,17 @@ class DraftingBlock(BaseModel):
     )
 
 
+class DraftingFieldClaim(BaseModel):
+    """One material draft value bound to its exact block-local support."""
+
+    block_index: int = Field(ge=0)
+    field_name: str = Field(min_length=1)
+    value: str = Field(min_length=1)
+    manual_evidence_quotes: list[str] = Field(default_factory=list)
+    tender_facts_used: list[str] = Field(default_factory=list)
+    instruction_evidence_quotes: list[str] = Field(default_factory=list)
+
+
 class DraftingResult(BaseModel):
     document_blocks: list[DraftingBlock] = Field(
         min_length=2,
@@ -336,6 +366,13 @@ class DraftingResult(BaseModel):
     tender_facts_used: list[str] = Field(
         min_length=1,
         description=("Every applicable tender fact used in the response, copied as complete " "verbatim items from TENDER FACTS."),
+    )
+    field_claims: list[DraftingFieldClaim] = Field(
+        default_factory=list,
+        description=(
+            "Atomic material values/claims, each tied to one document block and "
+            "the exact manual, tender, or instruction support used for it."
+        ),
     )
 
 

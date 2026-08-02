@@ -181,14 +181,14 @@ def validate_run(
     return report
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
     """Validate one completed run and return a release-oriented exit code."""
     parser = argparse.ArgumentParser()
     parser.add_argument("files_dir", type=Path)
     parser.add_argument("--working-dir", type=Path)
     parser.add_argument("--reviews", type=Path)
     parser.add_argument("--output", type=Path)
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     report = validate_run(args.files_dir, args.working_dir, args.reviews)
     if args.output:
         write_jsonl_rows(args.output, [report])

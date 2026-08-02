@@ -19,12 +19,19 @@ from typing import Any
 from datasets import Dataset
 
 from settings import CONFIG, PROJECT_ROOT, require_private_endpoint, require_setting
-from corpus import corpus_quality_report, load_corpus, representative_rows, source_quality_issues
+from corpus import (
+    corpus_quality_report,
+    load_corpus,
+    representative_rows,
+    selection_coverage_report,
+    source_quality_issues,
+)
 from cross_document import build_bundles
 from cross_stage import (
     CrossDocumentGenerator,
     SingularCrossDocumentJudge,
     cross_judge_rows,
+    select_best_cross_candidates,
 )
 from drafting import (
     TenderDraftingGenerator,
@@ -35,6 +42,11 @@ from drafting import (
     write_jsonl,
 )
 from export import assert_unique_record_ids, assign_splits, export_records, write_manifest
+from evaluation import (
+    frozen_overlap_issues,
+    load_frozen_evaluation,
+    validate_manual_folds,
+)
 from jsonl_io import write_jsonl_rows
 from propositions import (
     PropositionExtractor,
@@ -43,6 +55,8 @@ from propositions import (
     write_proposition_cache,
 )
 from reasoning_paths import build_reasoning_paths
+from retrieval_contexts import build_retrieval_contexts
+from saturation import SaturationController, saturation_policy
 from semantic_diversity import run_semantic_diversity
 from temporal import (
     TemporalAlignmentJudge,
@@ -56,6 +70,11 @@ from temporal import (
 from resume import ResumeManager
 from source_windows import build_source_windows
 from structure_probe import require_successful_structure_probe
+from unanswerable import (
+    AdversarialUnanswerableGenerator,
+    IndependentAnswerabilityJudge,
+    build_unanswerable_inputs,
+)
 from path_qa import (
     SourceAblationAnswerGenerator,
     SourceAblationJudge,
@@ -120,6 +139,8 @@ LLM_STAGE_NAMES = {
     "cross_judge",
     "drafting_generation",
     "drafting_judge",
+    "unanswerable_generation",
+    "answerability_judge",
 }
 
 QUESTION_TYPE_ANSWER_FORMAT = {
@@ -239,15 +260,31 @@ def _finalize_unfinished_attempt() -> None:
 atexit.register(_finalize_unfinished_attempt)
 
 
-def _role_profile(role: str) -> dict[str, Any]:
+def _role_profile(
+    role: str,
+    profile_name: str | None = None,
+) -> dict[str, Any]:
     """Resolve a named endpoint profile selected through the environment."""
     role_settings = CONFIG["models"][role]
-    profile_name = os.environ.get(role_settings["profile_env"], role_settings["default_profile"]).strip()
+    selected_name = (
+        profile_name
+        if profile_name is not None
+        else os.environ.get(
+            role_settings["profile_env"], role_settings["default_profile"]
+        ).strip()
+    )
     profiles = CONFIG.get("model_profiles", {})
-    if profile_name not in profiles:
+    if selected_name not in profiles:
         available = ", ".join(sorted(profiles))
-        raise SystemExit(f"Unknown {role} model profile {profile_name!r}; available: {available}")
-    return {**role_settings, **profiles[profile_name], "profile_name": profile_name}
+        raise SystemExit(
+            f"Unknown {role} model profile {selected_name!r}; "
+            f"available: {available}"
+        )
+    return {
+        **role_settings,
+        **profiles[selected_name],
+        "profile_name": selected_name,
+    }
 
 
 GENERATION = _role_profile("generation")
@@ -1239,6 +1276,8 @@ def _final_manifest(
     temporal_stats: dict[str, Any] | None = None,
     judge_batch_integrity_rejections: dict[str, int] | None = None,
     semantic_diversity_stats: dict[str, Any] | None = None,
+    unanswerable_stats: dict[str, Any] | None = None,
+    evaluation_stats: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return {
         "run_id": run_id,
@@ -1265,6 +1304,8 @@ def _final_manifest(
         "path_qa": path_qa_stats or {"enabled": False},
         "temporal": temporal_stats or {"enabled": False},
         "semantic_diversity": semantic_diversity_stats or {"enabled": False},
+        "adversarial_unanswerable": unanswerable_stats or {"enabled": False},
+        "evaluation": evaluation_stats or {"frozen_external": {"verified": False}},
         "judge_batch_integrity_rejections": judge_batch_integrity_rejections
         or {"single_document": 0, "cross_document": 0},
         "near_duplicates_removed": duplicates,
@@ -1307,7 +1348,154 @@ def _require_structure_probes_for_run(args: argparse.Namespace) -> None:
         require_successful_structure_probe(CACHE_ROOT, "judge", JUDGE)
 
 
-def main() -> None:
+def _execute_cross_pass(
+    planned: list[dict[str, Any]],
+    args: argparse.Namespace,
+    files_dir: Path,
+    pass_index: int,
+) -> dict[str, Any]:
+    """Execute and reconcile one independently checkpointed novelty pass."""
+    generation_stage = f"cross_generation_pass_{pass_index:03d}"
+    judge_stage = f"cross_judge_pass_{pass_index:03d}"
+    os.environ["HOSTED_VLLM_API_KEY"] = _model_settings(GENERATION)[2]
+    raw_generated = _execute_llm_stage(
+        generation_stage,
+        "generation",
+        CrossDocumentGenerator(**_llm_kwargs(GENERATION)),
+        planned,
+    )
+    successful_parent_ids = {
+        str(row.get("parent_request_id", ""))
+        for row in raw_generated
+        if row.get("parent_request_id")
+    }
+    generated_audit = materialize_terminal_failures(
+        planned,
+        raw_generated,
+        planned_id=lambda row: row["planned_request_id"],
+        record_id=lambda row: row.get("parent_request_id"),
+        stage=generation_stage,
+        base_fields=lambda row: {
+            "parent_request_id": row["planned_request_id"],
+            "planned_task_type": row["planned_task_type"],
+            "task_type": row["planned_task_type"],
+            "answerable": row["planned_answerable"],
+            "source_bundle_id": row["source_bundle_id"],
+        },
+    )
+    _write_audit(
+        files_dir / f"cross_generated_audit_pass_{pass_index:03d}.jsonl",
+        generated_audit,
+    )
+    deterministic_rejected = [
+        row
+        for row in generated_audit
+        if not row.get("deterministic_checks", {}).get("passed", False)
+    ]
+    valid_before_dedupe = [
+        row
+        for row in generated_audit
+        if row.get("deterministic_checks", {}).get("passed", False)
+    ]
+    valid_parent_ids = {
+        str(row.get("parent_request_id", "")) for row in valid_before_dedupe
+    }
+    generated, duplicates = deduplicate(
+        valid_before_dedupe,
+        float(QUALITY.get("dedupe_threshold", 94)),
+    )
+    judged: list[dict[str, Any]] = []
+    judge_prompt_rejected: list[dict[str, Any]] = []
+    best_of_rejected: list[dict[str, Any]] = []
+    if args.skip_judge:
+        accepted = generated
+    elif generated:
+        os.environ["HOSTED_VLLM_API_KEY"] = _model_settings(JUDGE)[2]
+        judge = SingularCrossDocumentJudge(**_llm_kwargs(JUDGE))
+        budgeted, judge_prompt_rejected = _budget_judge_rows(
+            judge,
+            cross_judge_rows(generated, _singular_judge_batch_size()),
+            JUDGE,
+        )
+        _write_audit(
+            files_dir
+            / f"cross_judge_prompt_rejected_pass_{pass_index:03d}.jsonl",
+            judge_prompt_rejected,
+        )
+        if budgeted:
+            judged = _execute_llm_stage(
+                judge_stage,
+                "judge",
+                judge,
+                budgeted,
+            )
+        # A missing, prompt-quarantined, or malformed independent judgment is
+        # not evidence that the family is saturated. Only parents reaching a
+        # schema-valid judge terminal state remain eligible observations.
+        valid_parent_ids &= {
+            str(row.get("parent_request_id", ""))
+            for row in judged
+            if row.get("judge", {}).get("batch_integrity_passed") is not False
+        }
+        accepted, best_of_rejected = select_best_cross_candidates(
+            [row for row in judged if row["judge"]["accepted"]]
+        )
+    rejected = deterministic_rejected + best_of_rejected + (
+        []
+        if args.skip_judge
+        else judge_prompt_rejected
+        + _rejected_records(
+            [
+                row
+                for row in generated
+                if row["record_id"]
+                not in {
+                    rejected["record_id"]
+                    for rejected in judge_prompt_rejected
+                }
+            ],
+            judged,
+        )
+    )
+    return {
+        "planned": planned,
+        "generated_audit": generated_audit,
+        "generated": generated,
+        "judged": judged,
+        "accepted": accepted,
+        "rejected": rejected,
+        "judge_prompt_rejected": judge_prompt_rejected,
+        "duplicates": duplicates,
+        "successful_parent_ids": successful_parent_ids,
+        "valid_parent_ids": valid_parent_ids,
+    }
+
+
+def _require_corpus_provenance_for_run(
+    args: argparse.Namespace,
+    manuals: list[dict[str, Any]],
+) -> None:
+    """Require revision-complete OCR lineage before an unbounded run."""
+    registry = CONFIG.get("source_registry", {})
+    if (
+        args.limit is not None
+        or not registry.get("require_complete_ocr_provenance_for_full_runs", True)
+    ):
+        return
+    incomplete = sorted(
+        str(manual["manual_id"])
+        for manual in manuals
+        if manual.get("ocr_provenance")
+        and manual["ocr_provenance"].get("status") != "complete"
+    )
+    if incomplete:
+        raise SystemExit(
+            "Full run blocked: regenerate revision-complete OCR provenance for "
+            + ", ".join(incomplete)
+        )
+
+
+def main(argv: list[str] | None = None) -> None:
     """Run single- and cross-document generation through verified exports."""
     global _RESUME_MANAGER, _RUN_ATTEMPT_TERMINAL
     global _RUN_STARTED_AT, _RUN_STARTED_MONOTONIC
@@ -1333,17 +1521,46 @@ def main() -> None:
     parser.add_argument(
         "--refresh-stage",
         action="append",
-        choices=sorted(LLM_STAGE_NAMES),
         default=[],
         help=(
             "Ignore a completed logical checkpoint for this stage while retaining "
             "its historical files. May be repeated."
         ),
     )
-    args = parser.parse_args()
+    parser.add_argument(
+        "--max-passes",
+        type=int,
+        help="Override the bounded saturation pass limit",
+    )
+    args = parser.parse_args(argv)
+    dynamic_stage = re.compile(r"cross_(?:generation|judge)_pass_\d{3}")
+    invalid_refresh = [
+        stage
+        for stage in args.refresh_stage
+        if stage not in LLM_STAGE_NAMES and not dynamic_stage.fullmatch(stage)
+    ]
+    if invalid_refresh:
+        parser.error(
+            "unknown --refresh-stage value(s): " + ", ".join(invalid_refresh)
+        )
+    if args.max_passes is not None and args.max_passes < 1:
+        parser.error("--max-passes must be at least 1")
     _require_structure_probes_for_run(args)
     run_id, files_dir = _run_layout(args.run_id)
     _RUN_ATTEMPT_TERMINAL = False
+    refresh_stages = set(args.refresh_stage)
+    refresh_passes = max(
+        1,
+        args.max_passes
+        or int(CONFIG.get("saturation", {}).get("max_passes", 1)),
+        int(CONFIG.get("cross_document", {}).get("novelty_passes", 0)) + 1,
+    )
+    for base_stage in ("cross_generation", "cross_judge"):
+        if base_stage in refresh_stages:
+            refresh_stages.update(
+                f"{base_stage}_pass_{index:03d}"
+                for index in range(1, refresh_passes + 1)
+            )
     _RESUME_MANAGER = ResumeManager(
         run_id=run_id,
         output_root=OUTPUT_ROOT,
@@ -1352,12 +1569,27 @@ def main() -> None:
         pipeline_dir=Path(__file__).resolve().parent,
         generation_profile=GENERATION,
         judge_profile=JUDGE,
-        refresh_stages=set(args.refresh_stage),
+        refresh_stages=refresh_stages,
     )
     running_manifest = _RESUME_MANAGER.start()
     write_manifest(files_dir, running_manifest)
 
     all_rows, manuals = load_corpus(args.source_dir.resolve(), args.ocr_dir.resolve())
+    _require_corpus_provenance_for_run(args, manuals)
+    manual_folds = validate_manual_folds(
+        manuals,
+        SPLITS.get("manual_folds", {}),
+    )
+    frozen_required = bool(
+        args.limit is None
+        and CONFIG.get("evaluation", {})
+        .get("frozen_external", {})
+        .get("required_for_full_runs", True)
+    )
+    frozen_evaluation, frozen_registry = load_frozen_evaluation(
+        CONFIG,
+        required=frozen_required,
+    )
     corpus_report = corpus_quality_report(all_rows, manuals)
     (files_dir / "corpus_quality.json").write_text(
         json.dumps(corpus_report, ensure_ascii=False, indent=2) + "\n",
@@ -1398,6 +1630,11 @@ def main() -> None:
         }
     seed = str(SPLITS.get("seed", "nrl-procurement-v1"))
     rows = representative_rows(all_rows, args.limit, seed)
+    corpus_report["selection_coverage"] = selection_coverage_report(all_rows, rows)
+    (files_dir / "corpus_quality.json").write_text(
+        json.dumps(corpus_report, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
     temporal_config = CONFIG.get("temporal", {})
     resolved_temporal = None
     if temporal_config.get("enabled", False):
@@ -2177,11 +2414,24 @@ def main() -> None:
     cross_accepted: list[dict[str, Any]] = []
     cross_generated: list[dict[str, Any]] = []
     cross_generated_audit: list[dict[str, Any]] = []
-    cross_deterministic_rejected: list[dict[str, Any]] = []
     cross_judged: list[dict[str, Any]] = []
     cross_judge_prompt_rejected: list[dict[str, Any]] = []
+    cross_rejected: list[dict[str, Any]] = []
     planned_cross: list[dict[str, Any]] = []
     cross_duplicates = 0
+    configured_novelty_passes = int(cross_config.get("novelty_passes", 0))
+    pass_override = args.max_passes
+    if pass_override is None and configured_novelty_passes > 0:
+        pass_override = configured_novelty_passes + 1
+    cross_policy = saturation_policy(
+        CONFIG,
+        max_passes_override=pass_override,
+    )
+    cross_saturation = SaturationController(
+        cross_policy,
+        "cross_document",
+        files_dir / "saturation" / "cross_document.json",
+    )
     if cross_config.get("enabled", False) and not args.skip_cross_document:
         bundles = build_bundles(all_rows, cross_config)
         cross_limit = args.cross_document_limit if args.cross_document_limit is not None else args.limit
@@ -2190,66 +2440,100 @@ def main() -> None:
                 bundles,
                 key=lambda row: hashlib.sha256(f"{seed}:{row['source_bundle_id']}".encode()).hexdigest(),
             )[:cross_limit]
-        planned_cross = plan_cross_document_requests(bundles, seed)
+        base_planned_cross = plan_cross_document_requests(bundles, seed)
         if bundles:
-            os.environ["HOSTED_VLLM_API_KEY"] = _model_settings(GENERATION)[2]
-            cross_generated_audit = _execute_llm_stage(
-                "cross_generation",
-                "generation",
-                CrossDocumentGenerator(**_llm_kwargs(GENERATION)),
-                planned_cross,
-            )
-            cross_generated_audit = materialize_terminal_failures(
-                planned_cross,
-                cross_generated_audit,
-                planned_id=lambda row: row["planned_request_id"],
-                record_id=lambda row: row.get("parent_request_id"),
-                stage="cross_generation",
-                base_fields=lambda row: {
-                    "parent_request_id": row["planned_request_id"],
-                    "planned_task_type": row["planned_task_type"],
-                    "task_type": row["planned_task_type"],
-                    "answerable": row["planned_answerable"],
-                    "source_bundle_id": row["source_bundle_id"],
-                },
-            )
+            for pass_index in range(1, cross_policy.max_passes + 1):
+                if pass_index > cross_saturation.next_pass or (
+                    pass_index == cross_saturation.next_pass
+                    and not cross_saturation.should_continue
+                ):
+                    break
+                prior_by_bundle: dict[str, list[str]] = {}
+                for record in cross_accepted:
+                    prior_by_bundle.setdefault(
+                        str(record["source_bundle_id"]), []
+                    ).append(str(record["question"]))
+                planned_pass = [
+                    {
+                        **row,
+                        "planned_request_id": (
+                            row["planned_request_id"]
+                            if pass_index == 1
+                            else f"{row['planned_request_id']}-p{pass_index:03d}"
+                        ),
+                        "novelty_pass": pass_index,
+                        "prior_questions": prior_by_bundle.get(
+                            str(row["source_bundle_id"]), []
+                        ),
+                    }
+                    for row in base_planned_cross
+                ]
+                pass_result = _execute_cross_pass(
+                    planned_pass,
+                    args,
+                    files_dir,
+                    pass_index,
+                )
+                planned_cross.extend(planned_pass)
+                cross_generated_audit.extend(pass_result["generated_audit"])
+                cross_generated.extend(pass_result["generated"])
+                cross_judged.extend(pass_result["judged"])
+                cross_judge_prompt_rejected.extend(
+                    pass_result["judge_prompt_rejected"]
+                )
+                cross_rejected.extend(pass_result["rejected"])
+                cross_duplicates += int(pass_result["duplicates"])
+
+                combined, removed = deduplicate(
+                    [*cross_accepted, *pass_result["accepted"]],
+                    float(QUALITY.get("dedupe_threshold", 94)),
+                )
+                prior_ids = {
+                    str(row["record_id"]) for row in cross_accepted
+                }
+                kept_ids = {str(row["record_id"]) for row in combined}
+                novel = [
+                    row
+                    for row in pass_result["accepted"]
+                    if str(row["record_id"]) in kept_ids
+                    and str(row["record_id"]) not in prior_ids
+                ]
+                cross_rejected.extend(
+                    {
+                        **row,
+                        "novelty_selection": {
+                            "accepted": False,
+                            "issues": ["duplicate_of_prior_pass"],
+                        },
+                    }
+                    for row in pass_result["accepted"]
+                    if str(row["record_id"]) not in kept_ids
+                    or str(row["record_id"]) in prior_ids
+                )
+                cross_duplicates += removed
+                cross_accepted.extend(novel)
+                if pass_index == cross_saturation.next_pass:
+                    planned_ids = {
+                        str(row["planned_request_id"]) for row in planned_pass
+                    }
+                    cross_saturation.observe(
+                        pass_index=pass_index,
+                        planned=len(planned_ids),
+                        successful=len(
+                            planned_ids & pass_result["successful_parent_ids"]
+                        ),
+                        valid=len(planned_ids & pass_result["valid_parent_ids"]),
+                        accepted_novel=len(
+                            {
+                                str(row["parent_request_id"])
+                                for row in novel
+                            }
+                        ),
+                    )
             _write_audit(
                 files_dir / "cross_generated_audit.jsonl",
                 cross_generated_audit,
             )
-            cross_deterministic_rejected = [row for row in cross_generated_audit if not row.get("deterministic_checks", {}).get("passed", False)]
-            cross_generated = [row for row in cross_generated_audit if row.get("deterministic_checks", {}).get("passed", False)]
-            cross_generated, cross_duplicates = deduplicate(cross_generated, float(QUALITY.get("dedupe_threshold", 94)))
-            if args.skip_judge:
-                cross_accepted = cross_generated
-            elif cross_generated:
-                judge_profile = JUDGE
-                os.environ["HOSTED_VLLM_API_KEY"] = _model_settings(judge_profile)[2]
-                judge_batch_size = _singular_judge_batch_size()
-                cross_judge = SingularCrossDocumentJudge(
-                    **_llm_kwargs(judge_profile)
-                )
-                budgeted_cross_rows, cross_judge_prompt_rejected = (
-                    _budget_judge_rows(
-                        cross_judge,
-                        cross_judge_rows(
-                            cross_generated, judge_batch_size
-                        ),
-                        judge_profile,
-                    )
-                )
-                _write_audit(
-                    files_dir / "cross_judge_prompt_rejected.jsonl",
-                    cross_judge_prompt_rejected,
-                )
-                if budgeted_cross_rows:
-                    cross_judged = _execute_llm_stage(
-                        "cross_judge",
-                        "judge",
-                        cross_judge,
-                        budgeted_cross_rows,
-                    )
-                cross_accepted = [row for row in cross_judged if row["judge"]["accepted"]]
     cross_coverage = {
         "generated": request_coverage(planned_cross, cross_generated_audit),
         "judged": request_coverage(
@@ -2258,27 +2542,130 @@ def main() -> None:
         ),
         "accepted": request_coverage(planned_cross, cross_accepted),
     }
-    cross_rejected = cross_deterministic_rejected + (
-            []
-            if args.skip_judge
-            else cross_judge_prompt_rejected
-            + _rejected_records(
-                [
-                    row
-                    for row in cross_generated
-                    if row["record_id"]
-                    not in {
-                        rejected["record_id"]
-                        for rejected in cross_judge_prompt_rejected
-                    }
-                ],
-                cross_judged,
-            )
-        )
     _write_audit(files_dir / "cross_rejected.jsonl", cross_rejected)
 
     accepted.extend(cross_accepted)
     accepted.extend(promoted_path_records)
+    unanswerable_stats: dict[str, Any] = {"enabled": False}
+    unanswerable_inputs = build_unanswerable_inputs(
+        single_accepted,
+        float(QUALITY.get("unanswerable_fraction", 0.0)),
+        seed,
+    )
+    if unanswerable_inputs:
+        if args.skip_judge:
+            raise SystemExit(
+                "Adversarial unanswerable generation requires the independent judge"
+            )
+        os.environ["HOSTED_VLLM_API_KEY"] = _model_settings(GENERATION)[2]
+        unanswerable_audit = _execute_llm_stage(
+            "unanswerable_generation",
+            "generation",
+            AdversarialUnanswerableGenerator(**_llm_kwargs(GENERATION)),
+            unanswerable_inputs,
+        )
+        unanswerable_audit = materialize_terminal_failures(
+            unanswerable_inputs,
+            unanswerable_audit,
+            planned_id=lambda row: row["construction_id"],
+            record_id=lambda row: row.get("source_construction_id"),
+            stage="unanswerable_generation",
+            base_fields=lambda row: {
+                "source_construction_id": row["construction_id"],
+                "source_answerable_record_id": row["seed_record"]["record_id"],
+                "distractor_record_id": row["distractor_record_id"],
+            },
+        )
+        _write_audit(
+            files_dir / "unanswerable_generated_audit.jsonl",
+            unanswerable_audit,
+        )
+        deterministic_unanswerable = [
+            row
+            for row in unanswerable_audit
+            if row.get("deterministic_checks", {}).get("passed", False)
+        ]
+        answerability_judged: list[dict[str, Any]] = []
+        prompt_rejected: list[dict[str, Any]] = []
+        judge_profile = JUDGE
+        answerability_judge = IndependentAnswerabilityJudge(
+            **_llm_kwargs(judge_profile)
+        )
+        budgeted = []
+        for row in deterministic_unanswerable:
+            budget = _judge_prompt_budget(answerability_judge, row, judge_profile)
+            if budget["passed"]:
+                budgeted.append({**row, "prompt_budget": budget})
+            else:
+                prompt_rejected.append(
+                    {
+                        **row,
+                        "answerability_judge": {
+                            "accepted": False,
+                            "issues": [
+                                "answerability_prompt_exceeds_context_window"
+                            ],
+                        },
+                    }
+                )
+        if budgeted:
+            os.environ["HOSTED_VLLM_API_KEY"] = _model_settings(judge_profile)[2]
+            answerability_judged = _execute_llm_stage(
+                "answerability_judge",
+                "judge",
+                answerability_judge,
+                budgeted,
+            )
+        promoted_unanswerable = [
+            row
+            for row in answerability_judged
+            if row.get("answerability_judge", {}).get("accepted", False)
+        ]
+        judged_ids = {str(row["record_id"]) for row in answerability_judged}
+        rejected_unanswerable = [
+            row
+            for row in unanswerable_audit
+            if not row.get("deterministic_checks", {}).get("passed", False)
+        ]
+        rejected_unanswerable.extend(prompt_rejected)
+        rejected_unanswerable.extend(
+            row
+            for row in answerability_judged
+            if not row.get("answerability_judge", {}).get("accepted", False)
+        )
+        rejected_unanswerable.extend(
+            {
+                **row,
+                "answerability_judge": {
+                    "accepted": False,
+                    "issues": ["missing_answerability_judge_response"],
+                },
+            }
+            for row in deterministic_unanswerable
+            if str(row["record_id"]) not in judged_ids
+            and all(
+                str(row["record_id"]) != str(rejected.get("record_id"))
+                for rejected in prompt_rejected
+            )
+        )
+        _write_audit(
+            files_dir / "answerability_judged_audit.jsonl",
+            answerability_judged,
+        )
+        _write_audit(
+            files_dir / "unanswerable_rejected.jsonl",
+            rejected_unanswerable,
+        )
+        accepted.extend(promoted_unanswerable)
+        unanswerable_stats = {
+            "enabled": True,
+            "planned": len(unanswerable_inputs),
+            "deterministic_valid": len(deterministic_unanswerable),
+            "independently_judged": len(answerability_judged),
+            "accepted": len(promoted_unanswerable),
+            "rejected": len(rejected_unanswerable),
+            "target_fraction": float(QUALITY.get("unanswerable_fraction", 0.0)),
+        }
     if not accepted:
         write_manifest(
             files_dir,
@@ -2335,6 +2722,17 @@ def main() -> None:
     )
     if not accepted:
         raise SystemExit("Semantic selection removed every accepted record")
+    retrieval_contexts = build_retrieval_contexts(accepted, all_rows, seed)
+    _write_audit(
+        files_dir / "retrieval_evaluation_contexts.jsonl",
+        retrieval_contexts,
+    )
+    frozen_overlap = frozen_overlap_issues(accepted, frozen_evaluation)
+    if any(frozen_overlap.values()):
+        raise SystemExit(
+            "Generated records overlap the frozen external evaluation set: "
+            + json.dumps(frozen_overlap, sort_keys=True)
+        )
     for record in accepted:
         record.pop("_source_passage", None)
     assert_unique_record_ids(accepted, key="record_id", dataset_name="accepted procurement records")
@@ -2349,6 +2747,7 @@ def main() -> None:
         train_fraction,
         validation_fraction,
         str(SPLITS.get("seed", "nrl-procurement-v1")),
+        manual_folds=manual_folds,
     )
     stats = export_records(accepted, manuals, files_dir, run_id)
 
@@ -2493,6 +2892,11 @@ def main() -> None:
         and not incomplete_requests
         and missing_temporal_judge_responses == 0
         and portfolio_quality_complete
+        and (
+            not cross_policy.enabled
+            or args.skip_cross_document
+            or cross_saturation.state["converged"]
+        )
         else "partial"
     )
     final_manifest = _final_manifest(
@@ -2515,12 +2919,22 @@ def main() -> None:
         path_qa_stats=path_qa_stats,
         temporal_stats=temporal_stats,
         semantic_diversity_stats=semantic_stats,
+        unanswerable_stats=unanswerable_stats,
+        evaluation_stats={
+            "manual_folds": manual_folds,
+            "frozen_external": frozen_registry,
+            "frozen_overlap": frozen_overlap,
+            "generated_validation_and_test_are_development_only": True,
+        },
         judge_batch_integrity_rejections={
             "single_document": _batch_integrity_rejections(judged),
             "cross_document": _batch_integrity_rejections(cross_judged),
         },
     )
     final_manifest["required_task_type_counts"] = task_counts
+    final_manifest["saturation"] = {
+        "cross_document": cross_saturation.summary(),
+    }
     final_manifest["missing_required_task_types"] = required_missing
     final_manifest["terminal_request_completeness"] = {
         "complete": (

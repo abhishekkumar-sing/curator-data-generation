@@ -14,6 +14,15 @@ curator:
 structured_output_probe:
   required_for_full_runs: true
 
+# Optional bounded multi-pass generation. Enabling this never permits an
+# unbounded loop: marginal novelty must remain below the configured gain for
+# `patience` complete, schema-valid passes, and `max_passes` is always hard.
+saturation:
+  enabled: false
+  max_passes: 3
+  minimum_novelty_gain: 0.05
+  patience: 2
+
 paths:
   source_dir: data/source
   ocr_dir: data/interim/ocr
@@ -119,20 +128,25 @@ models:
   ocr:
     engine: chandra
     model_env: OCR_MODEL
+    model_revision_env: OCR_MODEL_REVISION
+    package_revision_env: OCR_PACKAGE_REVISION
     base_url_env: OCR_BASE_URL
     api_key_env: OCR_API_KEY
     private_endpoint_only: true
     command_env: OCR_COMMAND
     output_dir_env: OCR_OUTPUT_DIR
 
+source_registry:
+  require_complete_ocr_provenance_for_full_runs: true
+
 quality:
   # CoT candidates have a lower validation/judge survival rate than direct QA.
   # Plan 40% so the accepted pool can meet the separate 20% release floor.
   qa_cot_fraction: 0.40
   cross_qa_cot_fraction: 0.25
-  # Disabled until a dedicated adversarial construction and independent
-  # answerability-verification stage is implemented.
-  unanswerable_fraction: 0.0
+  # Constructed only from accepted answerable seeds plus same-type distractors,
+  # then promoted by an independent full-context answerability judge.
+  unanswerable_fraction: 0.10
   minimum_judge_score: 4
   # The configured Gemma judge server has an 8,192-token runtime context.
   judge_batch_size: 1
@@ -338,7 +352,10 @@ drafting:
 # only proposes passages within these pairs; it never establishes legal equivalence.
 cross_document:
   enabled: true
-  examples_per_bundle: 1
+  # Generate siblings, judge each independently, then retain the strongest one
+  # with auditable loser reasons.
+  best_of_n: 3
+  novelty_passes: 0
   minimum_similarity: 12
   minimum_shared_terms: 5
   max_bundles_per_pair: 25
@@ -385,3 +402,31 @@ splits:
   validation: 0.1
   test: 0.1
   seed: nrl-procurement-v1
+  require_explicit_manual_folds_for_full_runs: true
+  manual_folds:
+    goods_2017: train
+    goods_2022: train
+    goods_2024: train
+    goods_om_2018_issuance: train
+    goods_om_2021_networth: validation
+    goods_om_2022_l1_withdrawal: train
+    services_2017: train
+    services_2022: train
+    services_consultancy_2025: train
+    services_non_consultancy_2025: train
+    services_om_2021_startup_definition: validation
+    works_2019: train
+    works_2022: train
+    works_2025: train
+    works_om_2022_corrigendum_pqb: test
+    works_om_2022_para763_certification: test
+    nrl_goods_rev1: train
+    nrl_works_rev1: train
+    nrl_consultancy_other_services_rev1: train
+
+evaluation:
+  frozen_external:
+    path: data/evaluation/frozen_human_reviewed.jsonl
+    sha256: null
+    required_for_full_runs: true
+  baseline_path: data/evaluation/regression_baseline.json

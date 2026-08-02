@@ -11,6 +11,7 @@ PIPELINE = Path(__file__).resolve().parents[2] / "pipelines" / "nrl_procurement"
 sys.path.insert(0, str(PIPELINE))
 
 import generate as generation_pipeline  # noqa: E402
+import probe_structure as probe_cli  # noqa: E402
 from structure_probe import (  # noqa: E402
     EndpointStructureProbe,
     StructureProbeEnvelope,
@@ -167,3 +168,49 @@ def test_full_run_requires_both_roles_but_bounded_pilot_does_not(
         Namespace(limit=None, skip_judge=True)
     )
     assert calls == ["generation"]
+
+
+def test_probe_cli_resolves_each_explicit_role_profile(monkeypatch) -> None:
+    monkeypatch.setattr(
+        probe_cli,
+        "CONFIG",
+        {"model_profiles": {"alpha": {}, "beta": {}}},
+    )
+    monkeypatch.setattr(
+        probe_cli,
+        "_role_profile",
+        lambda role, name: {"profile_name": name, "role": role},
+    )
+    args = Namespace(
+        role=["generation", "judge"],
+        generation_profile=["alpha"],
+        judge_profile=["beta"],
+        all_configured_profiles=False,
+    )
+    assert probe_cli.selected_probe_profiles(args) == [
+        ("generation", {"profile_name": "alpha", "role": "generation"}),
+        ("judge", {"profile_name": "beta", "role": "judge"}),
+    ]
+
+
+def test_probe_cli_can_resolve_every_profile_for_each_role(monkeypatch) -> None:
+    monkeypatch.setattr(
+        probe_cli,
+        "CONFIG",
+        {"model_profiles": {"beta": {}, "alpha": {}}},
+    )
+    monkeypatch.setattr(
+        probe_cli,
+        "_role_profile",
+        lambda role, name: {"profile_name": name},
+    )
+    args = Namespace(
+        role=["judge"],
+        generation_profile=[],
+        judge_profile=[],
+        all_configured_profiles=True,
+    )
+    assert probe_cli.selected_probe_profiles(args) == [
+        ("judge", {"profile_name": "alpha"}),
+        ("judge", {"profile_name": "beta"}),
+    ]

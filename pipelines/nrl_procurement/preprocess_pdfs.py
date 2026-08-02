@@ -5,9 +5,12 @@ import hashlib
 import importlib.metadata
 import json
 import os
+import re
 import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 
+from pypdf import PdfReader
 from settings import CONFIG, PROJECT_ROOT, require_private_endpoint, require_setting
 
 PATH_CONFIG = CONFIG["paths"]
@@ -27,6 +30,8 @@ def _write_provenance(
     pdf: Path,
     output_dir: Path,
     model: str,
+    model_revision: str,
+    package_revision: str,
     command: list[str],
     batch_size: int,
     max_workers: int,
@@ -40,17 +45,29 @@ def _write_provenance(
     except importlib.metadata.PackageNotFoundError:
         package_version = "unknown"
     payload = {
+        "contract_version": "nrl-ocr-provenance-v2",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
         "source_file": str(pdf),
         "source_sha256": _sha256(pdf),
+        "source_page_count": len(PdfReader(str(pdf)).pages),
         "model": model,
+        "model_revision": model_revision,
         "engine": command[0],
         "chandra_ocr_version": package_version,
+        "package_revision": package_revision,
         "method": "vllm",
         "batch_size": batch_size,
         "max_workers": max_workers,
         "arguments": command[3:],
         "markdown_file": str(markdown[0].relative_to(output_dir)),
         "markdown_sha256": _sha256(markdown[0]),
+        "markdown_page_count": len(
+            re.findall(
+                r"(?m)^\s*\d+-{20,}\s*$",
+                markdown[0].read_text(encoding="utf-8"),
+            )
+        )
+        + 1,
         "metadata_file": (str(metadata[0].relative_to(output_dir)) if len(metadata) == 1 else None),
         "metadata_sha256": _sha256(metadata[0]) if len(metadata) == 1 else None,
     }
@@ -75,6 +92,8 @@ def main() -> None:
     base_url_name = OCR_CONFIG["base_url_env"]
     base_url = require_private_endpoint(base_url_name) if OCR_CONFIG.get("private_endpoint_only", True) else require_setting(base_url_name)
     model = require_setting(OCR_CONFIG["model_env"])
+    model_revision = require_setting(OCR_CONFIG["model_revision_env"])
+    package_revision = require_setting(OCR_CONFIG["package_revision_env"])
     api_key = require_setting(OCR_CONFIG["api_key_env"])
     command_env = OCR_CONFIG["command_env"]
     ocr_command = os.environ.get(command_env, OCR_CONFIG["engine"]).strip() or OCR_CONFIG["engine"]
@@ -119,6 +138,8 @@ def main() -> None:
             pdf,
             output_dir.resolve(),
             model,
+            model_revision,
+            package_revision,
             command,
             args.batch_size,
             args.max_workers,

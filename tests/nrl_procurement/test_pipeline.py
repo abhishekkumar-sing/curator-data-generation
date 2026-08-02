@@ -98,6 +98,7 @@ from schemas import (  # noqa: E402
     CrossJudgeBatch,
     CrossJudgedCandidate,
     DraftingBlock,
+    DraftingFieldClaim,
     DraftingResult,
     GroundedCandidateDraft,
     JudgeBatch,
@@ -2126,6 +2127,22 @@ def test_drafting_seed_resolution_validation_and_compact_output(tmp_path: Path) 
         ],
         manual_evidence_quotes=["LD is 0.5% per week and capped at 5% of delayed goods."],
         tender_facts_used=["Tender mode: Limited."],
+        field_claims=[
+            DraftingFieldClaim(
+                block_index=1,
+                field_name="liquidated damages rule",
+                value="LD is 0.5% per week and capped at 5% of delayed goods.",
+                manual_evidence_quotes=[
+                    "LD is 0.5% per week and capped at 5% of delayed goods."
+                ],
+            ),
+            DraftingFieldClaim(
+                block_index=2,
+                field_name="tender mode",
+                value="Limited",
+                tender_facts_used=["Tender mode: Limited."],
+            ),
+        ],
     )
     assert drafting_validation_issues(inputs[0], result) == []
     compact = compact_drafting(
@@ -2134,6 +2151,7 @@ def test_drafting_seed_resolution_validation_and_compact_output(tmp_path: Path) 
             "citations": ["chunk-1", "tender-1"],
             "context": [*inputs[0]["tender_context"], *result.manual_evidence_quotes],
             "response": "\n\n".join(block.text for block in result.document_blocks),
+            "field_claims": [claim.model_dump() for claim in result.field_claims],
             "citation_details": [
                 {
                     "citation_id": "chunk-1",
@@ -2144,9 +2162,11 @@ def test_drafting_seed_resolution_validation_and_compact_output(tmp_path: Path) 
                     "quote": "LD is 0.5% per week and capped at 5% of delayed goods.",
                 },
                 {
-                    "citation_id": "tender-1",
+                    "citation_id": "tender-1:fact:typed",
                     "source_type": "tender_seed",
                     "tender_id": "tender-1",
+                    "fact_index": 0,
+                    "fact": "Tender mode: Limited.",
                 },
             ],
         }
@@ -2158,11 +2178,103 @@ def test_drafting_seed_resolution_validation_and_compact_output(tmp_path: Path) 
         "instruction",
         "context",
         "response",
+        "field_claims",
         "citation_details",
         "citations",
     ]
     assert compact["citations"] == ["chunk-1", "tender-1"]
-    assert inputs[0]["candidate_citation_ids"] == ["chunk-1", "tender-1"]
+    assert inputs[0]["candidate_citation_ids"][0] == "chunk-1"
+    assert inputs[0]["candidate_citation_ids"][1].startswith(
+        "tender-1:fact:"
+    )
+
+
+def test_drafting_field_claims_and_tender_citations_are_atomic(tmp_path: Path) -> None:
+    seed_path = tmp_path / "drafting.jsonl"
+    seed_path.write_text(
+        '{"id":"draft-1","tender_id":"tender-1","task":"drafting",'
+        '"instruction":"Draft the delayed-delivery clause.",'
+        '"tender_context":["Tender mode: Limited."],'
+        '"manual_chunk_ids":["chunk-1"]}\n',
+        encoding="utf-8",
+    )
+    inputs = build_drafting_inputs(
+        read_drafting_seeds(seed_path),
+        [
+            {
+                "chunk_id": "chunk-1",
+                "manual_id": "manual-1",
+                "title": "Manual",
+                "source_file": "manual.md",
+                "page": 4,
+                "section": "Damages",
+                "passage": "The cap is 5%.",
+            }
+        ],
+    )
+    result = DraftingResult(
+        document_blocks=[
+            DraftingBlock(
+                text="Delayed Delivery",
+                instruction_evidence_quotes=["delayed-delivery"],
+            ),
+            DraftingBlock(
+                text="The cap is 5%.",
+                manual_evidence_quotes=["The cap is 5%."],
+            ),
+            DraftingBlock(
+                text="Tender mode: Limited.",
+                tender_facts_used=["Tender mode: Limited."],
+            ),
+        ],
+        manual_evidence_quotes=["The cap is 5%."],
+        tender_facts_used=["Tender mode: Limited."],
+        field_claims=[
+            DraftingFieldClaim(
+                block_index=1,
+                field_name="cap",
+                value="5%",
+                manual_evidence_quotes=["The cap is 5%."],
+            ),
+            DraftingFieldClaim(
+                block_index=2,
+                field_name="tender mode",
+                value="Limited",
+                tender_facts_used=["Tender mode: Limited."],
+            ),
+        ],
+    )
+    parsed = TenderDraftingGenerator.parse(
+        SimpleNamespace(model_name="generator"),
+        inputs[0],
+        result,
+    )[0]
+    assert parsed["deterministic_checks"] == {"passed": True, "issues": []}
+    tender_details = [
+        detail
+        for detail in parsed["citation_details"]
+        if detail["source_type"] == "tender_seed"
+    ]
+    assert tender_details[0]["fact"] == "Tender mode: Limited."
+    assert tender_details[0]["citation_id"].startswith("tender-1:fact:")
+    assert parsed["field_claims"][1]["block_index"] == 2
+
+    invalid = result.model_copy(
+        update={
+            "field_claims": [
+                DraftingFieldClaim(
+                    block_index=1,
+                    field_name="cap",
+                    value="10%",
+                    manual_evidence_quotes=["The cap is 5%."],
+                )
+            ]
+        }
+    )
+    issues = drafting_validation_issues(inputs[0], invalid)
+    assert "field_claim_value_not_in_block:0" in issues
+    assert "material_block_without_field_claim:2" in issues
+    assert "unclaimed_tender_fact" in issues
 
 
 def test_drafting_rejects_unknown_chunks_and_unsupported_values(tmp_path: Path) -> None:
@@ -2213,14 +2325,16 @@ def test_drafting_citation_integrity_is_bidirectional_and_allows_repeated_detail
             "quote": "Second supporting quotation.",
         },
         {
-            "citation_id": "tender-1",
+            "citation_id": "tender-1:fact:typed",
             "source_type": "tender_seed",
             "tender_id": "tender-1",
+            "fact_index": 0,
+            "fact": "Tender mode: Limited.",
         },
     ]
     assert (
         drafting_citation_integrity_issues(
-            ["chunk-used", "tender-1"],
+            ["chunk-used", "tender-1:fact:typed"],
             details,
             tender_id="tender-1",
             evidence_quote_count=2,

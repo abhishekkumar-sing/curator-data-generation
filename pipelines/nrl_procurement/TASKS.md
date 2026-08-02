@@ -33,23 +33,23 @@ Implemented and locally verified in the current working tree:
 
 Remaining engineering:
 
-- [ ] Complete the packaged `nrl-curate all` command and researched saturation
+- [x] Complete the packaged `nrl-curate all` command and researched saturation
   controller. Preserve the direct Python entry point and share one orchestration
   implementation; do not ship a subprocess wrapper or an unbounded pass loop.
 - [x] Add a reusable per-endpoint structured-output capability probe for every
   generation/judge profile, not only the embedding endpoint, and persist a
   secret-free result before allowing a new deployment into a large run.
-- [ ] Implement adversarial unanswerable QA with constructed same-type
+- [x] Implement adversarial unanswerable QA with constructed same-type
   distractors and an independent answerability judge. Ordinary retrieval/OCR
   failures must not become negative training examples.
-- [ ] Finish the cross-document atomic claim-to-source/path bindings,
+- [x] Finish the cross-document atomic claim-to-source/path bindings,
   quality-aware best-of-N family selection, optional novelty passes, and
   retrieval-evaluation contexts (oracle, missing-source, wrong-edition,
   wrong-authority, and hard topical distractors).
 - [ ] Finish explicit held-out manual/fold configuration, a frozen external
   human-reviewed evaluation set, and regression reporting. Generated test rows
   alone are not a gold evaluation set.
-- [ ] Finish OCR/source-registry provenance and corpus coverage work still
+- [x] Finish OCR/source-registry provenance and corpus coverage work still
   listed below, including model/package revision, registered-source uniqueness,
   image-caption removal, and stratified rather than prefix-based pilot limits.
 - [ ] Finish the remaining drafting field/claim extraction and validate
@@ -72,6 +72,178 @@ External validation required before release:
 - [ ] Run downstream retrieval and SFT evaluations before claiming that a
   diversity threshold, temporal curriculum, or saturation rule improves model
   behavior.
+
+## P0 completion plan — researched implementation contract (2026-08-02)
+
+Status: repository/reference audit and primary-source research complete before
+implementation. This section is the acceptance contract for the current P0
+work; checked items elsewhere are reused, not reimplemented.
+
+Research findings and decisions:
+
+- [NovelSum (ACL 2025)](https://aclanthology.org/2025.acl-long.908/) finds
+  useful instruction-data diversity depends on inter-sample novelty and local
+  information density. Saturation will therefore use marginal *accepted*
+  semantic/lexical novelty, not a generator's claim that it is finished and
+  not an unbounded “generate all” loop.
+- [SQuAD 2.0](https://aclanthology.org/P18-2124/) constructs difficult
+  unanswerables around plausible same-type answers in the passage. The
+  pipeline will derive an isolated negative from a valid answerable seed,
+  record the altered/missing premise and a same-type distractor, then require
+  an independent full-context answerability judgment. Retrieval/OCR failures
+  are never negative labels.
+- [SQuAD2-CR](https://aclanthology.org/2020.lrec-1.667/) separates the reason
+  for unanswerability from the plausible answer span. Negative records will
+  retain both a machine-readable gap reason and the distractor provenance.
+- RAG evaluation research separates retrieval from grounded generation and
+  warns that ideal oracle contexts do not characterize behavior under imperfect
+  retrieval. Each eligible record will therefore carry deterministic oracle,
+  missing-source, wrong-edition, wrong-authority, and hard-topical context IDs;
+  golden chunks can never be sampled as distractors.
+- [NIST AITE](https://pages.nist.gov/ai-technology-evaluation/) uses blind,
+  sequestered data to reduce train/test contamination, while the
+  [NIST AI RMF measurement guidance](https://airc.nist.gov/airmf-resources/playbook/measure/)
+  requires test sets, metrics, and evaluation procedures to be documented.
+  Generated folds remain development data; a frozen external human-reviewed
+  file is hash-pinned, excluded from all training exports, and scored only by a
+  separate regression command.
+- [W3C PROV-O](https://www.w3.org/TR/prov-o/) distinguishes source entities,
+  derivation activities, revisions, and primary sources. Corpus manifests will
+  pin source/content hashes and OCR software/model revisions, reject duplicate
+  registered files or hashes, and report coverage by manual/category/page band.
+- Chandra 2 explicitly generates layout blocks and image captions. Image and
+  figure blocks/captions must be removed from model-visible text, while their
+  existence remains visible in corpus-quality metrics.
+- The reference repository is useful for its checkpointed parent state,
+  explicit negative-construction ideas, and source registry. Its open-ended
+  fuzzy saturation loop, runtime patches, and generated-only evaluation corpus
+  are not copied.
+
+Implementation acceptance criteria:
+
+- [x] Add a packaged `nrl-curate` CLI whose `all` command calls the same Python
+  orchestration function as `generate.py`; include bounded `--max-passes` and
+  preserve the direct script entry point. No subprocess wrapper.
+- [x] Add a checkpointed saturation controller with a hard maximum, minimum
+  marginal-novelty gain, patience, terminal failure/quarantine accounting, and
+  deterministic resume. Only successful valid batches count as saturation
+  observations.
+- [x] Reuse the exact-transport nested structured-output probe and large-run
+  gate already implemented for generation and judge roles. Extend tests/config
+  validation so every selected profile fingerprint is independent and stale or
+  failed results cannot authorize `all`.
+- [x] Add isolated adversarial-unanswerable schemas, construction stage,
+  same-type distractor provenance, independent answerability judge, and a
+  fail-closed promotion rule. Enable a nonzero target only after this exists.
+- [x] Persist atomic cross-document claim bindings where every claim names its
+  exact source IDs/citations; rank best-of-N siblings by deterministic validity,
+  independent judge result, complete two-source support, qualification
+  preservation, and novelty. Write auditable loser reasons.
+- [x] Wire the bounded novelty controller into additional generation passes.
+  Deterministic retrieval contexts are complete: oracle, missing-source,
+  wrong-edition, wrong-authority, and hard topical distractors are emitted with
+  golden-chunk exclusion enforced.
+- [x] Add explicit manual-to-fold configuration and validation, plus a
+  hash-pinned external human-reviewed evaluation registry. Emit regression
+  reports with baseline deltas without copying frozen rows into generated/SFT
+  exports. Supplying and approving the external file remains an external
+  validation item, not repository engineering.
+- [x] Reject duplicate registered source paths and hashes; require complete OCR
+  provenance including package and model revision; remove Markdown/HTML image
+  blocks and generated captions from generation text; report registered-source
+  and stratified pilot coverage.
+- [x] Complete drafting block-level field/claim extraction. Every material
+  field/claim must bind to exact manual, tender, or instruction evidence and
+  every citation detail must include sufficient source identity and offsets (or
+  a typed tender-field binding).
+- [x] Add focused regressions for every contract, run the full procurement and
+  affected Curator suites, update this record with exact results, and commit in
+  coherent milestones. Live model/human evidence remains explicitly pending.
+
+Implementation progress recorded during this work:
+
+- [x] Added `nrl-curate all`, `probe-structure`, `validate-run`, and `regress`
+  in-process dispatch. `generate.py`, the probe, and run validator accept an
+  argument vector, so the packaged and direct entry points share orchestration.
+  The Poetry package includes `pipelines`; top-level and delegated help work,
+  and `--max-passes` now drives the controller rather than merely being parsed.
+- [x] Added atomic saturation checkpoints keyed by policy/family, hard
+  `max_passes`, marginal accepted-novelty gain, patience, strict count
+  reconciliation, deterministic resume, and explicit incomplete hard-limit
+  status. Failed or invalid passes do not advance saturation patience.
+- [x] Wired optional cross-document novelty passes to independently
+  fingerprinted/resumable generation and judge checkpoints. Later prompts list
+  prior accepted questions, fuzzy duplicates are auditable rejections, only
+  distinct judge-accepted parent outcomes count as marginal novelty, every
+  pass is reconciled, and the manifest distinguishes saturation convergence
+  from an incomplete hard-limit stop. Missing, prompt-quarantined, or malformed
+  judge outcomes cannot count as low novelty. Disabled configuration is truly
+  one pass, and base refresh aliases expand to numbered pass checkpoints.
+- [x] Extended the structured-output probe CLI to resolve active profiles,
+  explicit named profiles independently for generation and judge roles, or all
+  configured role/profile pairings. Exact role, deployment, transport mode,
+  generation parameters, and package versions remain fingerprint-bound; a
+  different role/profile result cannot authorize the selected large run.
+- [x] Added adversarial negative planning from accepted answerable seeds,
+  deterministic same-type non-golden distractors, singular missing-premise
+  generation, independent full-context answerability judgment, fail-closed
+  promotion, and generated/judged/rejected audit artifacts. The configured
+  target is now 10% rather than silently training on retrieval failures.
+- [x] Added cross-document claim-level `source_ids` and `citation_ids`,
+  bidirectional binding validation, three-sibling generation, quality-aware
+  post-judge selection, and auditable lower-quality sibling rejection.
+- [x] Added deterministic retrieval-evaluation contexts with exact golden IDs
+  and controlled missing-source, wrong-edition, wrong-authority, and topical
+  distractor variants. Non-oracle distractors are checked for golden leakage.
+- [x] Added OCR provenance contract v2 fields for model revision, package
+  revision, package version, generation time, source/Markdown hashes, and page
+  counts; registered path/content duplication and declared hash mismatches now
+  fail closed. Existing three PDF caches correctly classify as `legacy` until
+  regenerated. Chandra image/caption lines are removed from generation text and
+  counted, and pilot selection now reports stratum coverage.
+- [x] External evaluation engineering is complete: explicit manual folds are
+  validated (including amendment families), exports reject records spanning
+  folds, approved-review loading is hash-pinned, generated/frozen overlap is
+  fail-closed, and `nrl-curate regress` emits deterministic coverage, answer,
+  answerability, citation-recall, and baseline-delta metrics. Generated
+  validation/test rows are labelled development-only. The actual independently
+  reviewed frozen file, SHA-256, and baseline remain external evidence and are
+  intentionally not synthesized by this pipeline.
+- [x] Added 7 focused evaluation/fold tests covering fold completeness,
+  amendment co-location, cross-fold rejection, frozen hash/approval checks,
+  overlap detection, and regression metrics.
+- [x] Added atomic drafting field claims with exact block indices, rendered
+  values, and block-local manual/tender/instruction support. Material supported
+  blocks, aggregate evidence, and tender facts must all be claim-bound.
+  Tender facts now receive stable per-fact citation IDs plus seed identity,
+  fact index, exact fact text, and offsets; compact drafting exports preserve
+  field claims and full citation details. Eight drafting-focused tests pass.
+- [ ] Regenerate a model-backed drafting sample under the new schema and review
+  field-claim/citation completeness and yield; repository tests cannot supply
+  this live endpoint and human-review evidence.
+- [x] Focused validation so far: 12 saturation/structure-probe tests, 8
+  provenance/unanswerable tests, and 6 cross-selection/retrieval/unanswerable
+  tests pass; Ruff passes for each completed slice.
+- [x] CLI/saturation/cross/probe focused suites now pass 18 tests in aggregate;
+  package import and delegated `all --help` were also verified. Poetry itself
+  is not installed in the project environment; the final validation therefore
+  used `uv build` with Poetry Core's declared build backend.
+- [x] Final local validation: all 140 procurement tests pass; Ruff reports no
+  issues across the pipeline/tests; `git diff --check` and YAML parsing pass.
+  `uv build --wheel` succeeds, the wheel contains the pipeline modules, and its
+  console entry point is exactly
+  `nrl-curate=pipelines.nrl_procurement.cli:main`.
+- [x] Affected Curator request-processor tests produced 17 passes and 13 skips.
+  One unrelated OpenAI processor test requires `OPENAI_API_KEY` at constructor
+  time and fails in this credential-free environment; this change neither
+  modifies that processor nor supplies external credentials. A repository-wide
+  collection finds 425 tests, but the run terminates during the code-executor
+  suite after its first test in this environment, so it is not represented as
+  a successful full-suite run.
+- [x] Committed the coherent P0 implementation milestone as
+  `feat: complete procurement P0 pipeline controls`. Live endpoint pilots,
+  independently reviewed frozen data, credential rotation, and human review
+  remain external release evidence and are not closed by this commit.
 
 ## Completed-run audit — `qa-qacot-full-003` (2026-08-02)
 
