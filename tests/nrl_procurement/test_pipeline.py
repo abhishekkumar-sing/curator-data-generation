@@ -38,6 +38,7 @@ from drafting import (  # noqa: E402
     drafting_validation_issues,
     normalize_drafting_response,
     read_drafting_seeds,
+    reconcile_drafting_support,
 )
 from export import (  # noqa: E402
     answer_length_statistics,
@@ -119,6 +120,7 @@ from source_windows import (  # noqa: E402
 from validate_run import validate_run  # noqa: E402
 from validation import (  # noqa: E402
     answer_format_issues,
+    canonical_reasoning_operation,
     deduplicate,
     enforce_category_diversity,
     enforce_extractive_answer_diversity,
@@ -128,6 +130,7 @@ from validation import (  # noqa: E402
     judge_quotes_are_grounded,
     question_style_issues,
     recover_grounded_judge_quotes,
+    remove_cosmetic_persona_prefix,
     semantic_support_issues,
     validate_cross_record,
     validate_record,
@@ -1560,7 +1563,7 @@ def test_cross_validation_accepts_typed_quantities_and_metadata_dates() -> None:
         "answerable": True,
         "claims": [
             {
-                "statement": "Both editions cap damages.",
+                "statement": "The 2019 and 2025 editions both cap damages.",
                 "evidence": [
                     {
                         "source_id": "source_a",
@@ -2010,10 +2013,13 @@ def test_deterministic_rejections_are_materialized_for_audit() -> None:
         cross_response,
     )
     assert len(cross) == 1
-    assert cross[0]["deterministic_checks"] == {
-        "passed": False,
-        "issues": ["planned_task_type_mismatch:cross_document_qa"],
-    }
+    assert cross[0]["deterministic_checks"] == {"passed": True, "issues": []}
+    assert cross[0]["task_type"] == "cross_document_qa"
+    assert cross[0]["reasoning_steps"] == []
+    assert cross[0]["structural_repairs"] == [
+        "injected_planned_task_type:cross_document_qa_cot->cross_document_qa",
+        "removed_reasoning_steps_for_cross_document_qa",
+    ]
 
 
 def test_qa_evidence_offsets_resolve_against_original_source_chunk() -> None:
@@ -2290,6 +2296,66 @@ def test_drafting_field_claims_and_tender_citations_are_atomic(tmp_path: Path) -
     assert "field_claim_value_not_in_block:0" in issues
     assert "material_block_without_field_claim:2" in issues
     assert "unclaimed_tender_fact" in issues
+
+
+def test_drafting_support_reconciliation_is_exact_and_audited() -> None:
+    manual = "## Damages\n\nThe total damages shall not exceed 5%."
+    tender_fact = "Tender mode: Limited."
+    instruction = "Draft the damages clause with the maximum cap."
+    result = DraftingResult(
+        document_blocks=[
+            DraftingBlock(
+                text=tender_fact,
+                manual_evidence_quotes=[tender_fact],
+                tender_facts_used=[tender_fact],
+            ),
+            DraftingBlock(
+                text="The total damages shall not exceed 5%.",
+                manual_evidence_quotes=[
+                    "## Damages\nThe total damages shall not exceed 5%."
+                ],
+                instruction_evidence_quotes=["with the ... cap"],
+            ),
+        ],
+        manual_evidence_quotes=["The total damages shall not exceed 5%."],
+        tender_facts_used=[tender_fact],
+        field_claims=[
+            DraftingFieldClaim(
+                block_index=0,
+                field_name="tender_mode",
+                value="Limited",
+                manual_evidence_quotes=[tender_fact],
+                tender_facts_used=[tender_fact],
+            ),
+            DraftingFieldClaim(
+                block_index=1,
+                field_name="cap",
+                value="5%",
+                manual_evidence_quotes=[
+                    "The total damages shall not exceed 5%."
+                ],
+                instruction_evidence_quotes=["with the ... cap"],
+            ),
+        ],
+    )
+    reconciled, repairs = reconcile_drafting_support(
+        {
+            "manual_passages": [manual],
+            "tender_context": [tender_fact],
+            "instruction": instruction,
+        },
+        result,
+    )
+    assert reconciled.document_blocks[0].manual_evidence_quotes == []
+    assert reconciled.document_blocks[0].tender_facts_used == [tender_fact]
+    assert reconciled.document_blocks[1].manual_evidence_quotes == [
+        manual,
+        "The total damages shall not exceed 5%.",
+    ]
+    assert reconciled.document_blocks[1].instruction_evidence_quotes == []
+    assert "dropped_invalid_manual_support:document_blocks[0]" in repairs
+    assert "resolved_manual_support_whitespace:document_blocks[1]" in repairs
+    assert "promoted_field_claim_support:document_blocks[1]" in repairs
 
 
 def test_drafting_rejects_unknown_chunks_and_unsupported_values(tmp_path: Path) -> None:
@@ -2722,6 +2788,25 @@ def test_question_style_gate_rejects_source_and_cosmetic_persona_templates() -> 
     assert question_style_issues(
         "Under what circumstances may the authority reject the bid?", "auditor"
     ) == []
+
+
+def test_cosmetic_persona_prefix_and_operation_aliases_are_narrowly_repaired() -> None:
+    question, repaired = remove_cosmetic_persona_prefix(
+        "As a procurement officer, what record must be retained?",
+        "procurement_officer",
+    )
+    assert repaired is True
+    assert question == "What record must be retained?"
+    unchanged, repaired = remove_cosmetic_persona_prefix(
+        "As an auditor reviewing the 2025 Manual, what must be checked?",
+        "auditor",
+    )
+    assert repaired is False
+    assert unchanged.startswith("As an auditor reviewing")
+    assert canonical_reasoning_operation("Identify acceptance requirement") == "lookup"
+    assert canonical_reasoning_operation("Connect to manual revision date") == "resolve_time"
+    assert canonical_reasoning_operation("synthesize_rule") == "combine"
+    assert canonical_reasoning_operation("invent a scenario") is None
 
 
 def test_role_profile_preserves_profile_defaults_but_role_limits_win() -> None:

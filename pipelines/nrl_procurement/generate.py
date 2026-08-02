@@ -105,6 +105,7 @@ from schemas import (
 from schemas import GroundedCandidateDraft, JudgeBatch, JudgedCandidate, QABlueprintDraft
 from validation import (
     answer_format_issues,
+    canonical_reasoning_operation,
     deduplicate,
     enforce_category_diversity,
     enforce_extractive_answer_diversity,
@@ -113,6 +114,7 @@ from validation import (
     question_style_issues,
     quarantine_invalid_judge_batch,
     recover_grounded_judge_quotes,
+    remove_cosmetic_persona_prefix,
     validate_record,
 )
 
@@ -908,6 +910,23 @@ matches the fixed task type.
         for candidate in [response]:
             generated = candidate.model_dump()
             structural_repairs = collect_structural_repairs(candidate)
+            question, persona_prefix_removed = remove_cosmetic_persona_prefix(
+                generated["question"], row["persona"]
+            )
+            if persona_prefix_removed:
+                structural_repairs.append("removed_cosmetic_persona_preamble")
+            for index, step in enumerate(generated["reasoning_steps"]):
+                canonical_operation = canonical_reasoning_operation(
+                    step.get("operation", "")
+                )
+                if canonical_operation and canonical_operation != step.get(
+                    "operation"
+                ):
+                    structural_repairs.append(
+                        "normalized_reasoning_operation:"
+                        f"{index}:{step.get('operation', '')}->{canonical_operation}"
+                    )
+                    step["operation"] = canonical_operation
             draft = {
                 "task_type": row["planned_task_type"],
                 "task": row["task"],
@@ -916,7 +935,7 @@ matches the fixed task type.
                 "question_style": row.get(
                     "planned_question_style", "plain_query"
                 ),
-                "question": generated["question"],
+                "question": question,
                 "answer": generated["answer"],
                 "answerable": row["planned_answerable"],
                 "claims": generated["claims"],

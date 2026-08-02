@@ -159,9 +159,27 @@ Implementation checklist:
   downstream rejection materialization is regression-tested. Bound blueprint
   overproduction to four items and recover a scalar `must_cover` as one audited
   list item; empty/non-semantic evidence still fails closed.
-- [ ] Resume `quality-smoke-001` after this fix and inspect the terminal
-  manifest plus accepted/rejected cross-document and drafting samples. The
-  generation and judge structured-output probes passed in the initial attempt.
+- [x] Resume `quality-smoke-001` after this fix and inspect the terminal
+  manifest plus accepted/rejected cross-document and drafting samples. Both
+  structured-output probes passed; terminal lineage was complete; the manifest
+  correctly remained `partial` with 2 QA, 0 QA-CoT, 0 cross-document, and 0
+  drafting records. Of 20 single requests, four reached judging and two passed;
+  cross generation materialized 21 candidates for 10 requests but only one
+  deterministic survivor failed source ablation/persona/quote review; both
+  drafting candidates failed exact field/block support binding.
+- [x] Implement the deterministic smoke follow-ups without weakening quality:
+  normalize only unambiguous CoT operation aliases; remove only an exact
+  `As a <declared persona>,` wrapper; inject the preplanned cross serialization
+  shape and discard rationale returned for plain cross QA; allow edition/page
+  numbers in cross claims only when present in source metadata; and reconcile
+  drafting support only to exact source spans, dropping invalid extra labels
+  and promoting exact field-claim support to its block. Absence claims,
+  modality/qualification checks, source ablation, and exact citation gates
+  remain fail-closed. Verified with `150 passed`, Ruff, and `git diff --check`
+  on 2026-08-02.
+- [ ] Run a new post-reconciliation smoke attempt and confirm that any increase
+  in yield comes from the audited repairs above; manually inspect every accepted
+  cross-document and drafting record before changing quality thresholds.
 
 ## P0 completion plan — researched implementation contract (2026-08-02)
 

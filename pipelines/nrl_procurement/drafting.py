@@ -128,6 +128,129 @@ def _stable_block_union(
     return values
 
 
+def _exact_or_whitespace_source_span(value: str, source: str) -> str | None:
+    """Resolve whitespace-only quote drift back to the exact source substring."""
+    if value in source:
+        return value
+    tokens = value.split()
+    if not tokens:
+        return None
+    match = re.search(r"\s+".join(re.escape(token) for token in tokens), source)
+    return match.group(0) if match else None
+
+
+def reconcile_drafting_support(
+    row: dict[str, Any],
+    response: DraftingResult,
+) -> tuple[DraftingResult, list[str]]:
+    """Repair only exact support attribution and discard invalid extra labels."""
+    manual_text = "\n\n".join(row["manual_passages"])
+    tender_facts = set(row["tender_context"])
+    instruction = row["instruction"]
+    repairs: list[str] = []
+
+    def manual_values(values: list[str], path: str) -> list[str]:
+        resolved: list[str] = []
+        for value in values:
+            exact = _exact_or_whitespace_source_span(value, manual_text)
+            if exact is None:
+                repairs.append(f"dropped_invalid_manual_support:{path}")
+                continue
+            if exact != value:
+                repairs.append(f"resolved_manual_support_whitespace:{path}")
+            if exact not in resolved:
+                resolved.append(exact)
+        return resolved
+
+    def exact_values(
+        values: list[str],
+        allowed: set[str] | str,
+        path: str,
+        support_type: str,
+    ) -> list[str]:
+        resolved = []
+        for value in values:
+            valid = value in allowed
+            if not value or not valid:
+                repairs.append(f"dropped_invalid_{support_type}_support:{path}")
+                continue
+            if value not in resolved:
+                resolved.append(value)
+        return resolved
+
+    claims = []
+    for index, claim in enumerate(response.field_claims):
+        claims.append(
+            claim.model_copy(
+                update={
+                    "manual_evidence_quotes": manual_values(
+                        claim.manual_evidence_quotes, f"field_claims[{index}]"
+                    ),
+                    "tender_facts_used": exact_values(
+                        claim.tender_facts_used,
+                        tender_facts,
+                        f"field_claims[{index}]",
+                        "tender",
+                    ),
+                    "instruction_evidence_quotes": exact_values(
+                        claim.instruction_evidence_quotes,
+                        instruction,
+                        f"field_claims[{index}]",
+                        "instruction",
+                    ),
+                }
+            )
+        )
+
+    claims_by_block: dict[int, list[Any]] = {}
+    for claim in claims:
+        claims_by_block.setdefault(claim.block_index, []).append(claim)
+    blocks = []
+    for index, block in enumerate(response.document_blocks):
+        manual = manual_values(
+            block.manual_evidence_quotes, f"document_blocks[{index}]"
+        )
+        facts = exact_values(
+            block.tender_facts_used,
+            tender_facts,
+            f"document_blocks[{index}]",
+            "tender",
+        )
+        instructions = exact_values(
+            block.instruction_evidence_quotes,
+            instruction,
+            f"document_blocks[{index}]",
+            "instruction",
+        )
+        for claim in claims_by_block.get(index, []):
+            for value, target in (
+                (claim.manual_evidence_quotes, manual),
+                (claim.tender_facts_used, facts),
+                (claim.instruction_evidence_quotes, instructions),
+            ):
+                for item in value:
+                    if item not in target:
+                        target.append(item)
+                        repairs.append(
+                            f"promoted_field_claim_support:document_blocks[{index}]"
+                        )
+        blocks.append(
+            block.model_copy(
+                update={
+                    "manual_evidence_quotes": manual,
+                    "tender_facts_used": facts,
+                    "instruction_evidence_quotes": instructions,
+                }
+            )
+        )
+    return (
+        response.model_copy(
+            update={"document_blocks": blocks, "field_claims": claims}
+        ),
+        list(dict.fromkeys(repairs)),
+    )
+
+
 def drafting_validation_issues(row: dict[str, Any], result: DraftingResult) -> list[str]:
     """Return deterministic grounding failures for a drafting response."""
     issues: list[str] = []
@@ -376,8 +499,12 @@ and tender-fact lists, and absence of unsupported content.
 
     def parse(self, row: dict[str, Any], response: DraftingResult) -> list[dict[str, Any]]:
         """Retain full lineage while marking deterministic acceptance."""
+        response, support_repairs = reconcile_drafting_support(row, response)
         blocks = []
-        repairs: list[str] = collect_structural_repairs(response)
+        repairs: list[str] = [
+            *collect_structural_repairs(response),
+            *support_repairs,
+        ]
         for block in response.document_blocks:
             normalized_text, block_repairs = normalize_drafting_response(block.text)
             blocks.append(block.model_copy(update={"text": normalized_text}))

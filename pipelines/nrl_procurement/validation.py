@@ -513,6 +513,61 @@ def question_style_issues(question: str, persona: str) -> list[str]:
     return issues
 
 
+def remove_cosmetic_persona_prefix(
+    question: str,
+    persona: str,
+) -> tuple[str, bool]:
+    """Remove only an exact ``As a <persona>,`` wrapper, preserving content."""
+    normalized_persona = " ".join(str(persona).replace("_", " ").split())
+    if not normalized_persona or normalized_persona == "general user":
+        return question, False
+    prefix = re.compile(
+        rf"^\s*as\s+(?:a|an|the)\s+{re.escape(normalized_persona)}\s*,\s*",
+        re.IGNORECASE,
+    )
+    stripped, count = prefix.subn("", question, count=1)
+    if not count or not stripped.strip():
+        return question, False
+    stripped = stripped.strip()
+    return stripped[:1].upper() + stripped[1:], True
+
+
+REASONING_OPERATIONS = {
+    "lookup",
+    "compare",
+    "apply_condition",
+    "resolve_authority",
+    "resolve_time",
+    "combine",
+    "calculate",
+    "conclude",
+}
+
+
+def canonical_reasoning_operation(operation: str) -> str | None:
+    """Map unambiguous natural-language operation labels to the fixed vocabulary."""
+    normalized = "_".join(re.findall(r"[a-z0-9]+", str(operation).casefold()))
+    if normalized in REASONING_OPERATIONS:
+        return normalized
+    if "authorit" in normalized:
+        return "resolve_authority"
+    if any(token in normalized for token in ("time", "date", "revision")):
+        return "resolve_time"
+    if normalized.startswith(("compare", "contrast")):
+        return "compare"
+    if normalized.startswith(("apply", "check_condition", "confirm_scope")):
+        return "apply_condition"
+    if normalized.startswith(("combine", "connect", "synthesi")):
+        return "combine"
+    if normalized.startswith(("calculate", "compute")):
+        return "calculate"
+    if normalized.startswith(("conclude", "confirm", "verify")):
+        return "conclude"
+    if normalized.startswith(("identify", "determine", "find", "trace", "extract")):
+        return "lookup"
+    return None
+
+
 def is_extractive_answer(record: dict[str, Any], minimum_words: int = 4) -> bool:
     """Return whether an answer is a substantial verbatim evidence span.
 
@@ -649,6 +704,18 @@ def validate_cross_record(record: dict[str, Any], documents: list[dict[str, Any]
     known = {document["source_id"]: document["passage"] for document in documents}
     used_claim_sources: set[str] = set()
     used_reasoning_sources: set[str] = set()
+    metadata_support = " ".join(
+        str(document.get(field, ""))
+        for document in documents
+        for field in (
+            "manual_id",
+            "title",
+            "revision_date",
+            "as_of_date",
+            "page",
+            "section",
+        )
+    )
     if set(known) != {"source_a", "source_b"}:
         reasons.append("invalid_source_bundle")
     reasons.extend(answer_completeness_issues(record.get("answer", "")))
@@ -674,25 +741,13 @@ def validate_cross_record(record: dict[str, Any], documents: list[dict[str, Any]
         )
         for number in _unsupported_quantities(
             str(claim.get("statement", "")),
-            claim_support,
+            f"{claim_support}\n{metadata_support}",
         ):
             reasons.append(f"claim_unsupported_number:{number}")
     claim_support = " ".join(evidence["quote"] for claim in record.get("claims", []) for evidence in claim.get("evidence", []))
     reasons.extend(semantic_support_issues(record["answer"], claim_support))
     # Manual identity and version dates are valid support for attribution in the
     # answer even when they are not repeated inside the quoted policy sentence.
-    metadata_support = " ".join(
-        str(document.get(field, ""))
-        for document in documents
-        for field in (
-            "manual_id",
-            "title",
-            "revision_date",
-            "as_of_date",
-            "page",
-            "section",
-        )
-    )
     for number in _unsupported_quantities(record["answer"], f"{claim_support}\n{metadata_support}"):
         reasons.append(f"unsupported_number:{number}")
     for step in record.get("reasoning_steps", []):

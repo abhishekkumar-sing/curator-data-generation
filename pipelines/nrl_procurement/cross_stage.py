@@ -155,7 +155,19 @@ preserved authority and qualifications, and task_type-consistent rationale struc
             ]
             reasons = list(batch_issues)
             if draft["task_type"] != row["planned_task_type"]:
-                reasons.append(f"planned_task_type_mismatch:{row['planned_task_type']}")
+                structural_repairs.append(
+                    "injected_planned_task_type:"
+                    f"{draft['task_type']}->{row['planned_task_type']}"
+                )
+                draft["task_type"] = row["planned_task_type"]
+            if (
+                draft["task_type"] == "cross_document_qa"
+                and draft["reasoning_steps"]
+            ):
+                structural_repairs.append(
+                    "removed_reasoning_steps_for_cross_document_qa"
+                )
+                draft["reasoning_steps"] = []
             if draft["answerable"] != row["planned_answerable"]:
                 reasons.append(f"planned_answerability_mismatch:{row['planned_answerable']}")
             if draft["task"] not in TAXONOMY.get("tasks", []) or draft["persona"] not in TAXONOMY.get("personas", []):
