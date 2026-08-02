@@ -1601,6 +1601,27 @@ def test_quantity_validation_does_not_swallow_following_prose() -> None:
     assert validate_record(record, "The 2025 edition applies.") == []
 
 
+def test_unsupported_standard_procedure_absence_claim_is_rejected() -> None:
+    support = "A GTE should be issued only after no Indian manufacturer is found."
+    record = {
+        "task_type": "qa",
+        "question": "How does GTE differ from standard procurement?",
+        "answer": "Standard procurement does not mandate this precondition.",
+        "answerable": True,
+        "evidence": [{"quote": support}],
+        "claims": [
+            {
+                "statement": "Standard procurement does not mandate this precondition.",
+                "evidence": [{"quote": support}],
+            }
+        ],
+        "reasoning_steps": [],
+    }
+    issues = validate_record(record, support)
+    assert "unsupported_absence_claim" in issues
+    assert "claim_unsupported_absence_claim" in issues
+
+
 def test_validation_rejects_truncated_answers_but_allows_concise_facts() -> None:
     support = "Bid security is five percent of the estimated value."
     base = {

@@ -116,7 +116,8 @@ DEONTIC_PATTERNS: dict[str, tuple[str, ...]] = {
 ABSENCE_CLAIM = re.compile(
     r"\b(?:"
     r"(?:is|are|was|were)\s+(?:not\s+present|absent)|"
-    r"(?:does|do|did)\s+not\s+(?:contain|include|mention|provide|state)|"
+    r"(?:does|do|did)\s+not\s+"
+    r"(?:contain|include|mention|provide|state|require|mandate|specify)|"
     r"(?:not|never)\s+(?:mentioned|provided|stated)|"
     r"no\s+(?:such\s+)?provision|"
     r"lack(?:s|ed|ing)?\s+(?:a|the|such)\s+provision"

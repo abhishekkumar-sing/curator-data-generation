@@ -177,6 +177,12 @@ Implementation checklist:
   modality/qualification checks, source ablation, and exact citation gates
   remain fail-closed. Verified with `150 passed`, Ruff, and `git diff --check`
   on 2026-08-02.
+- [x] Manually inspect the two accepted smoke QA records. One was grounded and
+  useful; the other made an unsupported contrast that standard procurement
+  “does not mandate” the stated GTE precondition. Extend the high-confidence
+  absence detector to `does not require/mandate/specify`, with claim- and
+  answer-level regression coverage; do not count that record as quality evidence.
+  Final verification: `151 passed`, Ruff clean, and `git diff --check` clean.
 - [ ] Run a new post-reconciliation smoke attempt and confirm that any increase
   in yield comes from the audited repairs above; manually inspect every accepted
   cross-document and drafting record before changing quality thresholds.
