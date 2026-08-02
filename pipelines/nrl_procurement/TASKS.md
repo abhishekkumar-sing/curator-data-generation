@@ -248,6 +248,88 @@ Implementation record:
   Passing the generic probe authorizes a bounded post-commit stage pilot, not a
   full quality claim about blueprint, final-record, or judge behavior.
 
+## Request-local hosted-vLLM credential propagation (2026-08-02)
+
+Status: implemented and locally validated. Both first live structure probes
+failed with `AuthenticationError` before structured parsing; rerunning the live
+probe is the remaining deployment check.
+
+Verified findings:
+
+- The configured `NEMOTRON_API_KEY` and `GEMMA_API_KEY` are present after
+  `settings.py` loads `.env`; only presence and length were inspected, never
+  values. `OPENAI_API_KEY` and `LITELLM_API_KEY` are absent.
+- Local Curator 0.1.29 stores `api_key` on
+  `OnlineRequestProcessorConfig`, but
+  `LiteLLMOnlineRequestProcessor.test_call()` passes only model, messages,
+  `api_base`, and generation parameters to `litellm.completion()`.
+- The same processor's `create_api_specific_request_online()` adds `api_base`
+  but not `api_key`; all three completion branches in `call_single_request()`
+  therefore depend on process-global provider credentials unless the key is
+  added request-locally.
+- [LiteLLM's official documentation](https://docs.litellm.ai/) and upstream
+  guidance for OpenAI-compatible providers support passing `api_base` and
+  `api_key` on the individual completion call. Request-local values are needed
+  when one process uses independent generation and judge endpoints.
+- The reference repository independently found the same Curator defect, but
+  applies runtime monkey patches to private methods. It also removes the key
+  from persisted `raw_request`. This confirms the diagnosis, not the preferred
+  implementation for this editable Curator source tree.
+- Run 003's successful calls do not disprove the bug: they relied on an
+  implicit global credential state in that process. A clean process with only
+  role-specific keys reproduces immediate authentication failure for both
+  endpoints.
+
+Decision before implementation:
+
+- Edit the local Curator LiteLLM processor normally; do not copy the reference
+  runtime monkey-patch framework.
+- Pass `self.config.api_key` explicitly to the synchronous rate-limit test call.
+- In `call_single_request()`, create a per-request shallow copy of
+  `request.api_specific_request`, add the configured key only to that transient
+  copy, and use it for unstructured, Instructor, and strict-auto completion
+  paths.
+- Continue persisting the original credential-free
+  `request.api_specific_request` as `GenericResponse.raw_request`; never mutate
+  the persisted request mapping or write the key to response JSONL.
+- Add unit tests proving rate-limit and async completion calls receive the
+  correct role key, the source request remains unchanged, and returned raw
+  request data contains no key. Run Curator unit tests plus the complete
+  procurement suite before asking the user to repeat the probes.
+
+Rejected alternatives:
+
+- Export one global `OPENAI_API_KEY` or `HOSTED_VLLM_API_KEY`: rejected because
+  generation and judge are independent endpoints and construction/concurrency
+  order would decide which credential leaks across roles.
+- Disable the rate-limit test only: rejected because actual completion requests
+  omit the key for the same reason.
+- Put `api_key` into `create_api_specific_request_online()`: rejected because
+  that mapping is persisted as `raw_request` unless every downstream writer is
+  trusted to redact it.
+
+Implementation record:
+
+- Updated Curator's LiteLLM processor to pass `config.api_key` explicitly in
+  the synchronous endpoint/rate-limit test call.
+- Actual completion calls now add the key to a shallow request-local copy for
+  unstructured, strict-auto tool, and Instructor structured-output paths. The
+  source request and `GenericResponse.raw_request` remain credential-free.
+- Added regression tests covering all four paths and asserting the key is
+  neither injected into the source mapping nor retained in the response.
+- Validation passed: Ruff on the changed processor/test; 22 focused LiteLLM
+  and online retry tests; and all 115 procurement pipeline tests. The warnings
+  are pre-existing Pydantic/PyArrow deprecations.
+- Remaining action: source `.env` in a fresh shell and rerun
+  `pipelines/nrl_procurement/probe_structure.py`. Only successful generation
+  and judge results authorize a full run; an authentication fix alone does not
+  establish structured-output compliance.
+- Post-fix live attempt: the generation request no longer failed immediately
+  with `AuthenticationError`, confirming that authentication reached the
+  endpoint, but it produced no response for more than three minutes and was
+  stopped manually. The judge probe was therefore not reached. Deployment
+  validation remains pending; rerun when the generation service is responsive.
+
 ## Mandatory research-first gate
 
 This gate applies to **every capability, feature, fix, refactor, integration,

@@ -472,12 +472,16 @@ class LiteLLMOnlineRequestProcessor(BaseOnlineRequestProcessor):
 
     def test_call(self):
         """Test call to get rate limits."""
-        completion = litellm.completion(
-            model=self.config.model,
-            messages=[{"role": "user", "content": "hi"}],  # Some models (e.g. Claude) require an non-empty message to get rate limits.
-            api_base=self.config.base_url,  # Pass api_base per-request
+        request = {
+            "model": self.config.model,
+            # Some models (e.g. Claude) require a non-empty message.
+            "messages": [{"role": "user", "content": "hi"}],
+            "api_base": self.config.base_url,
             **self.config.generation_params,
-        )
+        }
+        if self.config.api_key:
+            request["api_key"] = self.config.api_key
+        completion = litellm.completion(**request)
         # Try the method of caculating cost
         try:
             completion_response = completion.model_dump()
@@ -600,12 +604,17 @@ class LiteLLMOnlineRequestProcessor(BaseOnlineRequestProcessor):
             GenericResponse: The response from LiteLLM
         """
         # Get response directly without extra logging
+        api_request = dict(request.api_specific_request)
+        if self.config.api_key:
+            # Keep credentials request-local. `request.api_specific_request` is
+            # persisted as `raw_request` and must remain secret-free.
+            api_request["api_key"] = self.config.api_key
         try:
             if request.generic_request.response_format:
                 response_model = request.prompt_formatter.response_format
                 if self.config.structured_output_mode == "tools_auto":
                     auto_tool_request = self._auto_tool_request(
-                        request.api_specific_request,
+                        api_request,
                         response_model,
                     )
                     completion_obj = await litellm.acompletion(
@@ -621,13 +630,13 @@ class LiteLLMOnlineRequestProcessor(BaseOnlineRequestProcessor):
                         response,
                         completion_obj,
                     ) = await self.client.chat.completions.create_with_completion(
-                        **request.api_specific_request,
+                        **api_request,
                         response_model=response_model,
                         timeout=self.config.request_timeout,
                     )
                 response_message = response.model_dump() if hasattr(response, "model_dump") else response
             else:
-                completion_obj = await litellm.acompletion(**request.api_specific_request, timeout=self.config.request_timeout)
+                completion_obj = await litellm.acompletion(**api_request, timeout=self.config.request_timeout)
                 if completion_obj is None:
                     raise Exception("Response is empty")
                 if self.config.return_completions_object:
