@@ -58,6 +58,7 @@ from generate import (  # noqa: E402
     _singular_judge_batch_size,
     eligible_question_types,
     judge_eligible_planned,
+    materialize_blueprint_rejection,
     materialize_terminal_failures,
     plan_cross_document_requests,
     plan_question_styles,
@@ -2764,6 +2765,30 @@ def test_stringified_json_list_recovery_is_narrow_and_audited() -> None:
         raise AssertionError("non-JSON list prose must not be repaired")
 
 
+def test_blueprint_scalar_and_overlong_lists_are_bounded_and_audited() -> None:
+    blueprint = QABlueprintDraft.model_validate(
+        {
+            "task": "general_reference",
+            "persona": "general_user",
+            "persona_need": "Check the record before taking procurement action.",
+            "instruction_goal": "Identify the complete source-supported requirement.",
+            "must_cover": "The buyer retains the procurement record.",
+            "evidence": [
+                {"quote": f"complete evidence quote {index}"}
+                for index in range(5)
+            ],
+        }
+    )
+    assert blueprint.must_cover == [
+        "The buyer retains the procurement record."
+    ]
+    assert len(blueprint.evidence) == 4
+    assert collect_structural_repairs(blueprint) == [
+        "scalar_string_to_list:must_cover",
+        "list_clipped:evidence:5>4",
+    ]
+
+
 def test_unknown_model_labels_parse_for_audited_fail_closed_rejection() -> None:
     decision = JudgeDecision.model_validate(
         _judge_decision(
@@ -2936,6 +2961,26 @@ def test_post_retry_omissions_become_terminal_audit_rows() -> None:
         if row.get("parent_request_id") == "request-b"
     )
     assert failure["terminal_state"] == "model_failure_after_retries"
+
+
+def test_failed_blueprint_retains_answerability_in_generation_audit() -> None:
+    failure = materialize_blueprint_rejection(
+        {
+            "planned_request_id": "request-a",
+            "planned_task_type": "qa",
+            "planned_question_type": "direct_fact",
+            "planned_question_style": "plain_query",
+            "planned_answer_format": "concise_direct",
+            "planned_answerable": True,
+            "manual_id": "manual-a",
+            "terminal_state": "model_failure_after_retries",
+        }
+    )
+    assert failure["answerable"] is True
+    assert failure["terminal_state"] == "blueprint_rejected_or_failed"
+    assert failure["deterministic_checks"]["issues"] == [
+        "model_failure_after_retries"
+    ]
 
 
 def test_judge_rejects_false_abstention_and_taxonomy_acquiescence() -> None:

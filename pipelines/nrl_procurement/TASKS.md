@@ -154,6 +154,14 @@ Implementation checklist:
   for pipeline/tests, `git diff --check` passed, both CLI help paths passed, and
   `uv build` produced the sdist and wheel; the milestone is recorded in Git
   history with the remediation commit.
+- [x] Fix the `quality-smoke-001` terminal-lineage crash discovered on
+  2026-08-02: failed blueprint audit rows now retain `planned_answerable`, and
+  downstream rejection materialization is regression-tested. Bound blueprint
+  overproduction to four items and recover a scalar `must_cover` as one audited
+  list item; empty/non-semantic evidence still fails closed.
+- [ ] Resume `quality-smoke-001` after this fix and inspect the terminal
+  manifest plus accepted/rejected cross-document and drafting samples. The
+  generation and judge structured-output probes passed in the initial attempt.
 
 ## P0 completion plan — researched implementation contract (2026-08-02)
 

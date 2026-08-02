@@ -19,6 +19,8 @@ class AuditedListModel(BaseModel):
     """
 
     json_list_fields: ClassVar[tuple[str, ...]] = ()
+    scalar_string_list_fields: ClassVar[tuple[str, ...]] = ()
+    list_max_items: ClassVar[dict[str, int]] = {}
     structural_repairs: list[str] = Field(
         default_factory=list,
         exclude=True,
@@ -36,15 +38,29 @@ class AuditedListModel(BaseModel):
         repairs = list(repaired.get("_structural_repairs", []))
         for field_name in cls.json_list_fields:
             candidate = repaired.get(field_name)
-            if not isinstance(candidate, str):
-                continue
-            try:
-                decoded = json.loads(candidate)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(decoded, list):
-                repaired[field_name] = decoded
-                repairs.append(f"stringified_json_list:{field_name}")
+            if isinstance(candidate, str):
+                try:
+                    decoded = json.loads(candidate)
+                except json.JSONDecodeError:
+                    decoded = candidate.strip()
+                if isinstance(decoded, list):
+                    repaired[field_name] = decoded
+                    repairs.append(f"stringified_json_list:{field_name}")
+                elif (
+                    field_name in cls.scalar_string_list_fields
+                    and isinstance(decoded, str)
+                    and decoded.strip()
+                ):
+                    repaired[field_name] = [decoded.strip()]
+                    repairs.append(f"scalar_string_to_list:{field_name}")
+            maximum = cls.list_max_items.get(field_name)
+            current = repaired.get(field_name)
+            if maximum is not None and isinstance(current, list):
+                if len(current) > maximum:
+                    repaired[field_name] = current[:maximum]
+                    repairs.append(
+                        f"list_clipped:{field_name}:{len(current)}>{maximum}"
+                    )
         if repairs:
             repaired["_structural_repairs"] = repairs
         return repaired
@@ -253,6 +269,8 @@ class QABlueprintDraft(AuditedListModel):
     must_cover: list[str] = Field(min_length=1, max_length=4)
     evidence: list[EvidenceDraft] = Field(min_length=1, max_length=4)
     json_list_fields = ("must_cover", "evidence")
+    scalar_string_list_fields = ("must_cover",)
+    list_max_items = {"must_cover": 4, "evidence": 4}
 
 
 class GroundedCandidateDraft(AuditedListModel):

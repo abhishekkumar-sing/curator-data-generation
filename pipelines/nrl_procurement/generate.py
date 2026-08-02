@@ -641,6 +641,28 @@ def materialize_terminal_failures(
     return terminal
 
 
+def materialize_blueprint_rejection(row: dict[str, Any]) -> dict[str, Any]:
+    """Convert a rejected or failed blueprint into a complete generation audit row."""
+    return {
+        "parent_request_id": row["planned_request_id"],
+        "planned_task_type": row["planned_task_type"],
+        "planned_question_type": row["planned_question_type"],
+        "planned_question_style": row["planned_question_style"],
+        "planned_answer_format": row["planned_answer_format"],
+        "task_type": row["planned_task_type"],
+        "answerable": bool(row.get("planned_answerable", True)),
+        "manual_id": row["manual_id"],
+        "terminal_state": "blueprint_rejected_or_failed",
+        "terminal_stage": "qa_blueprints",
+        "deterministic_checks": {
+            "passed": False,
+            "issues": row.get("blueprint_checks", {}).get(
+                "issues", ["model_failure_after_retries"]
+            ),
+        },
+    }
+
+
 def _write_audit(path: Path, rows: list[dict[str, Any]]) -> None:
     write_jsonl_rows(path, rows)
 
@@ -1502,7 +1524,7 @@ def _execute_cross_pass(
             "parent_request_id": row["planned_request_id"],
             "planned_task_type": row["planned_task_type"],
             "task_type": row["planned_task_type"],
-            "answerable": row["planned_answerable"],
+            "answerable": bool(row.get("planned_answerable", True)),
             "source_bundle_id": row["source_bundle_id"],
         },
     )
@@ -2301,6 +2323,7 @@ def main(argv: list[str] | None = None) -> None:
             "planned_question_type": row["planned_question_type"],
             "planned_question_style": row["planned_question_style"],
             "planned_answer_format": row["planned_answer_format"],
+            "planned_answerable": row["planned_answerable"],
             "manual_id": row["manual_id"],
         },
     )
@@ -2331,29 +2354,12 @@ def main(argv: list[str] | None = None) -> None:
             "planned_question_style": row["planned_question_style"],
             "planned_answer_format": row["planned_answer_format"],
             "task_type": row["planned_task_type"],
-            "answerable": row["planned_answerable"],
+            "answerable": bool(row.get("planned_answerable", True)),
             "manual_id": row["manual_id"],
         },
     )
     generated_audit.extend(
-        {
-            "parent_request_id": row["planned_request_id"],
-            "planned_task_type": row["planned_task_type"],
-            "planned_question_type": row["planned_question_type"],
-            "planned_question_style": row["planned_question_style"],
-            "planned_answer_format": row["planned_answer_format"],
-            "task_type": row["planned_task_type"],
-            "answerable": row["planned_answerable"],
-            "manual_id": row["manual_id"],
-            "terminal_state": "blueprint_rejected_or_failed",
-            "terminal_stage": "qa_blueprints",
-            "deterministic_checks": {
-                "passed": False,
-                "issues": row.get("blueprint_checks", {}).get(
-                    "issues", ["model_failure_after_retries"]
-                ),
-            },
-        }
+        materialize_blueprint_rejection(row)
         for row in blueprint_audit
         if not row.get("blueprint_checks", {}).get("passed", False)
     )
