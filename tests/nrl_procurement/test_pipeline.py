@@ -2834,6 +2834,25 @@ def test_role_profile_preserves_profile_defaults_but_role_limits_win() -> None:
     resolved = generation_pipeline._role_profile("judge", "gemma")
     assert resolved["generation_params"]["max_tokens"] == 2048
     assert resolved["generation_params"]["top_k"] == 64
+    assert resolved["generation_params"]["extra_body"][
+        "chat_template_kwargs"
+    ]["enable_thinking"] is False
+
+
+def test_thinking_generation_profile_preserves_template_and_sampling() -> None:
+    resolved = generation_pipeline._role_profile("generation", "gemma_thinking")
+    params = resolved["generation_params"]
+
+    assert resolved["served_model_env"] == "MODEL"
+    assert resolved["base_url_env"] == "LLM_BASE_URL"
+    assert resolved["api_key_env"] == "LLM_API_KEY"
+    assert params["temperature"] == 1.0
+    assert params["top_p"] == 0.95
+    assert params["top_k"] == 64
+    assert params["max_tokens"] == 8192
+    assert params["extra_body"]["chat_template_kwargs"][
+        "enable_thinking"
+    ] is True
 
 
 def test_stringified_json_list_recovery_is_narrow_and_audited() -> None:

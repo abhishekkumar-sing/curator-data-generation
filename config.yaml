@@ -36,6 +36,10 @@ model_profiles:
     api_key_env: GLM_API_KEY
     deployment_identity_env: GLM_DEPLOYMENT_ID
     structured_output_mode: json_schema
+    generation_params:
+      extra_body:
+        chat_template_kwargs:
+          enable_thinking: false
   nemotron:
     served_model_env: NEMOTRON_MODEL
     base_url_env: NEMOTRON_BASE_URL
@@ -51,6 +55,26 @@ model_profiles:
     # Operational limit of the private deployment; independently configurable
     # from the model's advertised maximum and source-window construction size.
     context_window: 131072
+    generation_params:
+      extra_body:
+        chat_template_kwargs:
+          enable_thinking: false
+  gemma_thinking:
+    served_model_env: MODEL
+    base_url_env: LLM_BASE_URL
+    api_key_env: LLM_API_KEY
+    deployment_identity_env: LLM_DEPLOYMENT_ID
+    structured_output_mode: json_schema
+    # Conservative deployment fallback. The structured-output probe also reads
+    # the exact server limit from vLLM's /tokenize response when available.
+    context_window: 32768
+    generation_params:
+      temperature: 1.0
+      top_p: 0.95
+      top_k: 64
+      extra_body:
+        chat_template_kwargs:
+          enable_thinking: true
   gemma:
     served_model_env: GEMMA_MODEL
     base_url_env: GEMMA_BASE_URL
@@ -74,12 +98,16 @@ model_profiles:
     deployment_identity_env: QWEN_DEPLOYMENT_ID
     # Conservative fallback until this exact endpoint passes its probe.
     structured_output_mode: md_json
+    generation_params:
+      extra_body:
+        chat_template_kwargs:
+          enable_thinking: false
 
 models:
   generation:
     mode: hosted_vllm
     profile_env: GENERATION_PROFILE
-    default_profile: glm
+    default_profile: gemma_thinking
     private_endpoint_only: true
     request_timeout: 1800
     # Two retries for transient/schema failures; ten identical structured-output
@@ -96,13 +124,11 @@ models:
       top_p: 0.95
       # Pilot-022 hit IncompleteOutputException on path-answer synthesis (the
       # most verbose generation task: multiple claims/propositions/reasoning
-      # steps in one structured response) at the prior 4096 ceiling. Nemotron's
-      # context_window is 131072 and source windows cap input at 8192 tokens,
-      # so there is ample headroom to raise the completion budget.
+      # steps in one structured response) at the prior 4096 ceiling.
+      # The active Gemma deployment has a conservative 32768-token configured
+      # window and source windows cap input at 8192 tokens, leaving room for
+      # this structured completion budget.
       max_tokens: 8192
-      extra_body:
-        chat_template_kwargs:
-          enable_thinking: false
 
   # Select an independent local judge through JUDGE_PROFILE/.env.
   judge:

@@ -14,8 +14,13 @@ CURATOR_LOCAL_ONLY=1
 CURATOR_VIEWER=0
 TELEMETRY_ENABLED=false
 
-GENERATION_PROFILE=glm
-JUDGE_PROFILE=nemotron
+GENERATION_PROFILE=gemma_thinking
+JUDGE_PROFILE=gemma
+
+MODEL=google/gemma-4-31B-it
+LLM_DEPLOYMENT_ID=gemma-4-31b-it-deployment-v1
+LLM_BASE_URL=http://127.0.0.1:8010/v1
+LLM_API_KEY=replace-me
 
 GLM_MODEL=replace-me
 GLM_BASE_URL=http://127.0.0.1:8000/v1
@@ -27,11 +32,19 @@ NEMOTRON_API_KEY=replace-me
 ```
 
 The Python code contains no fixed model name or endpoint. Named profiles for
-GLM, Nemotron, Gemma, and Qwen are declared in `config.yaml`; credentials and
+GLM, Nemotron, thinking-enabled generation Gemma, non-thinking judge Gemma, and
+Qwen are declared in `config.yaml`; credentials and
 served-model IDs stay in `.env`. Switch either role by changing only
 `GENERATION_PROFILE` or `JUDGE_PROFILE`. Use different generator and judge
 models for production when possible. `.env` is gitignored; `.env.example` is
 the safe template that can be committed.
+
+The `gemma_thinking` generation profile sends `temperature=1.0`, `top_p=0.95`,
+`top_k=64`, and
+`extra_body.chat_template_kwargs.enable_thinking=true` on every request. The
+independent `gemma` judge profile explicitly keeps thinking disabled. Model
+profiles own this chat-template choice so a role-level default cannot silently
+override it.
 
 Each profile declares one of Curator's structured-output transports:
 `auto`, `tools`, `tools_auto`, `json_schema`, `json`, or `md_json`. The choice belongs to the

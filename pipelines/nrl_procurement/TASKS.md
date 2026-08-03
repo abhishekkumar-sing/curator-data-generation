@@ -77,6 +77,27 @@ External validation required before release:
   diversity threshold, temporal curriculum, or saturation rule improves model
   behavior.
 
+## Generation endpoint migration (2026-08-03)
+
+- [x] Add a dedicated `gemma_thinking` generation profile using the requested
+  `MODEL`, `LLM_BASE_URL`, and `LLM_API_KEY` environment contract; make it the
+  configured default and active local generation profile in place of
+  Nemotron. Preserve Nemotron as an explicit fallback profile.
+- [x] Send `temperature=1.0`, `top_p=0.95`, `top_k=64`, and
+  `extra_body.chat_template_kwargs.enable_thinking=true` per generation
+  request. Move the old non-thinking setting out of the role-level defaults so
+  it cannot override the selected profile.
+- [x] Keep the independent Gemma judge explicitly non-thinking, and add a
+  regression test proving the generation and judge profiles retain their
+  distinct chat-template settings.
+- [x] Store the supplied credential only in ignored `.env`; commit only
+  placeholder environment documentation.
+- [x] Pass and persist the structured-output probe for the exact new endpoint
+  before using it for an unbounded run. On 2026-08-03 the generation probe
+  passed all nested sentinel/enum/list checks with thinking enabled in 7.407 s;
+  the secret-free deployment fingerprint is
+  `2a98fb7263194c25c284a98f50f7b96d03c3347d74bce91ace0c2f627ccee1a7`.
+
 ## P0 quality-remediation contract (2026-08-02)
 
 Status: primary-source research and current-code/run audit completed before
