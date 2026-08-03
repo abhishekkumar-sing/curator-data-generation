@@ -111,9 +111,16 @@ External validation required before release:
   subsequent requests can continue returning 500 until server recovery, as
   demonstrated in upstream issue 23582:
   <https://github.com/vllm-project/vllm/issues/23582>.
-- [ ] Restart or recover the external vLLM deployment, rerun the exact
-  structured-output probe, then resume a new full-pipeline smoke and verify
-  non-zero accepted cross-document and drafting records.
+- [x] Recover the thinking-generation deployment. Smoke-002 reused valid
+  checkpoints for 20 blueprints and 17 generated candidates and produced 26
+  cross-generation candidates with the eight-request concurrency cap; its
+  generation failed-request files are empty.
+- [ ] Recover the separate non-thinking judge at `10.180.148.183:3009`, which
+  refused both cross-judge connections on smoke-002 before any cross candidate
+  could be judged. Rerun the exact judge structured-output probe, resume
+  smoke-002 from its checkpoints, and verify non-zero accepted cross-document
+  and drafting records. Do not substitute the generator as judge merely to
+  bypass this independence check.
 
 ## P0 quality-remediation contract (2026-08-02)
 
