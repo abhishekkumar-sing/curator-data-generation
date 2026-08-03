@@ -2846,6 +2846,7 @@ def test_thinking_generation_profile_preserves_template_and_sampling() -> None:
     assert resolved["served_model_env"] == "MODEL"
     assert resolved["base_url_env"] == "LLM_BASE_URL"
     assert resolved["api_key_env"] == "LLM_API_KEY"
+    assert resolved["max_concurrent_requests"] == 8
     assert params["temperature"] == 1.0
     assert params["top_p"] == 0.95
     assert params["top_k"] == 64

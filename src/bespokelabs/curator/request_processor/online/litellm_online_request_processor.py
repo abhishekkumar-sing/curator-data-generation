@@ -268,7 +268,18 @@ class LiteLLMOnlineRequestProcessor(BaseOnlineRequestProcessor):
     def _ensure_rate_limits(self):
         """Lazily initialize rate limits from API headers on first access."""
         if not self._rate_limits_initialized:
-            self.header_based_max_requests_per_minute, self.header_based_max_tokens_per_minute = self.get_header_based_rate_limits()
+            # Explicit limits are authoritative and need no provider request.
+            # Besides wasting a completion, the old bootstrap call could abort
+            # a resumable batch before its real requests reached normal retry
+            # and failure persistence (for example after a vLLM engine restart).
+            if (
+                self.manual_max_requests_per_minute is None
+                or self.manual_max_tokens_per_minute is None
+            ):
+                (
+                    self.header_based_max_requests_per_minute,
+                    self.header_based_max_tokens_per_minute,
+                ) = self.get_header_based_rate_limits()
             self._rate_limits_initialized = True
 
     @property

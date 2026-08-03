@@ -273,6 +273,29 @@ def test_requests_to_responses_uses_resolved_token_limit_strategy(monkeypatch):
     assert processor.tracker.max_tokens_per_minute == _TokenUsage(input=10000000, output=2000000)
 
 
+def test_explicit_rate_limits_skip_provider_bootstrap_call(monkeypatch):
+    processor = LiteLLMOnlineRequestProcessor(
+        OnlineRequestProcessorConfig(
+            model="hosted_vllm/test",
+            max_requests_per_minute=100,
+            max_tokens_per_minute=1000,
+        )
+    )
+
+    def unexpected_probe():
+        raise AssertionError("explicit limits must not make a provider call")
+
+    monkeypatch.setattr(
+        processor,
+        "get_header_based_rate_limits",
+        unexpected_probe,
+    )
+
+    assert processor.max_requests_per_minute == 100
+    assert processor.max_tokens_per_minute == 1000
+    assert processor._rate_limits_initialized is True
+
+
 def test_anthropic_file_prompts_use_document_blocks_and_pdf_beta_header():
     processor = LiteLLMOnlineRequestProcessor(OnlineRequestProcessorConfig(model="anthropic/claude-sonnet-4-6"))
     request = GenericRequest(

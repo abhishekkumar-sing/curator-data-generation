@@ -97,6 +97,23 @@ External validation required before release:
   passed all nested sentinel/enum/list checks with thinking enabled in 7.407 s;
   the secret-free deployment fingerprint is
   `2a98fb7263194c25c284a98f50f7b96d03c3347d74bce91ace0c2f627ccee1a7`.
+- [x] Reconcile the first full-pipeline smoke interruption. The blueprint and
+  final-generation stages completed 20/20 and 17/17 requests respectively with
+  empty failed-request files; the later cross-stage bootstrap call received
+  vLLM's fatal `EngineCore` 500 before any cross request was processed.
+- [x] Limit the new 31B thinking generator to eight concurrent client requests
+  until its deployment-specific capacity is measured. vLLM documents
+  `--max-num-seqs` as the per-iteration sequence cap that must be set for real
+  deployments: <https://docs.vllm.ai/en/latest/cli/index.html>.
+- [x] Skip LiteLLM's header-discovery completion whenever explicit RPM and TPM
+  limits are both configured. Real requests still use ordinary bounded retries
+  and persistent failure audit. vLLM reports `EngineCore` failures as fatal and
+  subsequent requests can continue returning 500 until server recovery, as
+  demonstrated in upstream issue 23582:
+  <https://github.com/vllm-project/vllm/issues/23582>.
+- [ ] Restart or recover the external vLLM deployment, rerun the exact
+  structured-output probe, then resume a new full-pipeline smoke and verify
+  non-zero accepted cross-document and drafting records.
 
 ## P0 quality-remediation contract (2026-08-02)
 

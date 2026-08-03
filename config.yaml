@@ -68,6 +68,10 @@ model_profiles:
     # Conservative deployment fallback. The structured-output probe also reads
     # the exact server limit from vLLM's /tokenize response when available.
     context_window: 32768
+    # Thinking requests reserve substantially more live KV-cache state than the
+    # previous generator. Keep client concurrency below the server scheduler's
+    # unknown max-num-seqs until a deployment-specific load test raises it.
+    max_concurrent_requests: 8
     generation_params:
       temperature: 1.0
       top_p: 0.95

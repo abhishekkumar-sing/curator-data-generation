@@ -44,7 +44,10 @@ The `gemma_thinking` generation profile sends `temperature=1.0`, `top_p=0.95`,
 `extra_body.chat_template_kwargs.enable_thinking=true` on every request. The
 independent `gemma` judge profile explicitly keeps thinking disabled. Model
 profiles own this chat-template choice so a role-level default cannot silently
-override it.
+override it. The thinking generator is conservatively limited to eight
+concurrent client requests until the exact vLLM deployment is load-tested.
+Because both RPM and TPM are configured explicitly, Curator does not spend an
+extra inference request attempting to rediscover those limits from headers.
 
 Each profile declares one of Curator's structured-output transports:
 `auto`, `tools`, `tools_auto`, `json_schema`, `json`, or `md_json`. The choice belongs to the
