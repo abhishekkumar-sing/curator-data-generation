@@ -227,6 +227,14 @@ Follow-up result and remediation (2026-08-05):
   historical checkpoints without model calls, then measure fresh pass-5 GLM
   behavior at concurrency 32. Keep this external endpoint validation open until
   its result is recorded.
+- [x] Confirm the resumed run reached fresh pass 5 with 199 requests and the
+  configured concurrency of 32, proving historical passes 1–4 replayed without
+  another mismatch. At 12:19 UTC, 75 distinct responses were durably persisted,
+  all 75 were successful, no terminal response error existed, and 32 requests
+  remained active. Six requests had reached their first 600-second timeout and
+  entered their one allowed retry; these warnings are not permanent failures.
+  Leave the final endpoint-validation item open until the stage and its targeted
+  rescue, if needed, reach terminal statistics.
 
 The concurrency reduction is consistent with vLLM's documented scheduler
 control: `--max-num-seqs` is the maximum sequences processed in one iteration,
