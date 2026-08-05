@@ -36,6 +36,9 @@ model_profiles:
     api_key_env: GLM_API_KEY
     deployment_identity_env: GLM_DEPLOYMENT_ID
     structured_output_mode: json_schema
+    # The private server omits max_model_len from /models and does not expose
+    # /tokenize. Keep a conservative explicit prompt-budget fallback.
+    context_window: 32768
     generation_params:
       extra_body:
         chat_template_kwargs:
@@ -95,6 +98,21 @@ model_profiles:
       extra_body:
         chat_template_kwargs:
           enable_thinking: false
+  ministral:
+    served_model_env: MINISTRAL_MODEL
+    base_url_env: MINISTRAL_BASE_URL
+    api_key_env: MINISTRAL_API_KEY
+    deployment_identity_env: MINISTRAL_DEPLOYMENT_ID
+    # Exact support remains gated by the deployment probe below; the official
+    # Instruct model advertises native JSON output and recommends vLLM >=0.12.
+    structured_output_mode: json_schema
+    # Conservative operational fallback below the checkpoint's advertised
+    # 262144 tokens until the private deployment reports its exact limit.
+    context_window: 32768
+    max_concurrent_requests: 16
+    generation_params:
+      # Mistral recommends temperature below 0.1 for production use.
+      temperature: 0.05
   qwen:
     served_model_env: QWEN_MODEL
     base_url_env: QWEN_BASE_URL
@@ -111,7 +129,7 @@ models:
   generation:
     mode: hosted_vllm
     profile_env: GENERATION_PROFILE
-    default_profile: gemma_thinking
+    default_profile: glm
     private_endpoint_only: true
     request_timeout: 1800
     # Two retries for transient/schema failures; ten identical structured-output
@@ -129,16 +147,15 @@ models:
       # Pilot-022 hit IncompleteOutputException on path-answer synthesis (the
       # most verbose generation task: multiple claims/propositions/reasoning
       # steps in one structured response) at the prior 4096 ceiling.
-      # The active Gemma deployment has a conservative 32768-token configured
-      # window and source windows cap input at 8192 tokens, leaving room for
-      # this structured completion budget.
+      # Source windows cap input at 8192 tokens; the selected deployment's
+      # prompt-budget check enforces its configured and server-reported limits.
       max_tokens: 8192
 
   # Select an independent local judge through JUDGE_PROFILE/.env.
   judge:
     mode: hosted_vllm
     profile_env: JUDGE_PROFILE
-    default_profile: gemma
+    default_profile: ministral
     private_endpoint_only: true
     request_timeout: 1800
     max_retries: 1
@@ -152,9 +169,6 @@ models:
       # Singular judge objects are normally far smaller; 2,048 prevents the
       # observed 1,024-token truncation tail while retaining prompt capacity.
       max_tokens: 2048
-      extra_body:
-        chat_template_kwargs:
-          enable_thinking: false
 
   ocr:
     engine: chandra

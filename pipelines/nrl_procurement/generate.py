@@ -318,16 +318,23 @@ def _role_profile(
             f"available: {available}"
         )
     profile_settings = profiles[selected_name]
+    profile_generation_params = profile_settings.get("generation_params", {})
+    role_generation_params = role_settings.get("generation_params", {})
     merged_generation_params = {
-        **profile_settings.get("generation_params", {}),
-        **role_settings.get("generation_params", {}),
+        **role_generation_params,
+        **profile_generation_params,
         "extra_body": {
-            **profile_settings.get("generation_params", {}).get(
-                "extra_body", {}
-            ),
-            **role_settings.get("generation_params", {}).get("extra_body", {}),
+            **role_generation_params.get("extra_body", {}),
+            **profile_generation_params.get("extra_body", {}),
         },
     }
+    # Completion budgets are role-level safety limits, not model sampling
+    # defaults. A profile may tune sampling/template behavior but cannot raise
+    # the role's reserved maximum output.
+    if "max_tokens" in role_generation_params:
+        merged_generation_params["max_tokens"] = role_generation_params[
+            "max_tokens"
+        ]
     return {
         **role_settings,
         **profile_settings,

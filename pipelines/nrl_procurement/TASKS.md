@@ -77,6 +77,42 @@ External validation required before release:
   diversity threshold, temporal curriculum, or saturation rule improves model
   behavior.
 
+## GLM generation / Ministral judge migration (2026-08-05)
+
+- [x] Restore the existing GLM deployment as the active/default generation
+  profile and preserve its endpoint credential only in ignored `.env`. Its
+  `/models` response omits `max_model_len` and `/tokenize` returns 404, so use a
+  conservative explicit 32,768-token prompt-budget fallback rather than an
+  unverified checkpoint maximum.
+- [x] Add a distinct `ministral` judge profile for
+  `mistralai/Ministral-3-14B-Instruct-2512` on the private port 3006 endpoint;
+  keep the supplied credential out of tracked files.
+- [x] Use native JSON-schema transport provisionally, cap judge concurrency at
+  16, retain the role-level 2,048-token output ceiling, and apply the official
+  production recommendation with `temperature=0.05`. Do not send Gemma's
+  `enable_thinking` chat-template argument to this Instruct checkpoint.
+- [x] Make profile sampling/template parameters override generic role defaults
+  while preserving role-level `max_tokens` as a non-raisable safety ceiling;
+  cover this distinction with regression tests.
+- [x] Pass and persist the exact GLM generation probe. On 2026-08-05 it passed
+  every nested sentinel/enum/list check in 37.328 s with fingerprint
+  `61dbe1c71839baadb4bc7f4acc0704fa8dc26cbf21aac0ee7fb251b18a6981ca`.
+- [ ] Pass and persist the exact Ministral judge probe before resuming a large
+  or full-pipeline run. The 2026-08-05 04:54 UTC attempt resolved the intended
+  profile and request parameters but port 3006 refused the TCP connection with
+  zero tokens processed; JSON-schema support is therefore not yet proven.
+
+Research basis:
+
+- The official model card identifies this as the FP8 Instruct checkpoint,
+  recommends vLLM >=0.12 with `mistral-common >=1.8.6`, advertises native JSON
+  output, and recommends temperature below 0.1 in production:
+  <https://huggingface.co/mistralai/Ministral-3-14B-Instruct-2512>.
+- The same card advertises a 262,144-token checkpoint limit but explicitly
+  permits a smaller served `--max-model-len`; Curator therefore uses 32,768 as
+  a conservative fallback and trusts the exact server/tokenizer measurement
+  when lower.
+
 ## Generation endpoint migration (2026-08-03)
 
 - [x] Add a dedicated `gemma_thinking` generation profile using the requested

@@ -803,6 +803,9 @@ def test_model_context_window_is_explicit_and_profile_local() -> None:
         ]
         == "json_schema"
     )
+    assert configured_context_window(
+        generation_pipeline.CONFIG["model_profiles"]["glm"]
+    ) == 32768
     assert (
         generation_pipeline.CONFIG["model_profiles"]["gemma"][
             "structured_output_mode"
@@ -2837,6 +2840,13 @@ def test_role_profile_preserves_profile_defaults_but_role_limits_win() -> None:
     assert resolved["generation_params"]["extra_body"][
         "chat_template_kwargs"
     ]["enable_thinking"] is False
+
+    ministral = generation_pipeline._role_profile("judge", "ministral")
+    assert ministral["generation_params"]["temperature"] == 0.05
+    assert ministral["generation_params"]["max_tokens"] == 2048
+    assert ministral["generation_params"]["extra_body"] == {}
+    assert ministral["max_concurrent_requests"] == 16
+    assert ministral["served_model_env"] == "MINISTRAL_MODEL"
 
 
 def test_thinking_generation_profile_preserves_template_and_sampling() -> None:

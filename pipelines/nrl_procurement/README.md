@@ -14,8 +14,8 @@ CURATOR_LOCAL_ONLY=1
 CURATOR_VIEWER=0
 TELEMETRY_ENABLED=false
 
-GENERATION_PROFILE=gemma_thinking
-JUDGE_PROFILE=gemma
+GENERATION_PROFILE=glm
+JUDGE_PROFILE=ministral
 
 MODEL=google/gemma-4-31B-it
 LLM_DEPLOYMENT_ID=gemma-4-31b-it-deployment-v1
@@ -29,11 +29,16 @@ GLM_API_KEY=replace-me
 NEMOTRON_MODEL=replace-me
 NEMOTRON_BASE_URL=http://127.0.0.1:8001/v1
 NEMOTRON_API_KEY=replace-me
+
+MINISTRAL_MODEL=mistralai/Ministral-3-14B-Instruct-2512
+MINISTRAL_DEPLOYMENT_ID=ministral-3-14b-instruct-2512-deployment-v1
+MINISTRAL_BASE_URL=http://127.0.0.1:3006/v1
+MINISTRAL_API_KEY=replace-me
 ```
 
 The Python code contains no fixed model name or endpoint. Named profiles for
-GLM, Nemotron, thinking-enabled generation Gemma, non-thinking judge Gemma, and
-Qwen are declared in `config.yaml`; credentials and
+GLM, Nemotron, thinking-enabled generation Gemma, Gemma, Ministral, and Qwen
+are declared in `config.yaml`; credentials and
 served-model IDs stay in `.env`. Switch either role by changing only
 `GENERATION_PROFILE` or `JUDGE_PROFILE`. Use different generator and judge
 models for production when possible. `.env` is gitignored; `.env.example` is
@@ -48,6 +53,13 @@ override it. The thinking generator is conservatively limited to eight
 concurrent client requests until the exact vLLM deployment is load-tested.
 Because both RPM and TPM are configured explicitly, Curator does not spend an
 extra inference request attempting to rediscover those limits from headers.
+
+The configured production roles use GLM for generation and the independent
+`Ministral-3-14B-Instruct-2512` profile for judging. Ministral is provisionally
+configured for native JSON-schema mode, a production temperature of `0.05`, no
+Gemma-specific thinking template argument, a 2,048-token judge ceiling, and 16
+concurrent requests. Every endpoint change still requires the exact
+structured-output probe.
 
 Each profile declares one of Curator's structured-output transports:
 `auto`, `tools`, `tools_auto`, `json_schema`, `json`, or `md_json`. The choice belongs to the
