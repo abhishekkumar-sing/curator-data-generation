@@ -161,6 +161,51 @@ Research basis:
   `tests/nrl_procurement` suite on 2026-08-05. Ruff and `git diff --check` pass;
   no model-backed run was started by the implementation agent.
 
+## GLM single-request tail stall (2026-08-05)
+
+- [x] Diagnose `saturation-500-001` from persisted request timestamps rather
+  than the progress display alone. Request index 75 began at 05:33:17 and
+  succeeded at 06:03:47: the 1,800-second role timeout expired and its retry
+  succeeded in roughly 30 seconds. The stage ultimately persisted all 500
+  unique request indices with no terminal response errors.
+- [x] Measure the successful blueprint latency distribution before copying the
+  reference setting. This deployment produced an approximately 256-second
+  median, 339-second p99, 365-second ordinary maximum, and 36 successful
+  requests above 300 seconds. The reference GLM timeout is 300 seconds, but
+  applying it here would create avoidable retries under the observed load.
+- [x] Confirm that the reference combines a model-specific GLM timeout with
+  one work-conserving retry and explicit missing-row rescue/quarantine. Its old
+  deferred-retry monkey patch is not copied because Curator already contains
+  the equivalent in-task scheduler in commit `f956b921` with regression tests.
+- [x] Configure the active GLM profile for a measured 600-second timeout and
+  one retry. This reduces a silent first attempt from 30 to 10 minutes and the
+  bounded two-attempt worst case from about 90 to 20 minutes, while preserving
+  more than 60% headroom over the observed ordinary maximum.
+- [x] Separate transport tuning (`request_timeout`, retries, concurrency, RPM,
+  and TPM) from scientific config/model cache identity while retaining it in
+  run provenance. Future tuning can reuse compatible partial/completed stage
+  artifacts; model/deployment, structured-output mode, sampling parameters,
+  schema contracts, inputs, and pipeline revision remain fingerprinted.
+- [x] Add regressions proving the GLM override resolves to 600 seconds/one
+  retry and that endpoint URL/timeout plus config-level transport tuning do not
+  alter the scientific contract or stage fingerprint. The complete procurement
+  suite plus Curator retry/credential regressions passes 166 tests; Ruff and
+  `git diff --check` pass.
+- [ ] Validate the 600-second boundary on a fresh bounded load test. If the
+  endpoint's p99 materially changes, recalibrate from observed first-attempt
+  latency rather than lowering the timeout to the reference's value blindly.
+
+Research basis:
+
+- aiohttp's official `ClientTimeout` contract defines `total` as the ceiling
+  for connection establishment, request sending, and response reading, and
+  documents 300 seconds as its general default:
+  <https://docs.aiohttp.org/en/stable/client_reference.html#clienttimeout>.
+- vLLM documents that its online server implements the OpenAI-compatible chat
+  completion endpoint used here; client-side liveness deadlines and retry
+  accounting therefore remain Curator/LiteLLM responsibilities:
+  <https://docs.vllm.ai/en/latest/serving/online_serving/openai_compatible_server/>.
+
 ## Generation endpoint migration (2026-08-03)
 
 - [x] Add a dedicated `gemma_thinking` generation profile using the requested

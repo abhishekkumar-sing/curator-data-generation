@@ -13,6 +13,13 @@ from datasets import Dataset
 from jsonl_io import write_jsonl_rows
 
 RESUME_SCHEMA_VERSION = "nrl-resume-v2"
+TRANSPORT_TUNING_KEYS = {
+    "request_timeout",
+    "max_retries",
+    "max_concurrent_requests",
+    "max_requests_per_minute",
+    "max_tokens_per_minute",
+}
 STAGE_CONTRACT_VERSIONS = {
     # Increment only when persisted response semantics change. Source-only
     # edits remain reusable, while parser/judge contract changes cannot reuse
@@ -47,6 +54,26 @@ def _canonical_hash(value: Any) -> str:
         separators=(",", ":"),
     )
     return hashlib.sha256(encoded.encode()).hexdigest()
+
+
+def _scientific_config(config: dict[str, Any]) -> dict[str, Any]:
+    """Exclude operational endpoint tuning from scientific contracts."""
+    payload = json.loads(json.dumps(config))
+    for section_name in ("model_profiles", "models"):
+        for settings in payload.get(section_name, {}).values():
+            if isinstance(settings, dict):
+                for key in TRANSPORT_TUNING_KEYS:
+                    settings.pop(key, None)
+    return payload
+
+
+def _cache_model_identity(identity: dict[str, Any]) -> dict[str, Any]:
+    """Return response-affecting model identity without transport tuning."""
+    return {
+        key: value
+        for key, value in identity.items()
+        if key not in TRANSPORT_TUNING_KEYS
+    }
 
 
 def _atomic_json(path: Path, value: Any) -> None:
@@ -139,7 +166,7 @@ class ResumeManager:
         self.run_root = output_root / run_id
         self.files_dir = self.run_root / "files"
         self.cache_root = cache_root
-        self.config_hash = _canonical_hash(config)
+        self.config_hash = _canonical_hash(_scientific_config(config))
         self.source_hash = pipeline_source_fingerprint(pipeline_dir)
         self.model_identities = {
             "generation": semantic_model_identity(generation_profile),
@@ -214,7 +241,7 @@ class ResumeManager:
                 "schema_version": RESUME_SCHEMA_VERSION,
                 "stage": stage,
                 "role": role,
-                "model": self.model_identities[role],
+                "model": _cache_model_identity(self.model_identities[role]),
                 "contract_sha256": self._contract_hash(stage),
                 # Never combine an incomplete Curator response cache across
                 # code revisions. Completed immutable checkpoints are handled

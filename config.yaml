@@ -36,6 +36,12 @@ model_profiles:
     api_key_env: GLM_API_KEY
     deployment_identity_env: GLM_DEPLOYMENT_ID
     structured_output_mode: json_schema
+    # saturation-500-001 measured a 256s median, 339s p99, and 365s maximum
+    # successful first-attempt tail. One dead call otherwise occupied the last
+    # progress slot for the role-level 1800s timeout. Preserve headroom over
+    # the observed tail while retrying a silent request after ten minutes.
+    request_timeout: 600
+    max_retries: 1
     # The private server omits max_model_len from /models and does not expose
     # /tokenize. Keep a conservative explicit prompt-budget fallback.
     context_window: 32768

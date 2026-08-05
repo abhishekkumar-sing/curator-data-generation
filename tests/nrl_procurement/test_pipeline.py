@@ -2834,6 +2834,10 @@ def test_cosmetic_persona_prefix_and_operation_aliases_are_narrowly_repaired() -
 
 
 def test_role_profile_preserves_profile_defaults_but_role_limits_win() -> None:
+    glm = generation_pipeline._role_profile("generation", "glm")
+    assert glm["request_timeout"] == 600
+    assert glm["max_retries"] == 1
+
     resolved = generation_pipeline._role_profile("judge", "gemma")
     assert resolved["generation_params"]["max_tokens"] == 2048
     assert resolved["generation_params"]["top_k"] == 64
@@ -3926,6 +3930,8 @@ def _resume_manager(
     generation_url: str,
     generation_deployment: str,
     judge_model: str = "judge-a",
+    generation_timeout: int = 10,
+    config: dict | None = None,
     refresh_stages: set[str] | None = None,
 ) -> ResumeManager:
     pipeline_dir = tmp_path / "pipeline"
@@ -3946,9 +3952,12 @@ def _resume_manager(
         run_id="same-run",
         output_root=tmp_path / "outputs",
         cache_root=tmp_path / ".curator_working",
-        config={"quality": {"minimum": 4}},
+        config=config or {"quality": {"minimum": 4}},
         pipeline_dir=pipeline_dir,
-        generation_profile=_resume_profile("GEN", "generation"),
+        generation_profile={
+            **_resume_profile("GEN", "generation"),
+            "request_timeout": generation_timeout,
+        },
         judge_profile=_resume_profile("JDG", "judge"),
         refresh_stages=refresh_stages,
     )
@@ -4034,9 +4043,51 @@ def test_transport_only_change_reuses_partial_cache_identity(
         generation_model="model-a",
         generation_url="http://127.0.0.1:9999/v1",
         generation_deployment="same-deployment",
+        generation_timeout=600,
     )
     second.start()
     assert second._stage_fingerprint("generation", "generation") == old_fingerprint
+
+
+def test_transport_tuning_does_not_change_scientific_contract(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    first = _resume_manager(
+        tmp_path,
+        monkeypatch,
+        generation_model="model-a",
+        generation_url="http://127.0.0.1:3011/v1",
+        generation_deployment="same-deployment",
+        config={
+            "quality": {"minimum": 4},
+            "models": {"generation": {"request_timeout": 1800}},
+        },
+    )
+    second = _resume_manager(
+        tmp_path,
+        monkeypatch,
+        generation_model="model-a",
+        generation_url="http://127.0.0.1:3011/v1",
+        generation_deployment="same-deployment",
+        generation_timeout=600,
+        config={
+            "quality": {"minimum": 4},
+            "models": {
+                "generation": {
+                    "request_timeout": 600,
+                    "max_retries": 1,
+                    "max_concurrent_requests": 64,
+                }
+            },
+        },
+    )
+    assert first._contract_hash("generation") == second._contract_hash(
+        "generation"
+    )
+    assert first._stage_fingerprint(
+        "generation", "generation"
+    ) == second._stage_fingerprint("generation", "generation")
 
 
 def test_completed_stage_survives_pipeline_source_change(
