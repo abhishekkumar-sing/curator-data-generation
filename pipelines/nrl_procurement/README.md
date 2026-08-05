@@ -30,7 +30,7 @@ NEMOTRON_MODEL=replace-me
 NEMOTRON_BASE_URL=http://127.0.0.1:8001/v1
 NEMOTRON_API_KEY=replace-me
 
-MINISTRAL_MODEL=mistralai/Ministral-3-14B-Instruct-2512
+MINISTRAL_MODEL=ministral-3-14b-instruct-2512
 MINISTRAL_DEPLOYMENT_ID=ministral-3-14b-instruct-2512-deployment-v1
 MINISTRAL_BASE_URL=http://127.0.0.1:3006/v1
 MINISTRAL_API_KEY=replace-me
@@ -60,6 +60,10 @@ configured for native JSON-schema mode, a production temperature of `0.05`, no
 Gemma-specific thinking template argument, a 2,048-token judge ceiling, and 16
 concurrent requests. Every endpoint change still requires the exact
 structured-output probe.
+
+`MINISTRAL_MODEL` must be the deployment's advertised OpenAI model ID, not the
+Hugging Face repository path. The current private endpoint advertises
+`ministral-3-14b-instruct-2512` and a 65,536-token served context window.
 
 Each profile declares one of Curator's structured-output transports:
 `auto`, `tools`, `tools_auto`, `json_schema`, `json`, or `md_json`. The choice belongs to the

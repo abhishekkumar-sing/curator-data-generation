@@ -97,10 +97,20 @@ External validation required before release:
 - [x] Pass and persist the exact GLM generation probe. On 2026-08-05 it passed
   every nested sentinel/enum/list check in 37.328 s with fingerprint
   `61dbe1c71839baadb4bc7f4acc0704fa8dc26cbf21aac0ee7fb251b18a6981ca`.
-- [ ] Pass and persist the exact Ministral judge probe before resuming a large
-  or full-pipeline run. The 2026-08-05 04:54 UTC attempt resolved the intended
-  profile and request parameters but port 3006 refused the TCP connection with
-  zero tokens processed; JSON-schema support is therefore not yet proven.
+- [x] Pass and persist the exact Ministral judge probe before resuming a large
+  or full-pipeline run. The 2026-08-05 04:54 UTC attempt found the port down;
+  after correcting the model ID, the 05:02 UTC probe passed every nested
+  sentinel/enum/list check in 1.241 s with fingerprint
+  `54bdd1d2afe550a1dafd06186e842be698b4047ae1cba7acde24e50a9851991b`.
+- [x] Manually verify both active OpenAI-compatible deployments on 2026-08-05:
+  `/models`, ordinary chat completion, and raw strict JSON-schema completion
+  all succeeded for GLM and Ministral. GLM returned `GLM_OK`; Ministral returned
+  `MINISTRAL_OK`; both returned the required `{"status":"OK","value":7}`
+  object under schema constraints.
+- [x] Correct the Ministral request ID from the Hugging Face repository path,
+  which the server rejected with HTTP 404, to its advertised deployment ID
+  `ministral-3-14b-instruct-2512`. Record the server-reported 65,536-token
+  context window and vLLM `0.25.0-076f6001` deployment identity.
 
 Research basis:
 
@@ -109,9 +119,34 @@ Research basis:
   output, and recommends temperature below 0.1 in production:
   <https://huggingface.co/mistralai/Ministral-3-14B-Instruct-2512>.
 - The same card advertises a 262,144-token checkpoint limit but explicitly
-  permits a smaller served `--max-model-len`; Curator therefore uses 32,768 as
-  a conservative fallback and trusts the exact server/tokenizer measurement
-  when lower.
+  permits a smaller served `--max-model-len`; Curator initially used 32,768 as
+  a conservative fallback, then replaced it with the private server's verified
+  65,536-token deployment limit.
+
+## Reference saturation audit (2026-08-05)
+
+- [x] Inspect the reference CLI, configuration, state machine, tests, and run
+  documentation rather than inferring behavior from its command examples.
+- [x] Confirm that reference `--max-passes 0` means no operational pass cap:
+  its `while True` loop ignores the pass-bound condition when zero and stops
+  only when no active parent remains.
+- [x] Confirm that reference saturation is per parent, not a corpus-wide gain
+  ratio. Each parent receives its own exclusion history and must produce two
+  consecutive successful zero-novelty passes by default; finding a novel item
+  resets that parent's empty-pass counter.
+- [x] Confirm that missing responses, invalid-only output, rescue overflow, and
+  generation failure never advance saturation. They are rescued or quarantined
+  and leave the run incomplete; state is checkpointed after every pass.
+- [x] Compare this with Curator's current implementation: Curator applies a
+  global cross-document marginal-gain rule, requires `max_passes >= 1`, and
+  treats two complete passes below 5% gain as convergence. Omitting the flag
+  while `saturation.enabled: false` still selects one pass.
+- [ ] If unlimited `--max-passes 0` is adopted in Curator, first implement and
+  test per-parent completion/exclusion state, failure quarantine/reactivation,
+  prompt-growth budgeting, deterministic resume, and an explicit incomplete
+  terminal state. Do not merely relax the CLI validator or copy the reference's
+  fuzzy-string novelty rule; lexically varied paraphrases can otherwise keep an
+  unlimited run alive indefinitely.
 
 ## Generation endpoint migration (2026-08-03)
 

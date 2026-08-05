@@ -2847,6 +2847,7 @@ def test_role_profile_preserves_profile_defaults_but_role_limits_win() -> None:
     assert ministral["generation_params"]["extra_body"] == {}
     assert ministral["max_concurrent_requests"] == 16
     assert ministral["served_model_env"] == "MINISTRAL_MODEL"
+    assert configured_context_window(ministral) == 65536
 
 
 def test_thinking_generation_profile_preserves_template_and_sampling() -> None:

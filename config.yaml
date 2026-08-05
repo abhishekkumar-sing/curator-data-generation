@@ -106,9 +106,8 @@ model_profiles:
     # Exact support remains gated by the deployment probe below; the official
     # Instruct model advertises native JSON output and recommends vLLM >=0.12.
     structured_output_mode: json_schema
-    # Conservative operational fallback below the checkpoint's advertised
-    # 262144 tokens until the private deployment reports its exact limit.
-    context_window: 32768
+    # Verified from this private vLLM endpoint's /models metadata.
+    context_window: 65536
     max_concurrent_requests: 16
     generation_params:
       # Mistral recommends temperature below 0.1 for production use.
