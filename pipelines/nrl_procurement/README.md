@@ -298,6 +298,41 @@ To control cross-document volume independently:
 
 Use `--skip-cross-document` for a single-document-only run.
 
+### Cross-document novelty saturation
+
+`--max-passes` controls iterative cross-document novelty generation. Omitting
+the flag uses `config.yaml`; with the checked-in `saturation.enabled: false`,
+that means one pass. A positive value is a hard total-pass limit. Zero removes
+the numeric limit and continues until every source-bundle parent independently
+produces `saturation.empty_passes_required` consecutive successful passes with
+no novel record accepted after validation, near-duplicate removal, and the
+independent judge:
+
+```bash
+.curator/bin/python pipelines/nrl_procurement/generate.py \
+  --run-id saturation-pilot-001 \
+  --limit 500 \
+  --cross-document-limit 500 \
+  --drafting-limit 2 \
+  --max-passes 0
+```
+
+A novel accepted record resets only its own parent's empty streak. Missing or
+malformed generation, invalid output, and missing judge output quarantine that
+parent and leave the run `partial`; they never count as no-progress evidence.
+Transient generation/validation failures are reactivated when the same run ID
+is resumed. A deterministic prompt-context overflow remains quarantined until
+the inputs or model configuration change. The controller stores exact parent
+outcomes atomically in
+`outputs/<run-id>/files/saturation/cross_document.json`; cached pass replay must
+match that history. Use a new run ID after changing or refreshing a completed
+generation/judge pass. Because zero has no emergency numeric ceiling, run a
+positive bounded pilot first and monitor the pass audit before using it.
+
+This convergence controller currently applies to cross-document novelty
+passes. Single-document QA, drafting, and other one-shot families do not repeat
+merely because `--max-passes 0` is set.
+
 Additional cross-document exports are:
 
 - `cross_document_qa_sft.jsonl`

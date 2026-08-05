@@ -1289,22 +1289,22 @@ def _singular_judge_batch_size() -> int:
     return batch_size
 
 
-def _judge_prompt_budget(
-    judge: Any,
+def _rendered_prompt_budget(
+    llm: Any,
     row: dict[str, Any],
     profile: dict[str, Any],
 ) -> dict[str, Any]:
-    """Measure one complete judge request against its served context limit."""
+    """Measure one complete structured request against its served context."""
     source_window_config = CONFIG.get("source_windows", {})
-    messages = [{"role": "user", "content": judge.prompt(row)}]
-    response_schema = judge.response_format.model_json_schema()
+    messages = [{"role": "user", "content": llm.prompt(row)}]
+    response_schema = llm.response_format.model_json_schema()
     mode = profile.get("structured_output_mode", "auto")
     tools = None
     include_response_schema = mode not in {"json_schema", "tools_auto"}
     if mode == "tools_auto":
         auto_request = build_auto_tool_request(
             {"messages": messages},
-            judge.response_format,
+            llm.response_format,
         )
         messages = auto_request["messages"]
         tools = auto_request["tools"]
@@ -1361,6 +1361,11 @@ def _judge_prompt_budget(
     return budget
 
 
+# Backward-compatible internal name retained for downstream imports; generation
+# and judge requests now share the same rendered-request measurement.
+_judge_prompt_budget = _rendered_prompt_budget
+
+
 def _budget_judge_rows(
     judge: Any,
     rows: list[dict[str, Any]],
@@ -1370,7 +1375,7 @@ def _budget_judge_rows(
     accepted: list[dict[str, Any]] = []
     rejected: list[dict[str, Any]] = []
     for row in rows:
-        budget = _judge_prompt_budget(judge, row, profile)
+        budget = _rendered_prompt_budget(judge, row, profile)
         if budget["passed"]:
             accepted.append({**row, "prompt_budget": budget})
             continue
@@ -1528,12 +1533,39 @@ def _execute_cross_pass(
     """Execute and reconcile one independently checkpointed novelty pass."""
     generation_stage = f"cross_generation_pass_{pass_index:03d}"
     judge_stage = f"cross_judge_pass_{pass_index:03d}"
+    generator = CrossDocumentGenerator(**_llm_kwargs(GENERATION))
+    budgeted_generation: list[dict[str, Any]] = []
+    generation_prompt_rejected: list[dict[str, Any]] = []
+    for row in planned:
+        budget = _rendered_prompt_budget(generator, row, GENERATION)
+        if budget["passed"]:
+            budgeted_generation.append({**row, "prompt_budget": budget})
+        else:
+            generation_prompt_rejected.append(
+                {
+                    "parent_request_id": row["planned_request_id"],
+                    "planned_task_type": row["planned_task_type"],
+                    "task_type": row["planned_task_type"],
+                    "answerable": bool(row.get("planned_answerable", True)),
+                    "source_bundle_id": row["source_bundle_id"],
+                    "terminal_state": "prompt_budget_rejected",
+                    "generation_prompt_budget": budget,
+                    "deterministic_checks": {
+                        "passed": False,
+                        "issues": ["generation_prompt_exceeds_context_window"],
+                    },
+                }
+            )
     os.environ["HOSTED_VLLM_API_KEY"] = _model_settings(GENERATION)[2]
-    raw_generated = _execute_llm_stage(
-        generation_stage,
-        "generation",
-        CrossDocumentGenerator(**_llm_kwargs(GENERATION)),
-        planned,
+    raw_generated = (
+        _execute_llm_stage(
+            generation_stage,
+            "generation",
+            generator,
+            budgeted_generation,
+        )
+        if budgeted_generation
+        else []
     )
     successful_parent_ids = {
         str(row.get("parent_request_id", ""))
@@ -1541,7 +1573,7 @@ def _execute_cross_pass(
         if row.get("parent_request_id")
     }
     generated_audit = materialize_terminal_failures(
-        planned,
+        budgeted_generation,
         raw_generated,
         planned_id=lambda row: row["planned_request_id"],
         record_id=lambda row: row.get("parent_request_id"),
@@ -1553,7 +1585,7 @@ def _execute_cross_pass(
             "answerable": bool(row.get("planned_answerable", True)),
             "source_bundle_id": row["source_bundle_id"],
         },
-    )
+    ) + generation_prompt_rejected
     _write_audit(
         files_dir / f"cross_generated_audit_pass_{pass_index:03d}.jsonl",
         generated_audit,
@@ -1641,6 +1673,7 @@ def _execute_cross_pass(
         "accepted": accepted,
         "rejected": rejected,
         "judge_prompt_rejected": judge_prompt_rejected,
+        "generation_prompt_rejected": generation_prompt_rejected,
         "duplicates": duplicates,
         "successful_parent_ids": successful_parent_ids,
         "valid_parent_ids": valid_parent_ids,
@@ -1706,7 +1739,10 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument(
         "--max-passes",
         type=int,
-        help="Override the bounded saturation pass limit",
+        help=(
+            "Override the saturation pass limit; 0 removes the numeric cap "
+            "and runs until per-parent convergence"
+        ),
     )
     args = parser.parse_args(argv)
     dynamic_stage = re.compile(r"cross_(?:generation|judge)_pass_\d{3}")
@@ -1719,8 +1755,8 @@ def main(argv: list[str] | None = None) -> None:
         parser.error(
             "unknown --refresh-stage value(s): " + ", ".join(invalid_refresh)
         )
-    if args.max_passes is not None and args.max_passes < 1:
-        parser.error("--max-passes must be at least 1")
+    if args.max_passes is not None and args.max_passes < 0:
+        parser.error("--max-passes must be zero or greater")
     calibration_required = bool(
         args.limit is None
         and CONFIG.get("judge_calibration", {}).get(
@@ -1743,8 +1779,11 @@ def main(argv: list[str] | None = None) -> None:
     refresh_stages = set(args.refresh_stage)
     refresh_passes = max(
         1,
-        args.max_passes
-        or int(CONFIG.get("saturation", {}).get("max_passes", 1)),
+        (
+            args.max_passes
+            if args.max_passes is not None and args.max_passes > 0
+            else int(CONFIG.get("saturation", {}).get("max_passes", 1))
+        ),
         int(CONFIG.get("cross_document", {}).get("novelty_passes", 0)) + 1,
     )
     for base_stage in ("cross_generation", "cross_judge"):
@@ -2658,13 +2697,22 @@ def main(argv: list[str] | None = None) -> None:
                 key=lambda row: hashlib.sha256(f"{seed}:{row['source_bundle_id']}".encode()).hexdigest(),
             )[:cross_limit]
         base_planned_cross = plan_cross_document_requests(bundles, seed)
+        base_by_parent = {
+            str(row["planned_request_id"]): row for row in base_planned_cross
+        }
+        cross_saturation.register_parents(set(base_by_parent))
         if bundles:
-            for pass_index in range(1, cross_policy.max_passes + 1):
-                if pass_index > cross_saturation.next_pass or (
-                    pass_index == cross_saturation.next_pass
-                    and not cross_saturation.should_continue
-                ):
-                    break
+            pass_index = 1
+            while (
+                pass_index < cross_saturation.next_pass
+                or cross_saturation.should_continue
+            ):
+                replaying = pass_index < cross_saturation.next_pass
+                active_parent_ids = (
+                    cross_saturation.parent_ids_for_pass(pass_index)
+                    if replaying
+                    else cross_saturation.active_parent_ids
+                )
                 prior_by_bundle: dict[str, list[str]] = {}
                 for record in cross_accepted:
                     prior_by_bundle.setdefault(
@@ -2683,7 +2731,8 @@ def main(argv: list[str] | None = None) -> None:
                             str(row["source_bundle_id"]), []
                         ),
                     }
-                    for row in base_planned_cross
+                    for parent_id in active_parent_ids
+                    for row in [base_by_parent[parent_id]]
                 ]
                 pass_result = _execute_cross_pass(
                     planned_pass,
@@ -2729,24 +2778,59 @@ def main(argv: list[str] | None = None) -> None:
                 )
                 cross_duplicates += removed
                 cross_accepted.extend(novel)
-                if pass_index == cross_saturation.next_pass:
-                    planned_ids = {
-                        str(row["planned_request_id"]) for row in planned_pass
-                    }
-                    cross_saturation.observe(
-                        pass_index=pass_index,
-                        planned=len(planned_ids),
-                        successful=len(
-                            planned_ids & pass_result["successful_parent_ids"]
-                        ),
-                        valid=len(planned_ids & pass_result["valid_parent_ids"]),
-                        accepted_novel=len(
-                            {
-                                str(row["parent_request_id"])
-                                for row in novel
-                            }
-                        ),
+                runtime_to_stable = {
+                    str(row["planned_request_id"]): parent_id
+                    for parent_id, row in zip(active_parent_ids, planned_pass)
+                }
+                novel_runtime_ids = {
+                    str(row["parent_request_id"]) for row in novel
+                }
+                novel_record_ids = {
+                    runtime_to_stable[runtime_id]: sorted(
+                        str(row["record_id"])
+                        for row in novel
+                        if str(row["parent_request_id"]) == runtime_id
                     )
+                    for runtime_id in novel_runtime_ids
+                }
+                prompt_overflow_ids = {
+                    str(row.get("parent_request_id", ""))
+                    for row in [
+                        *pass_result["generation_prompt_rejected"],
+                        *pass_result["judge_prompt_rejected"],
+                    ]
+                }
+                outcomes = {}
+                for runtime_id, parent_id in runtime_to_stable.items():
+                    if runtime_id in prompt_overflow_ids:
+                        outcome = "prompt_overflow"
+                    elif runtime_id not in pass_result["successful_parent_ids"]:
+                        outcome = "generation_failed"
+                    elif runtime_id not in pass_result["valid_parent_ids"]:
+                        outcome = "validation_failed"
+                    elif runtime_id in novel_runtime_ids:
+                        outcome = "novel"
+                    else:
+                        outcome = "empty"
+                    outcomes[parent_id] = outcome
+                if replaying:
+                    if (
+                        outcomes != cross_saturation.outcomes_for_pass(pass_index)
+                        or novel_record_ids
+                        != cross_saturation.novel_record_ids_for_pass(pass_index)
+                    ):
+                        raise ValueError(
+                            "Replayed cross-document pass does not match its "
+                            "saturation checkpoint; use a new run ID after "
+                            "refreshing generation or judge stages"
+                        )
+                else:
+                    cross_saturation.observe_parents(
+                        pass_index=pass_index,
+                        outcomes=outcomes,
+                        novel_record_ids=novel_record_ids,
+                    )
+                pass_index += 1
             _write_audit(
                 files_dir / "cross_generated_audit.jsonl",
                 cross_generated_audit,
@@ -2810,7 +2894,7 @@ def main(argv: list[str] | None = None) -> None:
         )
         budgeted = []
         for row in deterministic_unanswerable:
-            budget = _judge_prompt_budget(answerability_judge, row, judge_profile)
+            budget = _rendered_prompt_budget(answerability_judge, row, judge_profile)
             if budget["passed"]:
                 budgeted.append({**row, "prompt_budget": budget})
             else:

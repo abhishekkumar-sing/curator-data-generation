@@ -141,12 +141,25 @@ Research basis:
   global cross-document marginal-gain rule, requires `max_passes >= 1`, and
   treats two complete passes below 5% gain as convergence. Omitting the flag
   while `saturation.enabled: false` still selects one pass.
-- [ ] If unlimited `--max-passes 0` is adopted in Curator, first implement and
+- [x] Adopt unlimited `--max-passes 0` for Curator's cross-document family and
   test per-parent completion/exclusion state, failure quarantine/reactivation,
   prompt-growth budgeting, deterministic resume, and an explicit incomplete
   terminal state. Do not merely relax the CLI validator or copy the reference's
-  fuzzy-string novelty rule; lexically varied paraphrases can otherwise keep an
-  unlimited run alive indefinitely.
+  fuzzy-string novelty rule. Implemented with exact per-parent outcomes after
+  deterministic validation, existing near-duplicate selection, and independent
+  judging; two successful zero-novelty passes complete a parent, novelty resets
+  its streak, transient failures reactivate only on a later invocation, prompt
+  overflow remains quarantined, and replay must reproduce checkpointed outcomes.
+- [ ] Extend the shared controller to single-document QA, drafting, and any
+  other family intentionally made iterative before calling `--max-passes 0` a
+  whole-pipeline saturation run. The current flag repeats cross-document
+  novelty generation only; the README states this boundary explicitly.
+- [x] Validate the Curator implementation with 8 deterministic saturation
+  regressions (unlimited semantics, independent parent completion, novelty
+  reset, failure quarantine, resume reactivation, replay identity, population
+  mismatch, hard limit, and single-pass behavior) and the complete 155-test
+  `tests/nrl_procurement` suite on 2026-08-05. Ruff and `git diff --check` pass;
+  no model-backed run was started by the implementation agent.
 
 ## Generation endpoint migration (2026-08-03)
 
@@ -826,17 +839,23 @@ Research-gate acceptance criteria:
   as `--model nemotron120b` is supported, define whether it selects generation
   only or a named paired profile; never silently use the same endpoint as its
   own judge when independent judging is required.
-- [ ] Define `--max-passes` unambiguously: `0` means a full saturation run with
-  no numeric pass cap; a positive integer caps the number of passes. A
-  saturation run must stop only on a researched, configured convergence rule,
-  not merely when one pass produces fewer records than requested.
-- [ ] Make saturation termination safe and auditable: persist per-stage/pass
+- [x] Define `--max-passes` unambiguously for the current cross-document
+  iterative family: `0` means no numeric pass cap; a positive integer caps the
+  total number of passes; omission follows configuration and currently means
+  one pass. It stops on per-parent consecutive zero accepted novelty, not when
+  one corpus-wide pass merely produces fewer records than requested.
+- [x] Make cross-document saturation termination safe and auditable: persist per-stage/pass
   state; measure novel accepted records after deterministic validation,
   deduplication, and independent judging; require the configured consecutive
-  no-progress/low-yield condition; stop when the eligible source/planning space
+  no-progress condition; stop when the eligible source/planning space
   is exhausted; and record the exact stopping reason and pass metrics in the
   manifest. Resume must continue from persisted saturation state rather than
-  reset the evidence window.
+  reset the evidence window. Contract-v2 state binds the exact parent population,
+  stores per-parent outcomes, rejects divergent cache replay, distinguishes
+  hard-limit/incomplete/converged endings, and atomically replaces checkpoints.
+- [ ] Generalize those guarantees to any future iterative single-document,
+  drafting, temporal, graph/path, or dialogue family; they remain one-shot in
+  this Curator pipeline today.
 - [x] Generate a safe dynamic run ID when `--run-id` is omitted, while allowing
   an explicit run ID for reproducible pilots and resumptions.
 - [x] Preserve local-only operation: Curator Viewer and telemetry remain off,

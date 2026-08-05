@@ -14,14 +14,14 @@ curator:
 structured_output_probe:
   required_for_full_runs: true
 
-# Optional bounded multi-pass generation. Enabling this never permits an
-# unbounded loop: marginal novelty must remain below the configured gain for
-# `patience` complete, schema-valid passes, and `max_passes` is always hard.
+# Optional multi-pass generation. ``max_passes: 0`` removes the numeric cap;
+# every parent must then independently produce ``empty_passes_required``
+# consecutive successful, schema-valid passes with no accepted novelty.
+# Failures are quarantined as incomplete and never count as saturation.
 saturation:
   enabled: false
   max_passes: 3
-  minimum_novelty_gain: 0.05
-  patience: 2
+  empty_passes_required: 2
 
 paths:
   source_dir: data/source
