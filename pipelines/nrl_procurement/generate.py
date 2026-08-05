@@ -253,6 +253,8 @@ def _execute_llm_stage(
     role: str,
     llm: Any,
     inputs: list[dict[str, Any]],
+    *,
+    prefer_historical_checkpoint: bool = False,
 ) -> list[dict[str, Any]]:
     """Execute one resumable logical LLM stage."""
     if _RESUME_MANAGER is None:
@@ -262,6 +264,7 @@ def _execute_llm_stage(
         role=role,
         llm=llm,
         inputs=inputs,
+        prefer_historical_checkpoint=prefer_historical_checkpoint,
     )
 
 
@@ -1408,13 +1411,20 @@ def _output_rescue_profile(
     rescue_tokens = min(requested, context_window - safety_margin)
     if rescue_tokens <= ordinary:
         return None
-    return {
+    rescue_profile = {
         **profile,
         "generation_params": {
             **profile["generation_params"],
             "max_tokens": rescue_tokens,
         },
     }
+    rescue_concurrency = profile.get("output_rescue_max_concurrent_requests")
+    if rescue_concurrency is not None:
+        rescue_profile["max_concurrent_requests"] = min(
+            int(profile["max_concurrent_requests"]),
+            int(rescue_concurrency),
+        )
+    return rescue_profile
 
 
 def _rescue_input(row: dict[str, Any], rescue_tokens: int) -> dict[str, Any]:
@@ -1658,6 +1668,7 @@ def _execute_cross_pass(
     pass_index: int,
     *,
     allow_output_rescue: bool = True,
+    prefer_historical_checkpoints: bool = False,
 ) -> dict[str, Any]:
     """Execute and reconcile one independently checkpointed novelty pass."""
     generation_stage = f"cross_generation_pass_{pass_index:03d}"
@@ -1692,6 +1703,7 @@ def _execute_cross_pass(
             "generation",
             generator,
             budgeted_generation,
+            prefer_historical_checkpoint=prefer_historical_checkpoints,
         )
         if budgeted_generation
         else []
@@ -1824,6 +1836,7 @@ def _execute_cross_pass(
                 "judge",
                 judge,
                 budgeted,
+                prefer_historical_checkpoint=prefer_historical_checkpoints,
             )
         if allow_output_rescue:
             judged, judge_rescued, rescue_prompt_rejected = (
@@ -2995,6 +3008,7 @@ def main(argv: list[str] | None = None) -> None:
                     files_dir,
                     pass_index,
                     allow_output_rescue=not replaying,
+                    prefer_historical_checkpoints=replaying,
                 )
                 planned_cross.extend(planned_pass)
                 cross_generated_audit.extend(pass_result["generated_audit"])

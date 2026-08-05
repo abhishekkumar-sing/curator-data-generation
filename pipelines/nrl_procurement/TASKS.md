@@ -195,6 +195,46 @@ Research basis:
   endpoint's p99 materially changes, recalibrate from observed first-attempt
   latency rather than lowering the timeout to the reference's value blindly.
 
+Follow-up result and remediation (2026-08-05):
+
+- [x] The resumed 225-request cross-generation replay provided the required
+  adverse load evidence: only 45 requests succeeded and 180 timed out on both
+  attempts at 600 seconds. The synchronized failure wave shows endpoint/queue
+  collapse at 128 concurrent long-output requests, not an ordinary latency tail
+  that should be addressed by restoring a 1,800-second wait.
+- [x] Override the GLM profile to 32 concurrent ordinary requests. The observed
+  long-output throughput was about 5 requests/minute, so 32 remains enough to
+  keep the endpoint occupied while preventing nearly the whole pass from
+  accumulating inside the active server queue. Cap generation rescue at 16 and
+  judge rescue at 8 concurrent requests.
+- [x] Preserve the original run artifacts. `saturation-500-001` still contains
+  the original 528-record pass-1 generation checkpoint, its matching 161 judge
+  decisions, and completed checkpoints through pass 4. The failed restart wrote
+  separate 105-record generation and 26-record judge checkpoints; it did not
+  overwrite the earlier immutable artifacts or saturation observations.
+- [x] Add historical saturation-replay checkpoint selection. Replay may select
+  an integrity-hash-verified artifact from an earlier attempt when its input,
+  role, and response-affecting model identity match, even across the one-time
+  transport/scientific-contract migration. Replay still fails closed unless the
+  reconstructed per-parent outcomes and novel record IDs exactly equal the
+  persisted saturation observation.
+- [x] Verify the selector read-only against the real run: pass-1 generation now
+  resolves to checkpoint `0f12dd...` with 528 records and pass-1 judging to
+  `523e65...` with 161 records, rather than the degraded restart artifacts.
+- [x] Add replay and concurrency regressions. The focused pipeline suite passes
+  112 tests; the complete procurement suite passes 160 tests.
+- [ ] Resume the same run after this revision and confirm passes 1–4 replay from
+  historical checkpoints without model calls, then measure fresh pass-5 GLM
+  behavior at concurrency 32. Keep this external endpoint validation open until
+  its result is recorded.
+
+The concurrency reduction is consistent with vLLM's documented scheduler
+control: `--max-num-seqs` is the maximum sequences processed in one iteration,
+and vLLM states that real deployments should set it in engine configuration.
+The client cap of 32 is a conservative admission limit derived from this
+deployment's observed failure wave; it is not asserted to be a universal vLLM
+optimum: <https://docs.vllm.ai/en/stable/cli/serve/#max-num-seqs>.
+
 Research basis:
 
 - aiohttp's official `ClientTimeout` contract defines `total` as the ceiling

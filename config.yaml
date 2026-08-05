@@ -42,6 +42,11 @@ model_profiles:
     # the observed tail while retrying a silent request after ten minutes.
     request_timeout: 600
     max_retries: 1
+    # Cross-document generation at 128 concurrent requests degraded into a
+    # synchronized 180/225 timeout wave. Thirty-two active requests still
+    # saturate the observed ~5 req/min long-output throughput without placing
+    # the entire pass inside the server queue at once.
+    max_concurrent_requests: 32
     # The private server omits max_model_len from /models and does not expose
     # /tokenize. Keep a conservative explicit prompt-budget fallback.
     context_window: 32768
@@ -150,6 +155,7 @@ models:
     # a separate checkpoint at this larger ceiling. Ordinary requests retain
     # the 8,192-token cap below.
     output_rescue_max_tokens: 12000
+    output_rescue_max_concurrent_requests: 16
     generation_params:
       temperature: 1.0
       top_p: 0.95
@@ -176,6 +182,7 @@ models:
     # fraction of otherwise valid singular cross-document judgments. Retry only
     # those missing decisions once at 4,096 after a context-window preflight.
     output_rescue_max_tokens: 4096
+    output_rescue_max_concurrent_requests: 8
     generation_params:
       temperature: 1.0
       top_p: 0.95

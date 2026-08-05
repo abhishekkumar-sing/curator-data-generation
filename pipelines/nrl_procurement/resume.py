@@ -23,6 +23,7 @@ TRANSPORT_TUNING_KEYS = {
     # primary-stage artifact. The rescue budget is included in each rescue
     # stage's logical inputs so changing it invalidates only that checkpoint.
     "output_rescue_max_tokens",
+    "output_rescue_max_concurrent_requests",
 }
 STAGE_CONTRACT_VERSIONS = {
     # Increment only when persisted response semantics change. Source-only
@@ -258,10 +259,12 @@ class ResumeManager:
         self,
         *,
         stage: str,
+        role: str,
         logical_input_hash: str,
         preferred_dir: Path,
+        prefer_historical: bool = False,
     ) -> tuple[Path, dict[str, Any]] | None:
-        """Find an immutable completed artifact, including v1 checkpoints."""
+        """Find an immutable completed artifact, including replay history."""
         candidates = [preferred_dir]
         stage_root = self.run_root / "checkpoints" / stage
         if stage_root.is_dir():
@@ -270,20 +273,48 @@ class ResumeManager:
                 for path in sorted(stage_root.glob("*/metadata.json"))
                 if path.parent != preferred_dir
             )
+        compatible: list[tuple[Path, dict[str, Any]]] = []
+        current_model = _cache_model_identity(self.model_identities[role])
         for checkpoint_dir in candidates:
             data_path = checkpoint_dir / "records.jsonl"
             metadata_path = checkpoint_dir / "metadata.json"
             if not data_path.is_file() or not metadata_path.is_file():
                 continue
             metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-            if (
+            basic_match = (
                 metadata.get("status") == "complete"
                 and metadata.get("stage") == stage
                 and metadata.get("input_sha256") == logical_input_hash
-                and metadata.get("contract_sha256")
-                == self._contract_hash(stage)
+            )
+            if not basic_match:
+                continue
+            if (
+                not prefer_historical
+                and metadata.get("contract_sha256") == self._contract_hash(stage)
             ):
                 return checkpoint_dir, metadata
+            producer = metadata.get("producer", {})
+            if (
+                prefer_historical
+                and producer.get("attempt_id") != self.attempt_id
+                and producer.get("role") == role
+                and _cache_model_identity(producer.get("model_identity", {}))
+                == current_model
+            ):
+                rows = _read_jsonl(data_path)
+                if metadata.get("output_sha256") == _canonical_hash(rows):
+                    compatible.append((checkpoint_dir, metadata))
+        if compatible:
+            # Saturation observations were created by an earlier attempt. Use
+            # the earliest compatible producer, then let replay equality prove
+            # it is the exact artifact behind the persisted observation.
+            compatible.sort(
+                key=lambda item: (
+                    str(item[1].get("producer", {}).get("attempt_id", "")),
+                    item[0].name,
+                )
+            )
+            return compatible[0]
         return None
 
     def execute_llm_stage(
@@ -293,6 +324,7 @@ class ResumeManager:
         role: str,
         llm: Any,
         inputs: list[dict[str, Any]],
+        prefer_historical_checkpoint: bool = False,
     ) -> list[dict[str, Any]]:
         """Reuse a completed logical checkpoint or execute one fingerprinted stage."""
         logical_input_hash = _canonical_hash(_checkpoint_input(inputs))
@@ -310,8 +342,10 @@ class ResumeManager:
         if stage not in self.refresh_stages:
             completed = self._completed_checkpoint(
                 stage=stage,
+                role=role,
                 logical_input_hash=logical_input_hash,
                 preferred_dir=checkpoint_dir,
+                prefer_historical=prefer_historical_checkpoint,
             )
             if completed is not None:
                 completed_dir, metadata = completed
@@ -320,9 +354,13 @@ class ResumeManager:
                     "status": "reused_checkpoint",
                     "checkpoint_key": completed_dir.name,
                     "compatibility": (
-                        "current_contract"
-                        if completed_dir == checkpoint_dir
-                        else "source_independent_completed_artifact"
+                        "saturation_replay_candidate_historical_artifact"
+                        if prefer_historical_checkpoint
+                        else (
+                            "current_contract"
+                            if completed_dir == checkpoint_dir
+                            else "source_independent_completed_artifact"
+                        )
                     ),
                     "producer": metadata.get("producer"),
                     "records": len(rows),

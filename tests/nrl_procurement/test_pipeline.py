@@ -2837,6 +2837,7 @@ def test_role_profile_preserves_profile_defaults_but_role_limits_win() -> None:
     glm = generation_pipeline._role_profile("generation", "glm")
     assert glm["request_timeout"] == 600
     assert glm["max_retries"] == 1
+    assert glm["max_concurrent_requests"] == 32
 
     resolved = generation_pipeline._role_profile("judge", "gemma")
     assert resolved["generation_params"]["max_tokens"] == 2048
@@ -2860,12 +2861,14 @@ def test_output_rescue_raises_only_the_recovery_completion_budget() -> None:
     assert generation["generation_params"]["max_tokens"] == 8192
     assert generation_rescue is not None
     assert generation_rescue["generation_params"]["max_tokens"] == 12000
+    assert generation_rescue["max_concurrent_requests"] == 16
 
     judge = generation_pipeline._role_profile("judge", "ministral")
     judge_rescue = generation_pipeline._output_rescue_profile(judge)
     assert judge["generation_params"]["max_tokens"] == 2048
     assert judge_rescue is not None
     assert judge_rescue["generation_params"]["max_tokens"] == 4096
+    assert judge_rescue["max_concurrent_requests"] == 8
     assert judge_rescue["generation_params"]["temperature"] == 0.05
     assert generation_pipeline._rescue_input(
         {"record_id": "one"}, 4096
@@ -4197,6 +4200,7 @@ def test_transport_tuning_does_not_change_scientific_contract(
                     "max_retries": 1,
                     "max_concurrent_requests": 64,
                     "output_rescue_max_tokens": 12000,
+                    "output_rescue_max_concurrent_requests": 16,
                 }
             },
         },
@@ -4207,6 +4211,62 @@ def test_transport_tuning_does_not_change_scientific_contract(
     assert first._stage_fingerprint(
         "generation", "generation"
     ) == second._stage_fingerprint("generation", "generation")
+
+
+def test_saturation_replay_can_reuse_integrity_checked_historical_contract(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    first = _resume_manager(
+        tmp_path,
+        monkeypatch,
+        generation_model="model-a",
+        generation_url="http://10.0.0.1:8000/v1",
+        generation_deployment="deployment-a",
+    )
+    first.start()
+    calls: list[str] = []
+    expected = [{"record_id": "historical-record"}]
+    assert first.execute_llm_stage(
+        stage="cross_generation_pass_001",
+        role="generation",
+        llm=_FakeStageLLM(expected, calls),
+        inputs=[{"planned_request_id": "one"}],
+    ) == expected
+    first.finish("partial")
+
+    metadata_path = next(
+        (
+            tmp_path
+            / "outputs"
+            / "same-run"
+            / "checkpoints"
+            / "cross_generation_pass_001"
+        ).glob("*/metadata.json")
+    )
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata["contract_sha256"] = "legacy-transport-inclusive-contract"
+    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+    replay = _resume_manager(
+        tmp_path,
+        monkeypatch,
+        generation_model="model-a",
+        generation_url="http://10.0.0.1:8000/v1",
+        generation_deployment="deployment-a",
+    )
+    replay.start()
+    reused = replay.execute_llm_stage(
+        stage="cross_generation_pass_001",
+        role="generation",
+        llm=_FakeStageLLM([], calls, fail=True),
+        inputs=[{"planned_request_id": "one"}],
+        prefer_historical_checkpoint=True,
+    )
+    assert reused == expected
+    assert replay.summary()["stage_events"]["cross_generation_pass_001"][
+        "compatibility"
+    ] == "saturation_replay_candidate_historical_artifact"
 
 
 def test_completed_stage_survives_pipeline_source_change(

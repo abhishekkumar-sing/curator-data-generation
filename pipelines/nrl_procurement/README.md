@@ -70,6 +70,14 @@ Timeout, retry, concurrency, RPM, and TPM values are transport tuning: changing
 them does not alter scientific checkpoint compatibility, although every run
 manifest still records their exact values.
 
+GLM generation is limited to 32 concurrent requests after 128 concurrent
+long-output requests produced a synchronized server/queue timeout wave. During
+saturation replay, the pipeline reuses the integrity-checked historical
+checkpoint from the earlier attempt and verifies that reconstructed outcomes
+exactly match persisted saturation state; it does not regenerate an old pass or
+weaken the mismatch guard. Rescue concurrency is separately limited to 16 for
+generation and 8 for judging.
+
 Terminal structured outputs omitted after ordinary retries receive one
 missing-row-only recovery stage. Generation rescues use at most 12,000 tokens;
 judge rescues use at most 4,096. Each rescue is separately checkpointed and is
