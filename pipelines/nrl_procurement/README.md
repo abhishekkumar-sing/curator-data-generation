@@ -61,11 +61,12 @@ Gemma-specific thinking template argument, a 2,048-token judge ceiling, and 16
 concurrent requests. Every endpoint change still requires the exact
 structured-output probe.
 
-The GLM profile uses a 600-second request timeout and one retry. This is based
-on the observed `saturation-500-001` blueprint distribution (about 256 seconds
-median, 339 seconds p99, and 365 seconds maximum for ordinary successful
-requests). A silent request is therefore retried after ten minutes instead of
-holding the final progress slot for the generic 1,800-second role timeout.
+The GLM profile uses a 1,200-second request timeout and one retry. The first
+load test measured about 256 seconds median, 339 seconds p99, and 365 seconds
+maximum for ordinary blueprint requests, but fresh cross-document pass 5 still
+had productive long-running requests reach the former 600-second boundary at
+concurrency 32. A silent request is therefore retried after twenty minutes
+instead of holding the final progress slot for the old 1,800-second timeout.
 Timeout, retry, concurrency, RPM, and TPM values are transport tuning: changing
 them does not alter scientific checkpoint compatibility, although every run
 manifest still records their exact values.

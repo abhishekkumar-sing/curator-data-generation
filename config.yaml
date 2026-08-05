@@ -36,11 +36,11 @@ model_profiles:
     api_key_env: GLM_API_KEY
     deployment_identity_env: GLM_DEPLOYMENT_ID
     structured_output_mode: json_schema
-    # saturation-500-001 measured a 256s median, 339s p99, and 365s maximum
-    # successful first-attempt tail. One dead call otherwise occupied the last
-    # progress slot for the role-level 1800s timeout. Preserve headroom over
-    # the observed tail while retrying a silent request after ten minutes.
-    request_timeout: 600
+    # Cross-document pass 5 still produced valid long-running requests at the
+    # former 600s boundary after concurrency was reduced to 32. Allow twenty
+    # minutes per attempt while retaining one retry; this remains below the old
+    # 1800s-per-attempt setting and its roughly one-hour two-attempt tail.
+    request_timeout: 1200
     max_retries: 1
     # Cross-document generation at 128 concurrent requests degraded into a
     # synchronized 180/225 timeout wave. Thirty-two active requests still

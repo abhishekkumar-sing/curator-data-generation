@@ -177,23 +177,25 @@ Research basis:
   one work-conserving retry and explicit missing-row rescue/quarantine. Its old
   deferred-retry monkey patch is not copied because Curator already contains
   the equivalent in-task scheduler in commit `f956b921` with regression tests.
-- [x] Configure the active GLM profile for a measured 600-second timeout and
-  one retry. This reduces a silent first attempt from 30 to 10 minutes and the
-  bounded two-attempt worst case from about 90 to 20 minutes, while preserving
-  more than 60% headroom over the observed ordinary maximum.
+- [x] Initially configure the active GLM profile for a measured 600-second
+  timeout and one retry. This bounded the earlier silent tail and provided the
+  fresh load evidence below; pass-5 evidence subsequently superseded this
+  setting with the 1,200-second policy recorded below.
 - [x] Separate transport tuning (`request_timeout`, retries, concurrency, RPM,
   and TPM) from scientific config/model cache identity while retaining it in
   run provenance. Future tuning can reuse compatible partial/completed stage
   artifacts; model/deployment, structured-output mode, sampling parameters,
   schema contracts, inputs, and pipeline revision remain fingerprinted.
-- [x] Add regressions proving the GLM override resolves to 600 seconds/one
-  retry and that endpoint URL/timeout plus config-level transport tuning do not
+- [x] Add regressions proving the GLM override resolves to its configured
+  timeout with one retry and that endpoint URL/timeout plus config-level
+  transport tuning do not
   alter the scientific contract or stage fingerprint. The complete procurement
   suite plus Curator retry/credential regressions passes 166 tests; Ruff and
   `git diff --check` pass.
-- [ ] Validate the 600-second boundary on a fresh bounded load test. If the
-  endpoint's p99 materially changes, recalibrate from observed first-attempt
-  latency rather than lowering the timeout to the reference's value blindly.
+- [x] Validate the 600-second boundary on a fresh bounded load test. Pass 5
+  showed multiple otherwise non-terminal requests reaching that boundary at
+  concurrency 32, so 600 seconds is now retained as measured historical
+  evidence rather than the active policy.
 
 Follow-up result and remediation (2026-08-05):
 
@@ -235,6 +237,13 @@ Follow-up result and remediation (2026-08-05):
   entered their one allowed retry; these warnings are not permanent failures.
   Leave the final endpoint-validation item open until the stage and its targeted
   rescue, if needed, reach terminal statistics.
+- [x] Raise the active GLM request timeout from 600 to 1,200 seconds at the
+  user's request after the fresh pass-5 evidence. Preserve one retry and
+  concurrency 32, yielding a twenty-minute attempt and an approximately
+  forty-minute bounded two-attempt tail. Keep timeout and concurrency outside
+  scientific cache identity; the active process retains 600 seconds in memory,
+  while its next invocation loads 1,200 seconds without invalidating completed
+  checkpoints.
 
 The concurrency reduction is consistent with vLLM's documented scheduler
 control: `--max-num-seqs` is the maximum sequences processed in one iteration,

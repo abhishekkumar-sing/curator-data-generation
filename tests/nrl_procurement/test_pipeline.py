@@ -2835,7 +2835,7 @@ def test_cosmetic_persona_prefix_and_operation_aliases_are_narrowly_repaired() -
 
 def test_role_profile_preserves_profile_defaults_but_role_limits_win() -> None:
     glm = generation_pipeline._role_profile("generation", "glm")
-    assert glm["request_timeout"] == 600
+    assert glm["request_timeout"] == 1200
     assert glm["max_retries"] == 1
     assert glm["max_concurrent_requests"] == 32
 
