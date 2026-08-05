@@ -70,6 +70,13 @@ Timeout, retry, concurrency, RPM, and TPM values are transport tuning: changing
 them does not alter scientific checkpoint compatibility, although every run
 manifest still records their exact values.
 
+Terminal structured outputs omitted after ordinary retries receive one
+missing-row-only recovery stage. Generation rescues use at most 12,000 tokens;
+judge rescues use at most 4,096. Each rescue is separately checkpointed and is
+submitted only when the complete rendered prompt plus the larger completion
+reserve fits the selected deployment context. Existing successful rows are
+never regenerated, and partial/truncated judge JSON is never accepted.
+
 `MINISTRAL_MODEL` must be the deployment's advertised OpenAI model ID, not the
 Hugging Face repository path. The current private endpoint advertises
 `ministral-3-14b-instruct-2512` and a 65,536-token served context window.

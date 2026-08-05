@@ -19,6 +19,10 @@ TRANSPORT_TUNING_KEYS = {
     "max_concurrent_requests",
     "max_requests_per_minute",
     "max_tokens_per_minute",
+    # Recovery-only completion budgets do not change a successfully completed
+    # primary-stage artifact. The rescue budget is included in each rescue
+    # stage's logical inputs so changing it invalidates only that checkpoint.
+    "output_rescue_max_tokens",
 }
 STAGE_CONTRACT_VERSIONS = {
     # Increment only when persisted response semantics change. Source-only

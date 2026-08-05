@@ -2854,6 +2854,124 @@ def test_role_profile_preserves_profile_defaults_but_role_limits_win() -> None:
     assert configured_context_window(ministral) == 65536
 
 
+def test_output_rescue_raises_only_the_recovery_completion_budget() -> None:
+    generation = generation_pipeline._role_profile("generation", "glm")
+    generation_rescue = generation_pipeline._output_rescue_profile(generation)
+    assert generation["generation_params"]["max_tokens"] == 8192
+    assert generation_rescue is not None
+    assert generation_rescue["generation_params"]["max_tokens"] == 12000
+
+    judge = generation_pipeline._role_profile("judge", "ministral")
+    judge_rescue = generation_pipeline._output_rescue_profile(judge)
+    assert judge["generation_params"]["max_tokens"] == 2048
+    assert judge_rescue is not None
+    assert judge_rescue["generation_params"]["max_tokens"] == 4096
+    assert judge_rescue["generation_params"]["temperature"] == 0.05
+    assert generation_pipeline._rescue_input(
+        {"record_id": "one"}, 4096
+    )["_output_rescue_max_tokens"] == 4096
+
+
+def test_output_rescue_retries_only_missing_rows_in_separate_checkpoint(
+    monkeypatch,
+) -> None:
+    calls: list[tuple[str, list[dict]]] = []
+
+    class RescueLLM:
+        def __init__(self, **_kwargs):
+            pass
+
+    monkeypatch.setattr(
+        generation_pipeline,
+        "_llm_kwargs",
+        lambda _profile: {},
+    )
+    monkeypatch.setattr(
+        generation_pipeline,
+        "_rendered_prompt_budget",
+        lambda _llm, _row, _profile: {"passed": True},
+    )
+
+    def fake_execute(stage, role, _llm, inputs):
+        calls.append((stage, inputs))
+        assert role == "generation"
+        return [{"id": inputs[0]["id"], "value": "rescued"}]
+
+    monkeypatch.setattr(
+        generation_pipeline,
+        "_execute_llm_stage",
+        fake_execute,
+    )
+    profile = {
+        "context_window": 32768,
+        "output_rescue_max_tokens": 4096,
+        "generation_params": {"max_tokens": 2048},
+    }
+    rows, rescued, rejected = (
+        generation_pipeline._rescue_missing_generation_rows(
+            stage="example",
+            llm_type=RescueLLM,
+            profile=profile,
+            inputs=[{"id": "one"}, {"id": "two"}],
+            outputs=[{"id": "one", "value": "primary"}],
+            input_id=lambda row: row["id"],
+            output_id=lambda row: row.get("id"),
+        )
+    )
+    assert {row["id"] for row in rows} == {"one", "two"}
+    assert rescued == 1
+    assert rejected == []
+    assert calls[0][0] == "example_output_rescue"
+    assert calls[0][1][0]["_output_rescue_max_tokens"] == 4096
+
+
+def test_judge_output_rescue_dispatches_only_missing_decision(monkeypatch) -> None:
+    calls: list[tuple[str, list[dict]]] = []
+
+    class RescueJudge:
+        def __init__(self, **_kwargs):
+            pass
+
+    monkeypatch.setattr(generation_pipeline, "_llm_kwargs", lambda _profile: {})
+    monkeypatch.setattr(
+        generation_pipeline,
+        "_budget_judge_rows",
+        lambda _judge, rows, _profile: (rows, []),
+    )
+
+    def fake_execute(stage, role, _llm, inputs):
+        calls.append((stage, inputs))
+        assert role == "judge"
+        return [{"record_id": inputs[0]["judge_items"][0]["record_id"]}]
+
+    monkeypatch.setattr(
+        generation_pipeline,
+        "_execute_llm_stage",
+        fake_execute,
+    )
+    profile = {
+        "context_window": 65536,
+        "output_rescue_max_tokens": 4096,
+        "generation_params": {"max_tokens": 2048},
+    }
+    inputs = [
+        {"judge_items": [{"record_id": "one"}]},
+        {"judge_items": [{"record_id": "two"}]},
+    ]
+    rows, rescued, rejected = generation_pipeline._rescue_missing_judge_rows(
+        stage="cross_judge_pass_001",
+        llm_type=RescueJudge,
+        profile=profile,
+        inputs=inputs,
+        outputs=[{"record_id": "one"}],
+    )
+    assert {row["record_id"] for row in rows} == {"one", "two"}
+    assert rescued == 1
+    assert rejected == []
+    assert calls[0][0] == "cross_judge_pass_001_output_rescue"
+    assert calls[0][1][0]["judge_items"][0]["record_id"] == "two"
+
+
 def test_thinking_generation_profile_preserves_template_and_sampling() -> None:
     resolved = generation_pipeline._role_profile("generation", "gemma_thinking")
     params = resolved["generation_params"]
@@ -4078,6 +4196,7 @@ def test_transport_tuning_does_not_change_scientific_contract(
                     "request_timeout": 600,
                     "max_retries": 1,
                     "max_concurrent_requests": 64,
+                    "output_rescue_max_tokens": 12000,
                 }
             },
         },

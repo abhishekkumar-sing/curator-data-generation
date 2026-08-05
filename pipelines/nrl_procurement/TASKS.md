@@ -206,6 +206,63 @@ Research basis:
   accounting therefore remain Curator/LiteLLM responsibilities:
   <https://docs.vllm.ai/en/latest/serving/online_serving/openai_compatible_server/>.
 
+## Structured-output max-token recovery (2026-08-05)
+
+- [x] Diagnose the live `saturation-500-001` evidence by stage. The ordinary
+  blueprint and cross-generation truncations recovered on their same-budget
+  retry, but cross-judge pass 1 permanently lost 6/167 singular judgments at
+  the 2,048-token ceiling; one of those rows also encountered a disconnected
+  server. This is a terminal output-completeness defect, not saturation.
+- [x] Audit `/home/abhishek/nrl_curator_native_glm52` before changing Curator.
+  Its relevant mechanism detects request IDs missing from successful outputs,
+  retries only those rows in a separate rescue working directory with a larger
+  output reserve, checks the complete rendered prompt against the effective
+  context window, and leaves unresolved rows explicitly incomplete.
+- [x] Implement the same bounded recovery semantics for Curator's single QA
+  blueprint/generation/judge and iterative cross-generation/cross-judge stages.
+  Normal generation remains capped at 8,192 tokens and normal judging at 2,048;
+  only terminally missing generation rows receive a 12,000-token rescue and
+  only terminally missing judge rows receive a 4,096-token rescue.
+- [x] Give every rescue its own logical stage/checkpoint and include the rescue
+  ceiling in that checkpoint's input identity. Treat rescue ceilings as
+  recovery tuning so adding them does not invalidate compatible completed
+  primary-stage artifacts.
+- [x] Preflight every rescue against the selected deployment's configured or
+  server-measured context window and persist over-budget rescue inputs as audit
+  rejections rather than submitting an impossible request.
+- [x] Disable rescue while replaying already-checkpointed saturation passes.
+  This preserves deterministic historical outcomes; quarantined failures are
+  reactivated by the controller on a later invocation and receive rescue in a
+  new pass instead of rewriting prior saturation evidence.
+- [x] Add regressions for role-specific rescue ceilings, missing-row-only
+  dispatch, separate rescue checkpoint identity, and scientific cache
+  compatibility. The focused pipeline suite passes 112 tests; the complete
+  procurement suite passes 159 tests.
+- [ ] Resume or run a fresh model-backed pilot after the process has loaded this
+  revision, and verify non-zero `*_output_rescue` stage events plus zero
+  unresolved max-token omissions. A Python process already running before this
+  change continues using its in-memory old code and is intentionally not
+  interrupted by this implementation.
+
+Research basis:
+
+- Instructor documents `IncompleteOutputException` as a response truncated by
+  the token limit and lists increasing `max_tokens`, simplifying the response
+  model, partial streaming, or splitting the task as remedies. This pipeline
+  already uses singular atomic judges and bounded response lists, so a targeted
+  larger-budget retry is preferred over partial judgment acceptance:
+  <https://python.useinstructor.com/api/>.
+- vLLM defines `max_tokens` as the maximum generated tokens per output sequence
+  and separately defines `max_model_len` as the combined prompt/output context
+  limit. The rescue therefore raises only the completion ceiling and still
+  performs a full rendered-context preflight:
+  <https://docs.vllm.ai/en/latest/api/vllm/index.html> and
+  <https://docs.vllm.ai/en/latest/api/vllm/config/model/>.
+- Globally raising every request to the rescue ceiling was rejected because the
+  observed failure tail is sparse and larger live generation reservations can
+  reduce serving efficiency. Accepting partial JSON was rejected because a
+  missing field can silently change an independent quality decision.
+
 ## Generation endpoint migration (2026-08-03)
 
 - [x] Add a dedicated `gemma_thinking` generation profile using the requested

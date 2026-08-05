@@ -1393,6 +1393,133 @@ def _budget_judge_rows(
     return accepted, rejected
 
 
+def _output_rescue_profile(
+    profile: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Return a one-stage profile with the configured larger output reserve."""
+    ordinary = int(profile["generation_params"].get("max_tokens", 0))
+    requested = int(profile.get("output_rescue_max_tokens", ordinary))
+    if requested <= ordinary:
+        return None
+    context_window = configured_context_window(profile)
+    safety_margin = int(
+        CONFIG.get("source_windows", {}).get("safety_margin_tokens", 256)
+    )
+    rescue_tokens = min(requested, context_window - safety_margin)
+    if rescue_tokens <= ordinary:
+        return None
+    return {
+        **profile,
+        "generation_params": {
+            **profile["generation_params"],
+            "max_tokens": rescue_tokens,
+        },
+    }
+
+
+def _rescue_input(row: dict[str, Any], rescue_tokens: int) -> dict[str, Any]:
+    """Make the recovery ceiling part of only the rescue checkpoint identity."""
+    return {**row, "_output_rescue_max_tokens": rescue_tokens}
+
+
+def _rescue_missing_generation_rows(
+    *,
+    stage: str,
+    llm_type: Any,
+    profile: dict[str, Any],
+    inputs: list[dict[str, Any]],
+    outputs: list[dict[str, Any]],
+    input_id: Any,
+    output_id: Any,
+) -> tuple[list[dict[str, Any]], int, list[dict[str, Any]]]:
+    """Retry only terminally missing one-request-per-row generation outputs."""
+    rescue_profile = _output_rescue_profile(profile)
+    if rescue_profile is None:
+        return outputs, 0, []
+    produced = {
+        str(value)
+        for row in outputs
+        for value in [output_id(row)]
+        if value is not None
+    }
+    missing = [row for row in inputs if str(input_id(row)) not in produced]
+    if not missing:
+        return outputs, 0, []
+    rescue_llm = llm_type(**_llm_kwargs(rescue_profile))
+    rescue_tokens = int(rescue_profile["generation_params"]["max_tokens"])
+    budgeted: list[dict[str, Any]] = []
+    context_rejected: list[dict[str, Any]] = []
+    for row in missing:
+        rescue_row = _rescue_input(row, rescue_tokens)
+        budget = _rendered_prompt_budget(rescue_llm, rescue_row, rescue_profile)
+        if budget["passed"]:
+            budgeted.append({**rescue_row, "prompt_budget": budget})
+        else:
+            context_rejected.append(
+                {
+                    **row,
+                    "output_rescue_prompt_budget": budget,
+                    "output_rescue_failure": (
+                        "output_rescue_prompt_exceeds_context_window"
+                    ),
+                }
+            )
+    rescued = (
+        _execute_llm_stage(
+            f"{stage}_output_rescue",
+            "generation",
+            rescue_llm,
+            budgeted,
+        )
+        if budgeted
+        else []
+    )
+    return [*outputs, *rescued], len(rescued), context_rejected
+
+
+def _rescue_missing_judge_rows(
+    *,
+    stage: str,
+    llm_type: Any,
+    profile: dict[str, Any],
+    inputs: list[dict[str, Any]],
+    outputs: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], int, list[dict[str, Any]]]:
+    """Retry only singular judge inputs absent from the successful outputs."""
+    rescue_profile = _output_rescue_profile(profile)
+    if rescue_profile is None or not inputs:
+        return outputs, 0, []
+    produced = {str(row.get("record_id", "")) for row in outputs}
+    missing = [
+        row
+        for row in inputs
+        if any(
+            str(item["record_id"]) not in produced
+            for item in row["judge_items"]
+        )
+    ]
+    if not missing:
+        return outputs, 0, []
+    rescue_llm = llm_type(**_llm_kwargs(rescue_profile))
+    rescue_tokens = int(rescue_profile["generation_params"]["max_tokens"])
+    budgeted, context_rejected = _budget_judge_rows(
+        rescue_llm,
+        [_rescue_input(row, rescue_tokens) for row in missing],
+        rescue_profile,
+    )
+    rescued = (
+        _execute_llm_stage(
+            f"{stage}_output_rescue",
+            "judge",
+            rescue_llm,
+            budgeted,
+        )
+        if budgeted
+        else []
+    )
+    return [*outputs, *rescued], len(rescued), context_rejected
+
+
 def _assert_independent_judge() -> None:
     """Prevent self-judging when production quality policy requires separation."""
     if not QUALITY.get("require_independent_judge", True):
@@ -1529,6 +1656,8 @@ def _execute_cross_pass(
     args: argparse.Namespace,
     files_dir: Path,
     pass_index: int,
+    *,
+    allow_output_rescue: bool = True,
 ) -> dict[str, Any]:
     """Execute and reconcile one independently checkpointed novelty pass."""
     generation_stage = f"cross_generation_pass_{pass_index:03d}"
@@ -1567,6 +1696,69 @@ def _execute_cross_pass(
         if budgeted_generation
         else []
     )
+    generation_rescued = 0
+    generation_rescue_context_rejected = 0
+    generation_rescue_profile = (
+        _output_rescue_profile(GENERATION) if allow_output_rescue else None
+    )
+    if generation_rescue_profile is not None:
+        produced_parent_ids = {
+            str(row.get("parent_request_id", "")) for row in raw_generated
+        }
+        missing_generation = [
+            row
+            for row in budgeted_generation
+            if str(row["planned_request_id"]) not in produced_parent_ids
+        ]
+        if missing_generation:
+            rescue_generator = CrossDocumentGenerator(
+                **_llm_kwargs(generation_rescue_profile)
+            )
+            rescue_tokens = int(
+                generation_rescue_profile["generation_params"]["max_tokens"]
+            )
+            rescue_generation_inputs: list[dict[str, Any]] = []
+            for row in missing_generation:
+                rescue_row = _rescue_input(row, rescue_tokens)
+                budget = _rendered_prompt_budget(
+                    rescue_generator,
+                    rescue_row,
+                    generation_rescue_profile,
+                )
+                if budget["passed"]:
+                    rescue_generation_inputs.append(
+                        {**rescue_row, "prompt_budget": budget}
+                    )
+                else:
+                    generation_rescue_context_rejected += 1
+                    raw_generated.append(
+                        {
+                            "parent_request_id": row["planned_request_id"],
+                            "planned_task_type": row["planned_task_type"],
+                            "task_type": row["planned_task_type"],
+                            "answerable": bool(
+                                row.get("planned_answerable", True)
+                            ),
+                            "source_bundle_id": row["source_bundle_id"],
+                            "terminal_state": "output_rescue_context_rejected",
+                            "generation_prompt_budget": budget,
+                            "deterministic_checks": {
+                                "passed": False,
+                                "issues": [
+                                    "output_rescue_prompt_exceeds_context_window"
+                                ],
+                            },
+                        }
+                    )
+            if rescue_generation_inputs:
+                rescued_rows = _execute_llm_stage(
+                    f"{generation_stage}_output_rescue",
+                    "generation",
+                    rescue_generator,
+                    rescue_generation_inputs,
+                )
+                generation_rescued = len(rescued_rows)
+                raw_generated.extend(rescued_rows)
     successful_parent_ids = {
         str(row.get("parent_request_id", ""))
         for row in raw_generated
@@ -1608,6 +1800,7 @@ def _execute_cross_pass(
         float(QUALITY.get("dedupe_threshold", 94)),
     )
     judged: list[dict[str, Any]] = []
+    judge_rescued = 0
     judge_prompt_rejected: list[dict[str, Any]] = []
     best_of_rejected: list[dict[str, Any]] = []
     if args.skip_judge:
@@ -1625,11 +1818,6 @@ def _execute_cross_pass(
             ],
             JUDGE,
         )
-        _write_audit(
-            files_dir
-            / f"cross_judge_prompt_rejected_pass_{pass_index:03d}.jsonl",
-            judge_prompt_rejected,
-        )
         if budgeted:
             judged = _execute_llm_stage(
                 judge_stage,
@@ -1637,6 +1825,22 @@ def _execute_cross_pass(
                 judge,
                 budgeted,
             )
+        if allow_output_rescue:
+            judged, judge_rescued, rescue_prompt_rejected = (
+                _rescue_missing_judge_rows(
+                    stage=judge_stage,
+                    llm_type=SingularCrossDocumentJudge,
+                    profile=JUDGE,
+                    inputs=budgeted,
+                    outputs=judged,
+                )
+            )
+            judge_prompt_rejected.extend(rescue_prompt_rejected)
+        _write_audit(
+            files_dir
+            / f"cross_judge_prompt_rejected_pass_{pass_index:03d}.jsonl",
+            judge_prompt_rejected,
+        )
         # A missing, prompt-quarantined, or malformed independent judgment is
         # not evidence that the family is saturated. Only parents reaching a
         # schema-valid judge terminal state remain eligible observations.
@@ -1675,6 +1879,11 @@ def _execute_cross_pass(
         "judge_prompt_rejected": judge_prompt_rejected,
         "generation_prompt_rejected": generation_prompt_rejected,
         "duplicates": duplicates,
+        "generation_rescued": generation_rescued,
+        "generation_rescue_context_rejected": (
+            generation_rescue_context_rejected
+        ),
+        "judge_rescued": judge_rescued,
         "successful_parent_ids": successful_parent_ids,
         "valid_parent_ids": valid_parent_ids,
     }
@@ -2369,11 +2578,29 @@ def main(argv: list[str] | None = None) -> None:
         }
 
     os.environ["HOSTED_VLLM_API_KEY"] = _model_settings(GENERATION)[2]
+    blueprint_llm = ProcurementBlueprintGenerator(**_llm_kwargs(GENERATION))
     blueprint_audit = _execute_llm_stage(
         "qa_blueprints",
         "generation",
-        ProcurementBlueprintGenerator(**_llm_kwargs(GENERATION)),
+        blueprint_llm,
         planned_single,
+    )
+    (
+        blueprint_audit,
+        blueprint_rescued,
+        blueprint_rescue_context_rejected,
+    ) = _rescue_missing_generation_rows(
+        stage="qa_blueprints",
+        llm_type=ProcurementBlueprintGenerator,
+        profile=GENERATION,
+        inputs=planned_single,
+        outputs=blueprint_audit,
+        input_id=lambda row: row["planned_request_id"],
+        output_id=lambda row: row.get("planned_request_id"),
+    )
+    _write_audit(
+        files_dir / "qa_blueprints_output_rescue_rejected.jsonl",
+        blueprint_rescue_context_rejected,
     )
     blueprint_audit = materialize_terminal_failures(
         planned_single,
@@ -2399,11 +2626,29 @@ def main(argv: list[str] | None = None) -> None:
         for row in blueprint_audit
         if row.get("blueprint_checks", {}).get("passed", False)
     ]
+    generation_llm = ProcurementGenerator(**_llm_kwargs(GENERATION))
     generated_audit = _execute_llm_stage(
         "generation",
         "generation",
-        ProcurementGenerator(**_llm_kwargs(GENERATION)),
+        generation_llm,
         valid_blueprints,
+    )
+    (
+        generated_audit,
+        generation_rescued,
+        generation_rescue_context_rejected,
+    ) = _rescue_missing_generation_rows(
+        stage="generation",
+        llm_type=ProcurementGenerator,
+        profile=GENERATION,
+        inputs=valid_blueprints,
+        outputs=generated_audit,
+        input_id=lambda row: row["blueprint_id"],
+        output_id=lambda row: row.get("blueprint_id"),
+    )
+    _write_audit(
+        files_dir / "qa_generation_output_rescue_rejected.jsonl",
+        generation_rescue_context_rejected,
     )
     generated_audit = materialize_terminal_failures(
         valid_blueprints,
@@ -2550,10 +2795,6 @@ def main(argv: list[str] | None = None) -> None:
             _judge_rows(generated, judge_batch_size).to_list(),
             judge_profile,
         )
-        _write_audit(
-            files_dir / "qa_judge_prompt_rejected.jsonl",
-            judge_prompt_rejected,
-        )
         if budgeted_judge_rows:
             judged = _execute_llm_stage(
                 "judge",
@@ -2561,6 +2802,20 @@ def main(argv: list[str] | None = None) -> None:
                 judge,
                 budgeted_judge_rows,
             )
+        judged, _judge_rescued, rescue_prompt_rejected = (
+            _rescue_missing_judge_rows(
+                stage="judge",
+                llm_type=SingularProcurementJudge,
+                profile=judge_profile,
+                inputs=budgeted_judge_rows,
+                outputs=judged,
+            )
+        )
+        judge_prompt_rejected.extend(rescue_prompt_rejected)
+        _write_audit(
+            files_dir / "qa_judge_prompt_rejected.jsonl",
+            judge_prompt_rejected,
+        )
         accepted = [row for row in judged if row["judge"]["accepted"]]
     # Re-apply portfolio constraints after judging because differential judge
     # attrition can re-concentrate a pool that passed before judge calls.
@@ -2739,6 +2994,7 @@ def main(argv: list[str] | None = None) -> None:
                     args,
                     files_dir,
                     pass_index,
+                    allow_output_rescue=not replaying,
                 )
                 planned_cross.extend(planned_pass)
                 cross_generated_audit.extend(pass_result["generated_audit"])

@@ -146,6 +146,10 @@ models:
     # Explicit private-provider limits avoid Curator's public-provider fallback.
     max_requests_per_minute: 10000
     max_tokens_per_minute: 100000000
+    # Terminal omissions (including max_tokens truncation) are retried once in
+    # a separate checkpoint at this larger ceiling. Ordinary requests retain
+    # the 8,192-token cap below.
+    output_rescue_max_tokens: 12000
     generation_params:
       temperature: 1.0
       top_p: 0.95
@@ -168,6 +172,10 @@ models:
     # Keep judge throttling independent when it uses a separate local endpoint.
     max_requests_per_minute: 10000
     max_tokens_per_minute: 100000000
+    # The 500-record saturation pilot proved that 2,048 truncates a small
+    # fraction of otherwise valid singular cross-document judgments. Retry only
+    # those missing decisions once at 4,096 after a context-window preflight.
+    output_rescue_max_tokens: 4096
     generation_params:
       temperature: 1.0
       top_p: 0.95
