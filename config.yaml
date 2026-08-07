@@ -170,7 +170,7 @@ models:
   judge:
     mode: hosted_vllm
     profile_env: JUDGE_PROFILE
-    default_profile: ministral
+    default_profile: gemma_thinking
     private_endpoint_only: true
     request_timeout: 1800
     max_retries: 1

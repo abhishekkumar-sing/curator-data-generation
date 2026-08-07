@@ -15,10 +15,10 @@ CURATOR_VIEWER=0
 TELEMETRY_ENABLED=false
 
 GENERATION_PROFILE=glm
-JUDGE_PROFILE=ministral
+JUDGE_PROFILE=gemma_thinking
 
 MODEL=google/gemma-4-31B-it
-LLM_DEPLOYMENT_ID=gemma-4-31b-it-deployment-v1
+LLM_DEPLOYMENT_ID=gemma-4-31b-it-10.180.148.183-8010-v1
 LLM_BASE_URL=http://127.0.0.1:8010/v1
 LLM_API_KEY=replace-me
 
@@ -44,7 +44,7 @@ served-model IDs stay in `.env`. Switch either role by changing only
 models for production when possible. `.env` is gitignored; `.env.example` is
 the safe template that can be committed.
 
-The `gemma_thinking` generation profile sends `temperature=1.0`, `top_p=0.95`,
+The `gemma_thinking` profile sends `temperature=1.0`, `top_p=0.95`,
 `top_k=64`, and
 `extra_body.chat_template_kwargs.enable_thinking=true` on every request. The
 independent `gemma` judge profile explicitly keeps thinking disabled. Model
@@ -55,11 +55,16 @@ Because both RPM and TPM are configured explicitly, Curator does not spend an
 extra inference request attempting to rediscover those limits from headers.
 
 The configured production roles use GLM for generation and the independent
-`Ministral-3-14B-Instruct-2512` profile for judging. Ministral is provisionally
-configured for native JSON-schema mode, a production temperature of `0.05`, no
-Gemma-specific thinking template argument, a 2,048-token judge ceiling, and 16
-concurrent requests. Every endpoint change still requires the exact
-structured-output probe.
+thinking-enabled `google/gemma-4-31B-it` endpoint for judging. The judge uses
+native JSON-schema mode, the role-level 2,048-token ordinary ceiling with a
+4,096-token missing-row rescue, and the profile's eight-request concurrency
+cap. Ministral remains available as an explicit fallback profile. Every
+endpoint change still requires the exact structured-output probe.
+
+The port-8010 judge remains fail-closed until its exact profile probe passes.
+The 2026-08-07 qualification attempt was refused at TCP connection setup and
+processed zero tokens; selecting the profile does not constitute endpoint
+validation.
 
 The GLM profile uses a 1,200-second request timeout and one retry. The first
 load test measured about 256 seconds median, 339 seconds p99, and 365 seconds

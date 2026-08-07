@@ -2854,6 +2854,20 @@ def test_role_profile_preserves_profile_defaults_but_role_limits_win() -> None:
     assert ministral["served_model_env"] == "MINISTRAL_MODEL"
     assert configured_context_window(ministral) == 65536
 
+    gemma_judge = generation_pipeline._role_profile("judge", "gemma_thinking")
+    assert generation_pipeline.CONFIG["models"]["judge"]["default_profile"] == (
+        "gemma_thinking"
+    )
+    assert gemma_judge["profile_name"] == "gemma_thinking"
+    assert gemma_judge["generation_params"]["max_tokens"] == 2048
+    assert gemma_judge["generation_params"]["temperature"] == 1.0
+    assert gemma_judge["generation_params"]["top_p"] == 0.95
+    assert gemma_judge["generation_params"]["top_k"] == 64
+    assert gemma_judge["generation_params"]["extra_body"][
+        "chat_template_kwargs"
+    ]["enable_thinking"] is True
+    assert gemma_judge["max_concurrent_requests"] == 8
+
 
 def test_output_rescue_raises_only_the_recovery_completion_budget() -> None:
     generation = generation_pipeline._role_profile("generation", "glm")

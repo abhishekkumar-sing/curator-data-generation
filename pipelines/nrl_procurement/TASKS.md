@@ -123,6 +123,31 @@ Research basis:
   a conservative fallback, then replaced it with the private server's verified
   65,536-token deployment limit.
 
+## Gemma thinking judge migration (2026-08-07)
+
+- [x] Select the existing `gemma_thinking` profile as the active and committed
+  default judge while retaining GLM as generation. The roles remain independent:
+  different served models, deployment identities, and private endpoints.
+- [x] Verify without printing secrets that ignored `.env` already contains the
+  requested `google/gemma-4-31B-it` model, port-8010 base URL, and deployment
+  identity; update only `JUDGE_PROFILE`. Keep the supplied credential exclusively
+  in ignored `.env` and placeholders in tracked examples.
+- [x] Preserve the requested thinking request contract for this profile:
+  temperature 1.0, top-p 0.95, top-k 64, and
+  `chat_template_kwargs.enable_thinking=true`. The judge role retains its
+  2,048-token ordinary output ceiling, 4,096-token missing-row rescue, and the
+  profile's eight-request concurrency cap.
+- [x] Update `.env.example`, the README, committed default configuration, and
+  regression tests so the selected role and its effective parameters cannot
+  drift silently. Ministral remains an explicit fallback profile.
+- [ ] Qualify the exact Gemma judge deployment. The judge-only structured-output
+  probe at 2026-08-07 03:45 UTC failed at TCP connection setup to port 8010;
+  zero requests succeeded and zero tokens were processed. Fingerprint
+  `fc409fa091813e4d5fcbe21fe509170dddfd9dc3d6432053966e8b5f5608551e`
+  is a persisted failed probe, not permission to run. Rerun the probe after the
+  endpoint is restored and require every nested schema check to pass before a
+  large judge stage.
+
 ## Reference saturation audit (2026-08-05)
 
 - [x] Inspect the reference CLI, configuration, state machine, tests, and run
