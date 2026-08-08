@@ -1767,6 +1767,20 @@ def _batch_integrity_rejections(rows: list[dict[str, Any]]) -> int:
     return sum(row.get("judge", {}).get("batch_integrity_passed") is False for row in rows)
 
 
+def _release_ready(status: str, human_review: dict[str, Any]) -> bool:
+    """A run is release-ready only with both code-quality gates and a real human review.
+
+    `status` alone reports pipeline/code-quality completeness (zero missing
+    requests, portfolio diversity thresholds, stage minimums, and so on) and
+    is never sufficient by itself for release: it says nothing about whether
+    any human ever reviewed the output. This flag is the separate, additive
+    gate that also requires `human_review.complete` (populated from a real,
+    hash-verified `review.py` file, never fabricated) before a run can be
+    considered ready to release.
+    """
+    return bool(status == "complete" and human_review.get("complete", False))
+
+
 def _final_manifest(
     *,
     run_id: str,
@@ -3655,6 +3669,9 @@ def main(argv: list[str] | None = None) -> None:
     }
     if missing_judge_responses or missing_temporal_judge_responses:
         final_manifest["status"] = "partial"
+    final_manifest["release_ready"] = _release_ready(
+        final_manifest["status"], final_manifest["human_review"]
+    )
     write_manifest(files_dir, final_manifest)
     _RESUME_MANAGER.finish(str(final_manifest["status"]))
     _RUN_ATTEMPT_TERMINAL = True
