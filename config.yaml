@@ -316,14 +316,15 @@ embeddings:
   similarity_threshold: null
 
 propositions:
-  # Only path_qa and temporal consume propositions; both are disabled below
-  # for the current qa/qa_cot-only scope. Re-enable alongside them.
+  # Only path_qa and temporal consume propositions. quality.required_task_types
+  # still only requires qa/qa_cot, but path_qa and temporal are enabled below,
+  # so this stage is live, not dormant. Keep enabled together with them.
   enabled: true
   max_per_window: 8
 
 reasoning_paths:
-  # Only path_qa consumes reasoning paths; disabled below for the current
-  # qa/qa_cot-only scope. Re-enable alongside path_qa.
+  # Only path_qa consumes reasoning paths. path_qa is enabled below, so this
+  # stage is live, not dormant. Keep enabled together with path_qa.
   enabled: true
   max_per_pair: 25
 
@@ -355,8 +356,9 @@ temporal:
       target_context: 0.6
 
 path_qa:
-  # Disabled for the current qa/qa_cot-only scope: promoted path answers
-  # export as cross_document_qa/cross_document_qa_cot, outside that scope.
+  # Enabled: promoted path answers export as cross_document_qa/
+  # cross_document_qa_cot, which are outside quality.required_task_types
+  # (still only [qa, qa_cot]) but generate and export like any other stage.
   enabled: true
   qa_cot_fraction: 0.5
 
