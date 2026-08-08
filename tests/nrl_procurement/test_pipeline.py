@@ -956,6 +956,72 @@ def test_validation_rejects_unsupported_number() -> None:
     assert "unsupported_number:10 years" in validate_record(record, "The buyer shall retain it for 5 years.")
 
 
+def test_validation_rejects_number_misattributed_to_the_wrong_claim() -> None:
+    """A number correct for one entity but misattributed to another must not pass.
+
+    Joining every claim's evidence before checking the answer would let this
+    slip through, because "5 days" genuinely appears in Entity B's evidence —
+    just not in Entity A's, which is the claim the answer actually attaches it
+    to. See audit T7 / Finding V1.
+    """
+    passage = "Entity A shall respond within 3 days. Entity B shall decide within 5 days."
+    record = {
+        "task_type": "qa",
+        "question": "How long do Entity A and Entity B have?",
+        "answer": "Entity A requires 5 days to respond, and Entity B requires 5 days to decide.",
+        "answerable": True,
+        "evidence": [
+            {"quote": "Entity A shall respond within 3 days."},
+            {"quote": "Entity B shall decide within 5 days."},
+        ],
+        "claims": [
+            {
+                "statement": "Entity A requires 3 days to respond.",
+                "evidence": [{"quote": "Entity A shall respond within 3 days."}],
+            },
+            {
+                "statement": "Entity B requires 5 days to decide.",
+                "evidence": [{"quote": "Entity B shall decide within 5 days."}],
+            },
+        ],
+        "reasoning_steps": [],
+    }
+    reasons = validate_record(record, passage)
+    assert "unsupported_number:5 days" in reasons
+
+
+def test_validation_still_accepts_correctly_attributed_multi_claim_numbers() -> None:
+    """Same shape as the misattribution test, but every number is correct.
+
+    Guards against the scoped check becoming stricter than the prior
+    union-of-all-evidence behavior on legitimate multi-claim answers.
+    """
+    passage = "Entity A shall respond within 3 days. Entity B shall decide within 5 days."
+    record = {
+        "task_type": "qa",
+        "question": "How long do Entity A and Entity B have?",
+        "answer": "Entity A requires 3 days to respond, and Entity B requires 5 days to decide.",
+        "answerable": True,
+        "evidence": [
+            {"quote": "Entity A shall respond within 3 days."},
+            {"quote": "Entity B shall decide within 5 days."},
+        ],
+        "claims": [
+            {
+                "statement": "Entity A requires 3 days to respond.",
+                "evidence": [{"quote": "Entity A shall respond within 3 days."}],
+            },
+            {
+                "statement": "Entity B requires 5 days to decide.",
+                "evidence": [{"quote": "Entity B shall decide within 5 days."}],
+            },
+        ],
+        "reasoning_steps": [],
+    }
+    reasons = validate_record(record, passage)
+    assert not any(reason.startswith("unsupported_number") for reason in reasons)
+
+
 def _proposition_source_row() -> dict:
     passage = "If delivery is delayed, the buyer shall recover liquidated damages " "at 0.5% per week, except where force majeure applies."
     return {
@@ -1623,6 +1689,50 @@ def test_cross_validation_accepts_typed_quantities_and_metadata_dates() -> None:
     }
 
     assert validate_cross_record(record, documents) == []
+
+
+def test_cross_validation_rejects_number_misattributed_to_the_wrong_claim() -> None:
+    """The same right-value/wrong-entity gap as T7, in the cross-document validator."""
+    documents = [
+        {
+            "source_id": "source_a",
+            "manual_id": "goods_2019",
+            "title": "Manual for Procurement of Goods, 2019",
+            "revision_date": "2019",
+            "as_of_date": "2019",
+            "page": 1,
+            "section": "Response",
+            "passage": "Entity A shall respond within 3 days.",
+        },
+        {
+            "source_id": "source_b",
+            "manual_id": "goods_2025",
+            "title": "Manual for Procurement of Goods, 2025",
+            "revision_date": "2025",
+            "as_of_date": "2025",
+            "page": 2,
+            "section": "Decision",
+            "passage": "Entity B shall decide within 5 days.",
+        },
+    ]
+    record = {
+        "task_type": "cross_document_qa",
+        "question": "How long do Entity A and Entity B have?",
+        "answer": "Entity A requires 5 days to respond, and Entity B requires 5 days to decide.",
+        "answerable": True,
+        "claims": [
+            {
+                "statement": "Entity A requires 3 days to respond.",
+                "evidence": [{"source_id": "source_a", "quote": documents[0]["passage"]}],
+            },
+            {
+                "statement": "Entity B requires 5 days to decide.",
+                "evidence": [{"source_id": "source_b", "quote": documents[1]["passage"]}],
+            },
+        ],
+        "reasoning_steps": [],
+    }
+    assert "unsupported_number:5 days" in validate_cross_record(record, documents)
 
 
 def test_quantity_validation_does_not_swallow_following_prose() -> None:
