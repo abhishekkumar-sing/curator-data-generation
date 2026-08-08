@@ -197,6 +197,28 @@ QUESTION_STYLE_GUIDANCE = {
     "comparison_request": "Ask for the exact source-supported contrast dimensions.",
 }
 
+# Zero-shot instructions alone did not reliably keep generation off the
+# "According to the manual..."/"As a <persona>..." openers (see audit
+# Repetition & Diversity Analysis, T8): a corpus-level cap can only remove the
+# overrepresented records after the fact, not change what the model reaches
+# for by default. These are illustrative openers only, not answerable content
+# to imitate for facts; they exist purely to widen the boundary of what
+# "asking naturally" can look like across ordinary interrogative forms.
+QUESTION_OPENER_EXAMPLES = (
+    "What is the minimum period a buyer must retain a rejected bid before "
+    "returning its earnest money?",
+    "Can the L1 bidder be disqualified after bid opening if its EMD "
+    "instrument has already expired?",
+    "Which committee must sign off before a proprietary purchase certificate "
+    "is issued for spares above a stated value?",
+    "When is the engineer-in-charge required to be notified of a suspected "
+    "latent defect?",
+    "Who decides whether a blacklisted vendor's ongoing contracts must also "
+    "be terminated?",
+    "Does a Class-I local supplier's price-match right survive if it "
+    "withdraws its original quote?",
+)
+
 # These axes are deliberately narrower than open-ended "reasoning skills".
 # Every non-lookup operation has an observable source signal in
 # `eligible_question_types`; unsupported cells are never manufactured to fill a
@@ -1016,6 +1038,10 @@ CONSTRAINTS
   "As a/an <role>" preamble. Persona is a semantic information need, not wording
   decoration. Express this need naturally without naming the role unless the role
   itself is the fact being asked about.
+- Vary the opening construction; do not default to the same sentence shape every
+  time. These illustrate natural variety only — do not copy their facts, only
+  the spread of ordinary interrogative forms:
+  {chr(10).join(f'  - "{example}"' for example in QUESTION_OPENER_EXAMPLES)}
 - Break the answer into material claims. Every claim must contain one or more
   evidence quotes copied verbatim from
   the passage. The pipeline derives top-level evidence from the claims.

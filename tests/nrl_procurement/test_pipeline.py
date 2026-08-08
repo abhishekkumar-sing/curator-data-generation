@@ -50,6 +50,7 @@ from export import (  # noqa: E402
     question_opener_diversity,
 )
 from generate import (  # noqa: E402
+    QUESTION_OPENER_EXAMPLES,
     ProcurementBlueprintGenerator,
     ProcurementGenerator,
     ProcurementJudge,
@@ -122,6 +123,7 @@ from source_windows import (  # noqa: E402
 )
 from validate_run import validate_run  # noqa: E402
 from validation import (  # noqa: E402
+    SOURCE_FRAMING_PREFIX,
     answer_format_issues,
     canonical_reasoning_operation,
     deduplicate,
@@ -2572,6 +2574,14 @@ def test_single_document_prompts_preserve_specification_contract() -> None:
         "---END UNTRUSTED SOURCE PASSAGE---",
     ):
         assert required in prompt
+    # T8: zero-shot instructions alone did not reliably keep generation off
+    # the "According to.../As a <persona>..." openers (audit Repetition &
+    # Diversity Analysis); varied few-shot opener examples must be present so
+    # the boundary is established by demonstration, not just prohibition.
+    assert "Vary the opening construction" in prompt
+    for example in QUESTION_OPENER_EXAMPLES:
+        assert example in prompt
+        assert not SOURCE_FRAMING_PREFIX.search(example)
 
     blueprint_prompt = ProcurementBlueprintGenerator.prompt(None, row)
     assert "Do not write the final question or answer" in blueprint_prompt
