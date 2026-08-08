@@ -2972,13 +2972,18 @@ def test_role_profile_preserves_profile_defaults_but_role_limits_win() -> None:
     assert gemma_judge["max_concurrent_requests"] == 45
 
 
-def test_output_rescue_raises_only_the_recovery_completion_budget() -> None:
+def test_output_rescue_raises_the_recovery_completion_budget_and_timeout() -> None:
     generation = generation_pipeline._role_profile("generation", "glm")
     generation_rescue = generation_pipeline._output_rescue_profile(generation)
     assert generation["generation_params"]["max_tokens"] == 5000
     assert generation_rescue is not None
     assert generation_rescue["generation_params"]["max_tokens"] == 12000
     assert generation_rescue["max_concurrent_requests"] == 45
+    # The rescue's request_timeout must differ from and exceed the primary
+    # profile's, not be silently inherited unchanged (T18).
+    assert generation_rescue["request_timeout"] != generation["request_timeout"]
+    assert generation_rescue["request_timeout"] > generation["request_timeout"]
+    assert generation_rescue["request_timeout"] == 3600
 
     judge = generation_pipeline._role_profile("judge", "gemma_thinking")
     judge_rescue = generation_pipeline._output_rescue_profile(judge)
@@ -2989,7 +2994,41 @@ def test_output_rescue_raises_only_the_recovery_completion_budget() -> None:
     assert judge_rescue["generation_params"]["temperature"] == 1.0
     assert judge_rescue["generation_params"]["top_p"] == 0.95
     assert judge_rescue["generation_params"]["top_k"] == 64
+    assert judge_rescue["request_timeout"] > judge["request_timeout"]
     assert generation_pipeline._rescue_input({"record_id": "one"}, 4096)["_output_rescue_max_tokens"] == 4096
+
+
+def test_output_rescue_timeout_override_is_opt_in_and_never_lowers_timeout() -> None:
+    # No output_rescue_request_timeout configured: behavior is unchanged,
+    # request_timeout is inherited from the primary profile as before.
+    profile_without_override = {
+        "request_timeout": 1800,
+        "max_concurrent_requests": 128,
+        "context_window": 32768,
+        "output_rescue_max_tokens": 4096,
+        "generation_params": {"max_tokens": 2048},
+    }
+    rescue = generation_pipeline._output_rescue_profile(profile_without_override)
+    assert rescue is not None
+    assert rescue["request_timeout"] == 1800
+
+    # A configured override below the primary timeout never lowers it.
+    profile_with_low_override = {
+        **profile_without_override,
+        "output_rescue_request_timeout": 900,
+    }
+    rescue_low = generation_pipeline._output_rescue_profile(profile_with_low_override)
+    assert rescue_low is not None
+    assert rescue_low["request_timeout"] == 1800
+
+    # A configured override above the primary timeout raises it.
+    profile_with_high_override = {
+        **profile_without_override,
+        "output_rescue_request_timeout": 3600,
+    }
+    rescue_high = generation_pipeline._output_rescue_profile(profile_with_high_override)
+    assert rescue_high is not None
+    assert rescue_high["request_timeout"] == 3600
 
 
 def test_output_rescue_retries_only_missing_rows_in_separate_checkpoint(

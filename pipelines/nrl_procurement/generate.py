@@ -1564,6 +1564,17 @@ def _output_rescue_profile(
             int(profile["max_concurrent_requests"]),
             int(rescue_concurrency),
         )
+    # The rescue completion budget is raised above the ordinary ceiling, but a
+    # generation that legitimately needs the larger budget also needs more
+    # wall-clock time to produce it. Without this, a genuinely-slow-but-valid
+    # rescue completion is killed by the same timeout that was already too
+    # short for it once, and the row is permanently dropped instead of rescued.
+    rescue_timeout = profile.get("output_rescue_request_timeout")
+    if rescue_timeout is not None:
+        rescue_profile["request_timeout"] = max(
+            int(profile["request_timeout"]),
+            int(rescue_timeout),
+        )
     return rescue_profile
 
 
