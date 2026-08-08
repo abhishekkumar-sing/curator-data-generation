@@ -41,7 +41,13 @@ from drafting import (
     read_drafting_seeds,
     write_jsonl,
 )
-from export import assert_unique_record_ids, assign_splits, export_records, write_manifest
+from export import (
+    assert_unique_record_ids,
+    assign_drafting_splits,
+    assign_splits,
+    export_records,
+    write_manifest,
+)
 from evaluation import (
     frozen_overlap_issues,
     load_frozen_evaluation,
@@ -49,6 +55,7 @@ from evaluation import (
 )
 from jsonl_io import write_jsonl_rows
 from judge_calibration import load_judge_calibration
+from provenance import leakage_audit
 from propositions import (
     PropositionExtractor,
     proposition_cache_fingerprint,
@@ -3471,6 +3478,43 @@ def main(argv: list[str] | None = None) -> None:
                 key="id",
                 dataset_name="accepted drafting records",
             )
+            # Drafting records have no `claims`/`reasoning_steps`/`answer` fields, so
+            # the QA reasoning-graph gate (`build_reasoning_graph`) does not apply to
+            # them (T13c): running it would silently produce a trivial, always-passing
+            # graph with zero evidence references instead of a real check. Drafting's
+            # real content verification is `drafting_validation_issues()` +
+            # `drafting_citation_integrity_issues()` (deterministic, already applied
+            # above) plus `TenderDraftingJudge` (already applied above) — this block
+            # only adds the two gates that *do* apply: split assignment and leakage
+            # auditing (T13a/T13b), so drafting records get the same
+            # never-cross-the-eval-boundary guarantee QA/cross-document records get.
+            chunk_manuals = {
+                str(row["chunk_id"]): {
+                    "manual_id": str(row.get("manual_id", "")),
+                    "source_sha256": str(row.get("source_sha256", "")),
+                    "section": str(row.get("section") or ""),
+                }
+                for row in all_rows
+            }
+            assign_drafting_splits(
+                drafting_accepted,
+                manuals,
+                chunk_manuals,
+                train_fraction,
+                validation_fraction,
+                str(SPLITS.get("seed", "nrl-procurement-v1")),
+                manual_folds=manual_folds,
+            )
+            drafting_leakage = leakage_audit([*accepted, *drafting_accepted])
+            (files_dir / "drafting_leakage_audit.json").write_text(
+                json.dumps(drafting_leakage, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            if not drafting_leakage["passed"]:
+                raise SystemExit(
+                    "Cross-split leakage detected between drafting and QA records; "
+                    "see drafting_leakage_audit.json"
+                )
             write_jsonl(
                 files_dir / "drafting.jsonl",
                 [compact_drafting(row) for row in drafting_accepted],

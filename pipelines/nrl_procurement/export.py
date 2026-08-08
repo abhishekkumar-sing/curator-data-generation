@@ -198,6 +198,56 @@ def _components(manuals: list[dict[str, Any]], records: list[dict[str, Any]]) ->
     return {manual_id: find(manual_id) for manual_id in parent}
 
 
+def drafting_manual_documents(
+    chunk_ids: list[str],
+    chunk_manuals: dict[str, dict[str, str]],
+) -> list[dict[str, str]]:
+    """Resolve drafting `manual_chunk_ids` to `source_documents`.
+
+    `assign_splits`/`leakage_audit` already know how to read `source_documents`.
+    """
+    documents: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for chunk_id in chunk_ids:
+        info = chunk_manuals.get(str(chunk_id))
+        if info is None:
+            raise ValueError(f"Drafting record references unknown corpus chunk: {chunk_id}")
+        manual_id = str(info.get("manual_id", ""))
+        if manual_id in seen:
+            continue
+        seen.add(manual_id)
+        documents.append(dict(info))
+    return documents
+
+
+def assign_drafting_splits(
+    records: list[dict[str, Any]],
+    manuals: list[dict[str, Any]],
+    chunk_manuals: dict[str, dict[str, str]],
+    train: float,
+    validation: float,
+    seed: str,
+    manual_folds: dict[str, str] | None,
+) -> None:
+    """Give accepted drafting records the same split guarantee QA records get.
+
+    Drafting rows do not naturally carry `source_documents`/`record_id`/`question` —
+    the fields `assign_splits`/`leakage_audit` read. Rather than reimplement either
+    gate for a second schema, this attaches those fields (derived from
+    `manual_chunk_ids`, the only field that actually identifies which manuals a
+    drafting record draws from) and then calls the existing, unmodified
+    `assign_splits`. A drafting record's split is therefore always the split of the
+    manual(s) it cites — the identical rule QA/cross-document records already use.
+    """
+    for record in records:
+        chunk_ids = [str(chunk_id) for chunk_id in record.get("manual_chunk_ids", [])]
+        record["record_id"] = record["id"]
+        record["question"] = record["instruction"]
+        record["source_documents"] = drafting_manual_documents(chunk_ids, chunk_manuals)
+        record["source_chunk_ids"] = chunk_ids
+    assign_splits(records, manuals, train, validation, seed, manual_folds=manual_folds)
+
+
 def assign_splits(
     records: list[dict[str, Any]],
     manuals: list[dict[str, Any]],
