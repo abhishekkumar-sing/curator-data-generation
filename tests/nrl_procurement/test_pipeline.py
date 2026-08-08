@@ -45,6 +45,7 @@ from export import (  # noqa: E402
     answer_style_diversity,
     assert_unique_record_ids,
     assign_splits,
+    batch_efficiency_stats,
     categorical_diversity,
     export_records,
     question_opener_diversity,
@@ -1841,6 +1842,29 @@ def test_question_opener_diversity_reports_top_share() -> None:
         "top_opener_count": 0,
         "top_opener_share": 0.0,
     }
+
+
+def test_batch_efficiency_stats_reports_ratio_and_removal_rate() -> None:
+    report = batch_efficiency_stats(
+        200,
+        150,
+        {"near_duplicates": 30, "question_opener_overrepresented": 20},
+    )
+    assert report["generated_records"] == 200
+    assert report["accepted_records"] == 150
+    assert report["generation_to_acceptance_ratio"] == 0.75
+    assert report["total_removed"] == 50
+    assert report["removal_rate"] == 0.25
+    assert report["removed_by_reason"] == {
+        "near_duplicates": 30,
+        "question_opener_overrepresented": 20,
+    }
+
+
+def test_batch_efficiency_stats_handles_zero_generated_records() -> None:
+    report = batch_efficiency_stats(0, 0, {})
+    assert report["generation_to_acceptance_ratio"] == 0.0
+    assert report["removal_rate"] == 0.0
 
 
 def test_extractive_answer_diversity_caps_final_pool_share() -> None:
