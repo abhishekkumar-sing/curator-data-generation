@@ -41,7 +41,13 @@ from drafting import (
     read_drafting_seeds,
     write_jsonl,
 )
-from export import assert_unique_record_ids, assign_splits, export_records, write_manifest
+from export import (
+    assert_unique_record_ids,
+    assign_splits,
+    export_records,
+    question_opener_diversity,
+    write_manifest,
+)
 from evaluation import (
     frozen_overlap_issues,
     load_frozen_evaluation,
@@ -1805,6 +1811,8 @@ def _final_manifest(
     drafting_stats: dict[str, Any],
     duplicates: int,
     opener_overrepresented: int = 0,
+    single_generated_pre_cap_count: int = 0,
+    question_opener_diversity_pre_cap: dict[str, Any] | None = None,
     question_type_overrepresented: int = 0,
     question_style_overrepresented: int = 0,
     extractive_overrepresented: int = 0,
@@ -1848,6 +1856,11 @@ def _final_manifest(
         "judge_batch_integrity_rejections": judge_batch_integrity_rejections or {"single_document": 0, "cross_document": 0},
         "near_duplicates_removed": duplicates,
         "question_opener_overrepresented_removed": opener_overrepresented,
+        "question_opener_diversity_pre_cap": {
+            **(question_opener_diversity_pre_cap or {"unique_openers": 0, "top_opener": "", "top_opener_count": 0, "top_opener_share": 0.0}),
+            "pool_size": single_generated_pre_cap_count,
+            "cap_waste_ratio": (round(opener_overrepresented / single_generated_pre_cap_count, 4) if single_generated_pre_cap_count else 0.0),
+        },
         "question_type_overrepresented_removed": question_type_overrepresented,
         "question_style_overrepresented_removed": question_style_overrepresented,
         "extractive_answer_overrepresented_removed": extractive_overrepresented,
@@ -2832,6 +2845,12 @@ def main(argv: list[str] | None = None) -> None:
     single_generation_coverage = request_coverage(planned_single, generated_audit)
     deterministic_rejected = [row for row in generated_audit if not row.get("deterministic_checks", {}).get("passed", False)]
     generated = [row for row in generated_audit if row.get("deterministic_checks", {}).get("passed", False)]
+    # Captured before dedup and any portfolio cap runs, so the manifest can
+    # report how concentrated generation actually is before enforcement
+    # discards the overrepresented records — the post-cap pool is healthy by
+    # construction and cannot show this on its own (audit T9).
+    question_opener_diversity_pre_cap = question_opener_diversity(generated)
+    single_generated_pre_cap_count = len(generated)
     generated, duplicates = deduplicate(
         generated,
         float(QUALITY.get("dedupe_threshold", 94)),
@@ -2939,6 +2958,8 @@ def main(argv: list[str] | None = None) -> None:
                 drafting_stats={},
                 duplicates=duplicates,
                 opener_overrepresented=opener_overrepresented,
+                single_generated_pre_cap_count=single_generated_pre_cap_count,
+                question_opener_diversity_pre_cap=question_opener_diversity_pre_cap,
                 question_type_overrepresented=question_type_overrepresented,
                 question_style_overrepresented=question_style_overrepresented,
                 extractive_overrepresented=extractive_overrepresented,
@@ -3357,6 +3378,8 @@ def main(argv: list[str] | None = None) -> None:
                 drafting_stats={},
                 duplicates=duplicates + cross_duplicates,
                 opener_overrepresented=opener_overrepresented,
+                single_generated_pre_cap_count=single_generated_pre_cap_count,
+                question_opener_diversity_pre_cap=question_opener_diversity_pre_cap,
                 extractive_overrepresented=extractive_overrepresented,
                 proposition_stats=proposition_stats,
                 reasoning_path_stats=reasoning_path_stats,
@@ -3602,6 +3625,8 @@ def main(argv: list[str] | None = None) -> None:
         drafting_stats=drafting_stats,
         duplicates=duplicates + cross_duplicates,
         opener_overrepresented=opener_overrepresented,
+        single_generated_pre_cap_count=single_generated_pre_cap_count,
+        question_opener_diversity_pre_cap=question_opener_diversity_pre_cap,
         question_type_overrepresented=question_type_overrepresented,
         question_style_overrepresented=question_style_overrepresented,
         extractive_overrepresented=extractive_overrepresented,

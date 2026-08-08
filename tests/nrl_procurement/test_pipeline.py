@@ -1957,6 +1957,53 @@ def test_question_opener_diversity_reports_top_share() -> None:
     }
 
 
+def _manifest_kwargs(**overrides) -> dict:
+    base = {
+        "run_id": "run-1",
+        "status": "complete",
+        "stats": {"records": 0},
+        "manuals": [],
+        "corpus_report": {},
+        "selected_rows": [],
+        "single_coverage": {},
+        "cross_coverage": {},
+        "drafting_stats": {},
+        "duplicates": 0,
+    }
+    base.update(overrides)
+    return base
+
+
+def test_manifest_reports_pre_cap_opener_concentration_and_waste_ratio() -> None:
+    """T9: the post-cap `question_opener_diversity` stat is healthy by
+    construction, so the manifest must separately show how concentrated the
+    raw generated pool was before the cap ran, and how much it discarded.
+    """
+    pre_cap_report = question_opener_diversity(
+        [{"question": "According to the manual, what applies?"} for _ in range(9)] + [{"question": "Who approves this exception?"}]
+    )
+    manifest = generation_pipeline._final_manifest(
+        **_manifest_kwargs(
+            opener_overrepresented=6,
+            single_generated_pre_cap_count=10,
+            question_opener_diversity_pre_cap=pre_cap_report,
+        )
+    )
+    reported = manifest["question_opener_diversity_pre_cap"]
+    assert reported["top_opener"] == "according to the manual"
+    assert reported["top_opener_share"] == 0.9
+    assert reported["pool_size"] == 10
+    assert reported["cap_waste_ratio"] == 0.6
+
+
+def test_manifest_pre_cap_opener_field_defaults_safely_when_unset() -> None:
+    manifest = generation_pipeline._final_manifest(**_manifest_kwargs())
+    reported = manifest["question_opener_diversity_pre_cap"]
+    assert reported["pool_size"] == 0
+    assert reported["cap_waste_ratio"] == 0.0
+    assert reported["unique_openers"] == 0
+
+
 def test_extractive_answer_diversity_caps_final_pool_share() -> None:
     copied = [
         {
