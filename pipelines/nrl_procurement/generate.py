@@ -2080,6 +2080,10 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--skip-cross-document", action="store_true")
     parser.add_argument("--drafting-limit", type=int, help="Limit authored drafting seeds for a pilot")
     parser.add_argument("--skip-drafting", action="store_true")
+    parser.add_argument("--skip-propositions", action="store_true")
+    parser.add_argument("--skip-temporal", action="store_true")
+    parser.add_argument("--skip-path-qa", action="store_true")
+    parser.add_argument("--skip-reasoning-paths", action="store_true")
     parser.add_argument("--skip-judge", action="store_true", help="Development only")
     parser.add_argument(
         "--refresh-stage",
@@ -2193,7 +2197,7 @@ def main(argv: list[str] | None = None) -> None:
     )
     temporal_config = CONFIG.get("temporal", {})
     resolved_temporal = None
-    if temporal_config.get("enabled", False):
+    if temporal_config.get("enabled", False) and not args.skip_temporal:
         resolved_temporal = resolve_manifest_pairs(
             load_temporal_config(temporal_config),
             manuals,
@@ -2248,7 +2252,7 @@ def main(argv: list[str] | None = None) -> None:
     accepted_propositions: list[dict[str, Any]] = []
     accepted_paths: list[dict[str, Any]] = []
     proposition_config = CONFIG.get("propositions", {})
-    if proposition_config.get("enabled", False):
+    if proposition_config.get("enabled", False) and not args.skip_propositions:
         model_manifest = _non_secret_model_manifest(GENERATION)
         proposition_inputs = []
         for row in planned_single:
@@ -2305,7 +2309,7 @@ def main(argv: list[str] | None = None) -> None:
 
     reasoning_path_config = CONFIG.get("reasoning_paths", {})
     cross_config = CONFIG.get("cross_document", {})
-    if reasoning_path_config.get("enabled", False):
+    if reasoning_path_config.get("enabled", False) and not args.skip_reasoning_paths:
         accepted_paths, rejected_paths = build_reasoning_paths(
             accepted_propositions,
             cross_config,
@@ -2323,7 +2327,7 @@ def main(argv: list[str] | None = None) -> None:
             "schema_version": (accepted_paths[0]["schema_version"] if accepted_paths else None),
         }
 
-    if temporal_config.get("enabled", False):
+    if temporal_config.get("enabled", False) and not args.skip_temporal:
         assert resolved_temporal is not None
         temporal_candidates, _ = build_temporal_alignments(
             accepted_propositions,
@@ -2351,7 +2355,7 @@ def main(argv: list[str] | None = None) -> None:
         )
 
     path_qa_config = CONFIG.get("path_qa", {})
-    if path_qa_config.get("enabled", False) and accepted_paths:
+    if path_qa_config.get("enabled", False) and not args.skip_path_qa and accepted_paths:
         proposition_by_id = {row["proposition_id"]: row for row in accepted_propositions}
         path_question_inputs = [
             {
