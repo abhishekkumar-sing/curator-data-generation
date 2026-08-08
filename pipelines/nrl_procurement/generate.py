@@ -1500,23 +1500,48 @@ def _rescue_missing_judge_rows(
     if rescue_profile is None or not inputs:
         return outputs, 0, []
     produced = {str(row.get("record_id", "")) for row in outputs}
+
+    def expected_record_ids(row: dict[str, Any]) -> list[str]:
+        if "judge_items" in row:
+            return [str(item["record_id"]) for item in row["judge_items"]]
+        return [str(row["record_id"])]
+
     missing = [
         row
         for row in inputs
-        if any(
-            str(item["record_id"]) not in produced
-            for item in row["judge_items"]
-        )
+        if any(record_id not in produced for record_id in expected_record_ids(row))
     ]
     if not missing:
         return outputs, 0, []
     rescue_llm = llm_type(**_llm_kwargs(rescue_profile))
     rescue_tokens = int(rescue_profile["generation_params"]["max_tokens"])
-    budgeted, context_rejected = _budget_judge_rows(
-        rescue_llm,
-        [_rescue_input(row, rescue_tokens) for row in missing],
-        rescue_profile,
-    )
+    rescue_inputs = [_rescue_input(row, rescue_tokens) for row in missing]
+    if all("judge_items" in row for row in rescue_inputs):
+        budgeted, context_rejected = _budget_judge_rows(
+            rescue_llm,
+            rescue_inputs,
+            rescue_profile,
+        )
+    else:
+        budgeted = []
+        context_rejected = []
+        for row in rescue_inputs:
+            budget = _rendered_prompt_budget(rescue_llm, row, rescue_profile)
+            if budget["passed"]:
+                budgeted.append({**row, "prompt_budget": budget})
+            else:
+                context_rejected.append(
+                    {
+                        **row,
+                        "answerability_judge": {
+                            "accepted": False,
+                            "issues": [
+                                "answerability_rescue_prompt_exceeds_context_window"
+                            ],
+                        },
+                        "output_rescue_prompt_budget": budget,
+                    }
+                )
     rescued = (
         _execute_llm_stage(
             f"{stage}_output_rescue",
@@ -3187,6 +3212,18 @@ def main(argv: list[str] | None = None) -> None:
                 answerability_judge,
                 budgeted,
             )
+        (
+            answerability_judged,
+            answerability_rescued,
+            answerability_rescue_prompt_rejected,
+        ) = _rescue_missing_judge_rows(
+            stage="answerability_judge",
+            llm_type=IndependentAnswerabilityJudge,
+            profile=judge_profile,
+            inputs=budgeted,
+            outputs=answerability_judged,
+        )
+        prompt_rejected.extend(answerability_rescue_prompt_rejected)
         promoted_unanswerable = [
             row
             for row in answerability_judged
@@ -3233,6 +3270,7 @@ def main(argv: list[str] | None = None) -> None:
             "planned": len(unanswerable_inputs),
             "deterministic_valid": len(deterministic_unanswerable),
             "independently_judged": len(answerability_judged),
+            "output_rescued": answerability_rescued,
             "accepted": len(promoted_unanswerable),
             "rejected": len(rejected_unanswerable),
             "target_fraction": float(QUALITY.get("unanswerable_fraction", 0.0)),

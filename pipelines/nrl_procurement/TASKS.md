@@ -6214,3 +6214,89 @@ Rejected alternatives:
   stop on accepted semantic novelty, not model assertion or a raw pass count.
 - Train on ordinary TOC/retrieval failures as abstentions: rejected; these teach
   retrieval accidents, not calibrated refusal behavior.
+
+## Smoke latency, Gemma mode A/B, and instruction diversity (2026-08-08)
+
+- [x] Attribute the 38-minute smoke from recorded stage timings. The two GLM
+  cross-document passes consumed about 1,303 seconds (~22 minutes); Gemma
+  thinking judgments then generated long traces, invoked output rescue, and the
+  final all-failed answerability batch crashed before rescue.
+- [x] Compare `/home/abhishek/nrl_curator_native_glm52`. Carry over its relevant
+  operational pattern: `require_all_responses=false`, explicit missing-row
+  reconciliation, one larger output rescue, a 5,000-token ordinary GLM reserve,
+  and thinking disabled for schema-constrained stages.
+- [x] Fix Curator's all-failed edge case. When partial results are explicitly
+  allowed, persist `failed_requests.jsonl` and return an empty Dataset so the
+  pipeline can invoke recovery; retain fail-fast behavior when
+  `require_all_responses=true`.
+- [x] Route answerability judgment through the same separately checkpointed,
+  context-preflighted 4,096-token rescue as other singular judge stages.
+- [x] Add `gemma_structured` on the same shared-gateway Gemma deployment with
+  temperature 1.0, top-p 0.95, top-k 64, and thinking disabled. Keep
+  `gemma_thinking` as an explicit opt-in profile.
+- [x] Run a live same-deployment mode comparison. The schema probe passed in
+  both modes: thinking used 401 output tokens and 6.87s; non-thinking used 73
+  tokens and 1.71s. On the same three real procurement judge records,
+  non-thinking reproduced two score-5 acceptances and one score-3 rejection,
+  completed all three in 4.91s with 644 output tokens, and needed no rescue.
+  Thinking required 76.43s plus 46.68s rescue and at least 5,621 successful
+  output tokens; two ordinary responses also truncated, whose consumed tokens
+  Curator did not include in that total.
+- [x] Reduce ordinary GLM `max_tokens` from 8,192 to 5,000 while preserving the
+  12,000-token missing-row rescue.
+- [x] Add regression coverage for an all-failed Curator batch and direct
+  answerability rows entering judge rescue.
+- [ ] Validate the Gemma mode choice on at least 100-200 stratified, human-
+  labeled judge cases (accept/reject, direct/CoT, single/cross-document,
+  answerable/unanswerable, boundary/adversarial). Compare precision, recall,
+  agreement by failure class, schema success, truncation, tokens, and latency;
+  the three-row A/B is strong operational evidence, not a quality proof.
+- [ ] Run a fresh new-ID end-to-end smoke and compare per-stage wall time,
+  output tokens, truncation/rescue yield, and accepted records against
+  `run-20260808T122041-362263Z`.
+- [ ] Ask the vLLM deployment owner to capture queue/TTFT/TPOT/KV-cache metrics
+  and validate `--max-num-seqs`, chunked prefill, and
+  `--max-num-batched-tokens`; client concurrency cannot improve a stage that
+  contains fewer requests than its ceiling.
+- [ ] Add an explicit, source-feasible difficulty/operation coverage matrix for
+  instruction synthesis. Cross product only supported axes: procurement task,
+  authentic persona need, question intent, reasoning operation, answer format,
+  single/multi-hop context, and basic/intermediate/advanced difficulty. Never
+  manufacture a scenario solely to fill a quota.
+- [ ] Add materially distinct scenario planning for CoT: each variation must
+  change the governing condition, exception, threshold boundary, stakeholder
+  decision, evidence requirement, temporal state, or reasoning path—not merely
+  wording. Generate multiple candidate rationales only for genuinely multi-step
+  records, verify every step against exact evidence, and select by grounded
+  correctness before semantic diversity.
+- [ ] Human-label the existing semantic-neighbor calibration artifact and set a
+  model-specific threshold before enabling embedding-based deletion. Lexical
+  opener/type/style balancing is not sufficient evidence of semantic diversity.
+
+Research basis:
+
+- Self-Instruct generates instruction/input/output candidates and filters
+  invalid or similar items: <https://aclanthology.org/2023.acl-long.754/>.
+- Evol-Instruct increases complexity by controlled instruction evolution, but
+  procurement evolution must remain source-feasible:
+  <https://arxiv.org/abs/2304.12244>.
+- DEITA evaluates instruction data jointly on complexity, quality, and
+  diversity rather than maximizing raw volume:
+  <https://arxiv.org/abs/2312.15685>.
+- Bonito conditions task generation on unannotated domain text and explicit
+  task attributes: <https://aclanthology.org/2024.findings-acl.748/>.
+- RAFT trains open-book domain QA with relevant evidence, distractors, and
+  rationale-style answers: <https://arxiv.org/abs/2403.10131>.
+- CoT prompting supports genuinely complex multi-step tasks, while STaR keeps
+  rationales that lead to verified answers and self-consistency selects among
+  diverse paths: <https://proceedings.neurips.cc/paper/2022/hash/9d5609613524ecf4f15af0f7b31abca4-Abstract-Conference.html>,
+  <https://papers.nips.cc/paper_files/paper/2022/hash/639a9a172c044fbb64175b5fad42e9a5-Abstract-Conference.html>,
+  <https://openreview.net/pdf?id=1PL1NIMMrw>.
+- Google documents Gemma 4's explicit `enable_thinking` switch; vLLM documents
+  how the same flag activates reasoning output:
+  <https://ai.google.dev/gemma/docs/capabilities/thinking>,
+  <https://docs.vllm.ai/en/stable/features/reasoning_outputs/>.
+- vLLM's optimization and serving guides define chunked-prefill tuning,
+  `max_num_batched_tokens`, and `max_num_seqs`:
+  <https://docs.vllm.ai/en/stable/configuration/optimization/>,
+  <https://docs.vllm.ai/en/stable/cli/serve/>.

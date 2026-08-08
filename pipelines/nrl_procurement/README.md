@@ -15,7 +15,7 @@ CURATOR_VIEWER=0
 TELEMETRY_ENABLED=false
 
 GENERATION_PROFILE=glm
-JUDGE_PROFILE=gemma_thinking
+JUDGE_PROFILE=gemma_structured
 
 MODEL=gemma-4-31b-it
 LLM_DEPLOYMENT_ID=gemma-4-31b-it-10.180.148.183-8010-v1
@@ -45,32 +45,33 @@ served-model IDs stay in `.env`. Switch either role by changing only
 models for production when possible. `.env` is gitignored; `.env.example` is
 the safe template that can be committed.
 
-The `gemma_thinking` profile sends `temperature=1.0`, `top_p=0.95`,
-`top_k=64`, and
-`extra_body.chat_template_kwargs.enable_thinking=true` on every request. The
-independent `gemma` judge profile explicitly keeps thinking disabled. Model
-profiles own this chat-template choice so a role-level default cannot silently
-override it. The thinking generator is conservatively limited to eight
-concurrent client requests until the exact vLLM deployment is load-tested.
+Both shared-gateway Gemma profiles send `temperature=1.0`, `top_p=0.95`, and
+`top_k=64`. The selected `gemma_structured` profile sends
+`extra_body.chat_template_kwargs.enable_thinking=false`; these stages need a
+compact schema-constrained decision, not a provider reasoning trace. The
+`gemma_thinking` profile remains available for an explicit reasoning experiment
+and sends `enable_thinking=true`. Model profiles own this chat-template choice
+so a role-level default cannot silently override it.
 Because both RPM and TPM are configured explicitly, Curator does not spend an
 extra inference request attempting to rediscover those limits from headers.
 
 The configured production roles use GLM for generation and the independent
-thinking-enabled `gemma-4-31b-it` route for judging. Both model aliases may be
+non-thinking structured `gemma-4-31b-it` route for judging. Both model aliases may be
 served through the same LiteLLM gateway, while their credentials and deployment
 identities remain independent. `LLM_DEPLOYMENT_ID` identifies the underlying
 Gemma deployment, so it does not need to match the gateway port in
 `LLM_BASE_URL`. The judge uses
 native JSON-schema mode, the role-level 2,048-token ordinary ceiling with a
-4,096-token missing-row rescue, and the profile's eight-request concurrency
+4,096-token missing-row rescue, and the profile's 45-request concurrency
 cap. Ministral remains available as an explicit fallback profile. Every
 endpoint change still requires the exact structured-output probe.
 
 The former direct port-8010 qualification failed at TCP connection setup on
 2026-08-07. The replacement shared-gateway profile was independently qualified
 on 2026-08-08: both GLM generation and thinking-enabled Gemma judging passed
-every structured-output probe check. Endpoint/model/key changes still produce a
-new fingerprint and require another live qualification.
+every structured-output probe check. Selecting `gemma_structured` changes the
+request contract and therefore requires a fresh judge probe. Endpoint/model/key
+changes also produce a new fingerprint and require another live qualification.
 
 The GLM profile uses a 1,200-second request timeout and one retry. The first
 load test measured about 256 seconds median, 339 seconds p99, and 365 seconds
@@ -98,7 +99,66 @@ missing-row-only recovery stage. Generation rescues use at most 12,000 tokens;
 judge rescues use at most 4,096. Each rescue is separately checkpointed and is
 submitted only when the complete rendered prompt plus the larger completion
 reserve fits the selected deployment context. Existing successful rows are
-never regenerated, and partial/truncated judge JSON is never accepted.
+never regenerated, and partial/truncated judge JSON is never accepted. Curator
+also returns an empty dataset when an entire stage fails and
+`require_all_responses=false`, allowing the same audited rescue to run instead
+of crashing before missing-row reconciliation.
+
+The ordinary GLM completion reserve is 5,000 tokens, matching the stable native
+GLM pipeline. The 12,000-token rescue remains available for rare verbose rows.
+Client concurrency is a ceiling, not a throughput guarantee: a stage containing
+7 or 12 requests cannot use a limit of 45 beyond those 7 or 12 requests. For
+server-side throughput, measure vLLM queue time, time to first token, decode
+throughput, and KV-cache pressure; tune `--max-num-seqs` and
+`--max-num-batched-tokens` on the actual deployment, with chunked prefill enabled
+where supported. Raising only Curator concurrency can increase queue latency and
+recreate the synchronized timeout wave seen at 128.
+
+The 2026-08-08 same-deployment A/B supports this split. On the structure probe,
+thinking used 401 output tokens and 6.87 seconds; non-thinking used 73 and 1.71
+seconds, with both passing every contract check. On the same three real
+procurement judge inputs, non-thinking reproduced the thinking run's two score-5
+acceptances and one score-3 rejection, completed all three in 4.91 seconds with
+644 output tokens, and did not truncate. Thinking took 76.43 seconds plus 46.68
+seconds of rescue and used at least 5,621 successful output tokens; failed
+truncated attempts add further unreported consumption. This is enough to select
+non-thinking operationally for compact judging, but not to claim broad quality
+equivalence. The remaining gate is a 100-200-record stratified, human-labeled
+A/B covering direct/CoT, single/cross-document, answerability, boundary, and
+adversarial decisions.
+
+### Diverse instruction and QA-CoT generation
+
+Treat diversity as a coverage-and-selection problem, not a request to “word the
+question differently.” This pipeline plans source-feasible question intent,
+wording style, answer format, procurement task, authentic persona need, direct
+versus CoT shape, and single- versus multi-document evidence before generation.
+It then applies deterministic grounding checks, an independent judge, lexical
+portfolio caps, and semantic-neighbor calibration.
+
+For deeper instruction pairs, add an explicit difficulty and reasoning-operation
+axis to that planner. A candidate is materially new only if it changes a
+supported rule, condition, exception, threshold boundary, stakeholder decision,
+evidence requirement, temporal state, or reasoning path. Cross product only the
+axis combinations supported by the source; do not invent a scenario merely to
+fill a quota. Generate several candidates for hard cells, then select for
+grounded quality and semantic coverage rather than retaining every sample.
+
+Use `qa_cot` only for genuine two-to-four-step problems. Student-facing
+rationales are concise auditable steps with an operation, an evidence-based
+inference, and exact supporting quotes. They are distinct from the provider's
+private thinking stream: Gemma thinking can be disabled for the judge while the
+dataset still contains verified teaching rationales. Direct facts retain
+`reasoning_steps=[]`; adding ceremonial steps to easy questions teaches verbose
+artifacts rather than reasoning.
+
+This design follows the generate/filter loop in Self-Instruct, controlled
+complexity in Evol-Instruct, joint complexity-quality-diversity selection in
+DEITA, domain-conditioned task generation in Bonito, and evidence/distractor
+training in RAFT. CoT candidates follow the verification lesson of STaR and the
+selection lesson of self-consistency: keep rationales that reach a verified
+answer, not rationales merely because they are long. Exact research links and
+the remaining implementation gates are recorded in `TASKS.md`.
 
 `MINISTRAL_MODEL` must be the deployment's advertised OpenAI model ID, not the
 Hugging Face repository path. The current private endpoint advertises

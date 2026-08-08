@@ -2856,25 +2856,25 @@ def test_role_profile_preserves_profile_defaults_but_role_limits_win() -> None:
     assert ministral["served_model_env"] == "MINISTRAL_MODEL"
     assert configured_context_window(ministral) == 65536
 
-    gemma_judge = generation_pipeline._role_profile("judge", "gemma_thinking")
+    gemma_judge = generation_pipeline._role_profile("judge", "gemma_structured")
     assert generation_pipeline.CONFIG["models"]["judge"]["default_profile"] == (
-        "gemma_thinking"
+        "gemma_structured"
     )
-    assert gemma_judge["profile_name"] == "gemma_thinking"
+    assert gemma_judge["profile_name"] == "gemma_structured"
     assert gemma_judge["generation_params"]["max_tokens"] == 2048
     assert gemma_judge["generation_params"]["temperature"] == 1.0
     assert gemma_judge["generation_params"]["top_p"] == 0.95
     assert gemma_judge["generation_params"]["top_k"] == 64
     assert gemma_judge["generation_params"]["extra_body"][
         "chat_template_kwargs"
-    ]["enable_thinking"] is True
+    ]["enable_thinking"] is False
     assert gemma_judge["max_concurrent_requests"] == 45
 
 
 def test_output_rescue_raises_only_the_recovery_completion_budget() -> None:
     generation = generation_pipeline._role_profile("generation", "glm")
     generation_rescue = generation_pipeline._output_rescue_profile(generation)
-    assert generation["generation_params"]["max_tokens"] == 8192
+    assert generation["generation_params"]["max_tokens"] == 5000
     assert generation_rescue is not None
     assert generation_rescue["generation_params"]["max_tokens"] == 12000
     assert generation_rescue["max_concurrent_requests"] == 45
@@ -2993,6 +2993,48 @@ def test_judge_output_rescue_dispatches_only_missing_decision(monkeypatch) -> No
     assert calls[0][1][0]["judge_items"][0]["record_id"] == "two"
 
 
+def test_answerability_output_rescue_accepts_direct_record_inputs(
+    monkeypatch,
+) -> None:
+    calls: list[tuple[str, list[dict]]] = []
+
+    class RescueJudge:
+        def __init__(self, **_kwargs):
+            pass
+
+    monkeypatch.setattr(generation_pipeline, "_llm_kwargs", lambda _profile: {})
+    monkeypatch.setattr(
+        generation_pipeline,
+        "_rendered_prompt_budget",
+        lambda _judge, _row, _profile: {"passed": True},
+    )
+
+    def fake_execute(stage, role, _llm, inputs):
+        calls.append((stage, inputs))
+        assert role == "judge"
+        return [{"record_id": inputs[0]["record_id"]}]
+
+    monkeypatch.setattr(generation_pipeline, "_execute_llm_stage", fake_execute)
+    profile = {
+        "context_window": 32768,
+        "output_rescue_max_tokens": 4096,
+        "generation_params": {"max_tokens": 2048},
+    }
+    rows, rescued, rejected = generation_pipeline._rescue_missing_judge_rows(
+        stage="answerability_judge",
+        llm_type=RescueJudge,
+        profile=profile,
+        inputs=[{"record_id": "one"}, {"record_id": "two"}],
+        outputs=[{"record_id": "one"}],
+    )
+
+    assert {row["record_id"] for row in rows} == {"one", "two"}
+    assert rescued == 1
+    assert rejected == []
+    assert calls[0][0] == "answerability_judge_output_rescue"
+    assert calls[0][1][0]["record_id"] == "two"
+
+
 def test_thinking_generation_profile_preserves_template_and_sampling() -> None:
     resolved = generation_pipeline._role_profile("generation", "gemma_thinking")
     params = resolved["generation_params"]
@@ -3004,7 +3046,7 @@ def test_thinking_generation_profile_preserves_template_and_sampling() -> None:
     assert params["temperature"] == 1.0
     assert params["top_p"] == 0.95
     assert params["top_k"] == 64
-    assert params["max_tokens"] == 8192
+    assert params["max_tokens"] == 5000
     assert params["extra_body"]["chat_template_kwargs"][
         "enable_thinking"
     ] is True

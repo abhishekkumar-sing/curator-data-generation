@@ -476,6 +476,7 @@ class BaseRequestProcessor(ABC):
         provider_success_count = 0
         parsed_rows_count = 0
         parsed_rows: list[dict] = []
+        return_empty_dataset = False
         error_sample = []
         dataset_file = os.path.join(self.working_dir, f"{parse_func_hash}.arrow")
         from datasets.arrow_writer import ArrowWriter
@@ -526,7 +527,18 @@ class BaseRequestProcessor(ABC):
                 writer.write({"error": "All requests failed"})
                 writer.finalize()
                 os.remove(dataset_file)
-                raise ValueError(f"All requests failed. {error_sample_msg}")
+                if self.config.require_all_responses:
+                    raise ValueError(f"All requests failed. {error_sample_msg}")
+                # A caller that explicitly accepts partial responses must also
+                # be able to reconcile an all-failed batch. Keep processing so
+                # failed_requests.jsonl is written, then return an empty
+                # Dataset for the caller's missing-row rescue policy.
+                logger.warning(
+                    "All %s requests failed; returning an empty dataset because "
+                    "require_all_responses is False.",
+                    total_responses_count,
+                )
+                return_empty_dataset = True
             elif parsed_rows_count == 0:
                 # parse() may intentionally filter every successful provider
                 # response by returning []/None. Keep that distinct from
@@ -626,6 +638,8 @@ class BaseRequestProcessor(ABC):
                     os.remove(dataset_file)
                     raise ValueError("Some requests do not have responses and require_all_responses is True.")
 
+        if return_empty_dataset:
+            return Dataset.from_list([])
         return self._load_from_dataset_file(dataset_file)
 
     def _load_from_dataset_file(self, dataset_file: str) -> "Dataset":

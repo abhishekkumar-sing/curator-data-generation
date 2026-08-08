@@ -92,6 +92,25 @@ model_profiles:
       extra_body:
         chat_template_kwargs:
           enable_thinking: true
+  gemma_structured:
+    # Fast schema-constrained judge on the same shared-gateway Gemma route.
+    # Keep provider reasoning disabled: these stages request an auditable
+    # decision object, and hidden reasoning was consuming the entire ordinary
+    # completion budget before that object was complete.
+    served_model_env: MODEL
+    base_url_env: LLM_BASE_URL
+    api_key_env: LLM_API_KEY
+    deployment_identity_env: LLM_DEPLOYMENT_ID
+    structured_output_mode: json_schema
+    context_window: 32768
+    max_concurrent_requests: 45
+    generation_params:
+      temperature: 1.0
+      top_p: 0.95
+      top_k: 64
+      extra_body:
+        chat_template_kwargs:
+          enable_thinking: false
   gemma:
     served_model_env: GEMMA_MODEL
     base_url_env: GEMMA_BASE_URL
@@ -152,24 +171,23 @@ models:
     max_tokens_per_minute: 100000000
     # Terminal omissions (including max_tokens truncation) are retried once in
     # a separate checkpoint at this larger ceiling. Ordinary requests retain
-    # the 8,192-token cap below.
+    # the smaller scheduling reserve below.
     output_rescue_max_tokens: 12000
     output_rescue_max_concurrent_requests: 45
     generation_params:
       temperature: 1.0
       top_p: 0.95
-      # Pilot-022 hit IncompleteOutputException on path-answer synthesis (the
-      # most verbose generation task: multiple claims/propositions/reasoning
-      # steps in one structured response) at the prior 4096 ceiling.
-      # Source windows cap input at 8192 tokens; the selected deployment's
-      # prompt-budget check enforces its configured and server-reported limits.
-      max_tokens: 8192
+      # The native GLM pipeline's stable structured-output setting is 5,000.
+      # This avoids advertising an 8,192-token tail to the shared scheduler for
+      # every request; the separately checkpointed 12,000-token rescue still
+      # handles the rare verbose path-answer or cross-document truncation.
+      max_tokens: 5000
 
   # Select an independent local judge through JUDGE_PROFILE/.env.
   judge:
     mode: hosted_vllm
     profile_env: JUDGE_PROFILE
-    default_profile: gemma_thinking
+    default_profile: gemma_structured
     private_endpoint_only: true
     request_timeout: 1800
     max_retries: 1

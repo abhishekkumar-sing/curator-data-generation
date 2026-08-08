@@ -353,6 +353,45 @@ def test_all_filtered_provider_responses_return_empty_dataset(tmp_path) -> None:
     assert not (tmp_path / "filtered.arrow").exists()
 
 
+def test_all_failed_provider_responses_return_empty_dataset_when_allowed(
+    tmp_path,
+) -> None:
+    """An all-failed partial stage must remain available to pipeline rescue."""
+
+    request = _request(attempts_left=0)
+    response = GenericResponse(
+        response_message=None,
+        raw_response=None,
+        raw_request={"model": "test-model"},
+        generic_request=request.generic_request,
+        created_at=request.created_at,
+        finished_at=request.created_at,
+        token_usage=None,
+        response_cost=None,
+        finish_reason=None,
+        response_errors=["output exceeded max_tokens"],
+    )
+    (tmp_path / "responses_0.jsonl").write_text(
+        response.model_dump_json() + "\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "requests_0.jsonl").write_text(
+        request.generic_request.model_dump_json() + "\n",
+        encoding="utf-8",
+    )
+    processor = SimpleNamespace(
+        working_dir=str(tmp_path),
+        _process_response=lambda data: None,
+        config=SimpleNamespace(require_all_responses=False),
+    )
+
+    dataset = BaseRequestProcessor.create_dataset_files(processor, "failed")
+
+    assert dataset.to_list() == []
+    assert not (tmp_path / "failed.arrow").exists()
+    assert (tmp_path / "failed_requests.jsonl").read_text(encoding="utf-8")
+
+
 def test_dataset_writer_normalizes_missing_columns_between_valid_rows(
     tmp_path,
 ) -> None:
