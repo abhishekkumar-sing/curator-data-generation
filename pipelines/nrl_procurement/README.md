@@ -17,13 +17,14 @@ TELEMETRY_ENABLED=false
 GENERATION_PROFILE=glm
 JUDGE_PROFILE=gemma_thinking
 
-MODEL=google/gemma-4-31B-it
+MODEL=gemma-4-31b-it
 LLM_DEPLOYMENT_ID=gemma-4-31b-it-10.180.148.183-8010-v1
-LLM_BASE_URL=http://127.0.0.1:8010/v1
+LLM_BASE_URL=http://127.0.0.1:3005/v1
 LLM_API_KEY=replace-me
 
-GLM_MODEL=replace-me
-GLM_BASE_URL=http://127.0.0.1:8000/v1
+GLM_MODEL=GLM-5.2-NVFP4-FP8
+GLM_DEPLOYMENT_ID=glm-5.2-nvfp4-fp8-v1
+GLM_BASE_URL=http://127.0.0.1:3005/v1
 GLM_API_KEY=replace-me
 
 NEMOTRON_MODEL=replace-me
@@ -55,16 +56,21 @@ Because both RPM and TPM are configured explicitly, Curator does not spend an
 extra inference request attempting to rediscover those limits from headers.
 
 The configured production roles use GLM for generation and the independent
-thinking-enabled `google/gemma-4-31B-it` endpoint for judging. The judge uses
+thinking-enabled `gemma-4-31b-it` route for judging. Both model aliases may be
+served through the same LiteLLM gateway, while their credentials and deployment
+identities remain independent. `LLM_DEPLOYMENT_ID` identifies the underlying
+Gemma deployment, so it does not need to match the gateway port in
+`LLM_BASE_URL`. The judge uses
 native JSON-schema mode, the role-level 2,048-token ordinary ceiling with a
 4,096-token missing-row rescue, and the profile's eight-request concurrency
 cap. Ministral remains available as an explicit fallback profile. Every
 endpoint change still requires the exact structured-output probe.
 
-The port-8010 judge remains fail-closed until its exact profile probe passes.
-The 2026-08-07 qualification attempt was refused at TCP connection setup and
-processed zero tokens; selecting the profile does not constitute endpoint
-validation.
+The former direct port-8010 qualification failed at TCP connection setup on
+2026-08-07. The replacement shared-gateway profile was independently qualified
+on 2026-08-08: both GLM generation and thinking-enabled Gemma judging passed
+every structured-output probe check. Endpoint/model/key changes still produce a
+new fingerprint and require another live qualification.
 
 The GLM profile uses a 1,200-second request timeout and one retry. The first
 load test measured about 256 seconds median, 339 seconds p99, and 365 seconds
@@ -76,13 +82,16 @@ Timeout, retry, concurrency, RPM, and TPM values are transport tuning: changing
 them does not alter scientific checkpoint compatibility, although every run
 manifest still records their exact values.
 
-GLM generation is limited to 32 concurrent requests after 128 concurrent
-long-output requests produced a synchronized server/queue timeout wave. During
-saturation replay, the pipeline reuses the integrity-checked historical
+GLM generation uses 45 concurrent requests for the shared-gateway smoke after
+128 concurrent long-output requests previously produced a synchronized
+server/queue timeout wave. During saturation replay, the pipeline reuses the
+integrity-checked historical
 checkpoint from the earlier attempt and verifies that reconstructed outcomes
 exactly match persisted saturation state; it does not regenerate an old pass or
-weaken the mismatch guard. Rescue concurrency is separately limited to 16 for
-generation and 8 for judging.
+weaken the mismatch guard. For the comprehensive shared-gateway smoke, ordinary
+GLM generation, GLM rescue, Gemma judging, and judge rescue are all set to 45
+concurrent requests. These transport limits must be reevaluated from recorded
+latency and timeout yield before any further increase.
 
 Terminal structured outputs omitted after ordinary retries receive one
 missing-row-only recovery stage. Generation rescues use at most 12,000 tokens;
@@ -126,12 +135,11 @@ credentials.
 
 ### Optional semantic-diversity calibration
 
-The checked-in embedding profile is disabled by default. It uses NVIDIA's
+The checked-in embedding analysis profile is enabled. It uses NVIDIA's
 OpenAI-compatible `llama-nemotron-embed-1b-v2` endpoint only for generated
 question text; source passages, answers, evidence, and credentials are never
 included in the embedding input. Configure a newly issued key in the untracked
-`.env`, set `embeddings.enabled: true` in `config.yaml`, and probe the exact
-deployment before generation:
+`.env` and probe the exact deployment before generation:
 
 ```bash
 .curator/bin/python pipelines/nrl_procurement/semantic_calibration.py probe
@@ -154,6 +162,17 @@ including at least 10 duplicates and 10 non-duplicates. Its recommendation is
 still in-sample: validate the proposed threshold on a separate reviewed holdout
 before setting `embeddings.selection_enabled: true`. Until then, embedding
 analysis emits candidates and metrics but removes no records.
+
+The comprehensive configuration also enables proposition extraction, connected
+reasoning paths, temporal artifacts, path QA, and cross-document saturation.
+The default saturation policy has no numeric pass cap and stops only after each
+parent reaches the configured consecutive-empty convergence rule. Use an
+explicit positive `--max-passes` for bounded smoke tests.
+
+The active embedding transport was capability-probed successfully on
+2026-08-08 with one 1,024-dimensional query vector. This verifies transport and
+schema compatibility only; it does not authorize semantic deletion, and any
+credential change requires another probe.
 
 `CURATOR_LOCAL_ONLY=1` is a hard guard around Curator's hosted Viewer, including
 explicit `push_to_viewer()` calls. Telemetry is disabled by default and also

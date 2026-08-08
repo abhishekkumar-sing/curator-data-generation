@@ -140,13 +140,65 @@ Research basis:
 - [x] Update `.env.example`, the README, committed default configuration, and
   regression tests so the selected role and its effective parameters cannot
   drift silently. Ministral remains an explicit fallback profile.
-- [ ] Qualify the exact Gemma judge deployment. The judge-only structured-output
-  probe at 2026-08-07 03:45 UTC failed at TCP connection setup to port 8010;
+- [x] Qualify the exact Gemma judge deployment. The initial judge-only
+  structured-output probe at 2026-08-07 03:45 UTC failed at TCP connection
+  setup to port 8010;
   zero requests succeeded and zero tokens were processed. Fingerprint
   `fc409fa091813e4d5fcbe21fe509170dddfd9dc3d6432053966e8b5f5608551e`
-  is a persisted failed probe, not permission to run. Rerun the probe after the
-  endpoint is restored and require every nested schema check to pass before a
-  large judge stage.
+  remains a persisted failed probe, not permission to run. The replacement
+  shared-gateway profile passed on 2026-08-08 under its new exact fingerprint,
+  recorded below.
+
+## Shared LiteLLM Gemma route (2026-08-08)
+
+- [x] Verify the replacement credential against the shared port-3005 LiteLLM
+  gateway. Its key-scoped model discovery advertises `gemma-4-31b-it`, and a
+  live completion returned the requested `GEMMA_OK` response.
+- [x] Confirm that the replacement credential is Gemma-only: the gateway
+  rejects `GLM-5.2-NVFP4-FP8` with `key_model_access_denied`. Keep role-specific
+  credentials even though Gemma and GLM share one gateway URL.
+- [x] Preserve
+  `LLM_DEPLOYMENT_ID=gemma-4-31b-it-10.180.148.183-8010-v1` as the supplied
+  underlying deployment identity while routing requests through port 3005.
+  Deployment identity is intentionally independent of the transport URL.
+- [x] Qualify the updated `gemma_thinking` judge profile through the shared
+  gateway and persist exact successful structured-output probe fingerprint
+  `7819f7ef5afc035be1f03480c34e5d1e11868a71f074b5438f85f457b600c60a`.
+  The live probe on 2026-08-08 passed status, labels, and nested integer-list
+  checks in 6.992 seconds with thinking enabled, temperature 1.0, top-p 0.95,
+  top-k 64, and a 2,048-token judge ceiling.
+- [x] Requalify the unchanged GLM 5.2 generator through the same gateway. Exact
+  fingerprint `61dbe1c71839baadb4bc7f4acc0704fa8dc26cbf21aac0ee7fb251b18a6981ca`
+  passed every structured-output check in 12.103 seconds. The active roles are
+  therefore GLM 5.2 generation and Gemma 4 31B IT judging.
+
+## Comprehensive smoke feature enablement (2026-08-08)
+
+- [x] Enable proposition extraction, connected reasoning paths, temporal
+  artifacts, path QA, one configured cross-document novelty pass, and
+  convergence-based saturation. Keep bounded smoke runs under an explicit
+  positive `--max-passes` override.
+- [x] Enable semantic embedding analysis with the NVIDIA
+  `llama-nemotron-embed-1b-v2` endpoint contract. Keep semantic selection
+  disabled until duplicate/related/distinct labels establish a threshold and a
+  separate reviewed holdout validates it.
+- [x] Insert the user-supplied embedding credential only in ignored `.env` and
+  run the non-sensitive capability probe. On 2026-08-08 the configured
+  `nvidia/llama-nemotron-embed-1b-v2` endpoint returned one valid 1,024-element
+  vector under secret-free cache fingerprint `e57198334cceecb830ba`; the
+  Gemma-only gateway credential was not reused.
+- [ ] Rotate this embedding credential before release because it was exposed in
+  conversation. Re-run the probe after rotation; the current successful result
+  permits the requested smoke test but does not close the release credential
+  hygiene blocker.
+- [x] Set ordinary GLM generation, GLM output rescue, Gemma judging, and judge
+  output rescue concurrency to 45 for the comprehensive smoke test. Ministral's
+  unused fallback profile remains at 16. Record endpoint stability, queueing,
+  and timeout yield from the smoke before raising any active limit again.
+- [x] Verify and regression-lock every Gemma profile to temperature 1.0, top-p
+  0.95, and top-k 64. Both thinking-enabled and non-thinking profiles declare
+  the values explicitly, and the active Gemma judge rescue inherits the same
+  sampling contract while changing only its completion ceiling.
 
 ## Reference saturation audit (2026-08-05)
 

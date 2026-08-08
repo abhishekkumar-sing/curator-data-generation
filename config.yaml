@@ -19,8 +19,8 @@ structured_output_probe:
 # consecutive successful, schema-valid passes with no accepted novelty.
 # Failures are quarantined as incomplete and never count as saturation.
 saturation:
-  enabled: false
-  max_passes: 3
+  enabled: true
+  max_passes: 0
   empty_passes_required: 2
 
 paths:
@@ -43,10 +43,10 @@ model_profiles:
     request_timeout: 1200
     max_retries: 1
     # Cross-document generation at 128 concurrent requests degraded into a
-    # synchronized 180/225 timeout wave. Thirty-two active requests still
-    # saturate the observed ~5 req/min long-output throughput without placing
-    # the entire pass inside the server queue at once.
-    max_concurrent_requests: 32
+    # synchronized 180/225 timeout wave. Use 45 for the shared-gateway smoke,
+    # above the previously stable 32 but still far below the failed 128; retain
+    # the measured timeout/yield evidence before increasing it again.
+    max_concurrent_requests: 45
     # The private server omits max_model_len from /models and does not expose
     # /tokenize. Keep a conservative explicit prompt-budget fallback.
     context_window: 32768
@@ -82,10 +82,9 @@ model_profiles:
     # Conservative deployment fallback. The structured-output probe also reads
     # the exact server limit from vLLM's /tokenize response when available.
     context_window: 32768
-    # Thinking requests reserve substantially more live KV-cache state than the
-    # previous generator. Keep client concurrency below the server scheduler's
-    # unknown max-num-seqs until a deployment-specific load test raises it.
-    max_concurrent_requests: 8
+    # Shared-gateway smoke concurrency; monitor scheduler latency and timeout
+    # yield before increasing it beyond this user-selected value.
+    max_concurrent_requests: 45
     generation_params:
       temperature: 1.0
       top_p: 0.95
@@ -155,7 +154,7 @@ models:
     # a separate checkpoint at this larger ceiling. Ordinary requests retain
     # the 8,192-token cap below.
     output_rescue_max_tokens: 12000
-    output_rescue_max_concurrent_requests: 16
+    output_rescue_max_concurrent_requests: 45
     generation_params:
       temperature: 1.0
       top_p: 0.95
@@ -182,7 +181,7 @@ models:
     # fraction of otherwise valid singular cross-document judgments. Retry only
     # those missing decisions once at 4,096 after a context-window preflight.
     output_rescue_max_tokens: 4096
-    output_rescue_max_concurrent_requests: 8
+    output_rescue_max_concurrent_requests: 45
     generation_params:
       temperature: 1.0
       top_p: 0.95
@@ -271,7 +270,7 @@ judge_calibration:
 # Selection stays disabled until `semantic_calibration.jsonl` has human labels
 # and a model-specific threshold is justified from those labels.
 embeddings:
-  enabled: false
+  enabled: true
   api_key_env: EMBEDDING_API_KEY
   base_url_env: EMBEDDING_BASE_URL
   model_env: EMBEDDING_MODEL
@@ -287,20 +286,20 @@ embeddings:
 propositions:
   # Only path_qa and temporal consume propositions; both are disabled below
   # for the current qa/qa_cot-only scope. Re-enable alongside them.
-  enabled: false
+  enabled: true
   max_per_window: 8
 
 reasoning_paths:
   # Only path_qa consumes reasoning paths; disabled below for the current
   # qa/qa_cot-only scope. Re-enable alongside path_qa.
-  enabled: false
+  enabled: true
   max_per_pair: 25
 
 # Temporal artifacts are derived from accepted, exact-evidence propositions.
 # "publication_series" pairs compare dated editions but never imply legal
 # supersession or present-day applicability.
 temporal:
-  enabled: false
+  enabled: true
   verification_cutoff: "2026-07-30"
   discover_pairs_from_manifest: true
   pilot_pairs_per_edge: 2
@@ -326,7 +325,7 @@ temporal:
 path_qa:
   # Disabled for the current qa/qa_cot-only scope: promoted path answers
   # export as cross_document_qa/cross_document_qa_cot, outside that scope.
-  enabled: false
+  enabled: true
   qa_cot_fraction: 0.5
 
 source_windows:
@@ -433,7 +432,7 @@ cross_document:
   # Generate siblings, judge each independently, then retain the strongest one
   # with auditable loser reasons.
   best_of_n: 3
-  novelty_passes: 0
+  novelty_passes: 1
   minimum_similarity: 12
   minimum_shared_terms: 5
   max_bundles_per_pair: 25

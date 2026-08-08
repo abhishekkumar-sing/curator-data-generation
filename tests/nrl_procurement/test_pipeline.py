@@ -2837,10 +2837,12 @@ def test_role_profile_preserves_profile_defaults_but_role_limits_win() -> None:
     glm = generation_pipeline._role_profile("generation", "glm")
     assert glm["request_timeout"] == 1200
     assert glm["max_retries"] == 1
-    assert glm["max_concurrent_requests"] == 32
+    assert glm["max_concurrent_requests"] == 45
 
     resolved = generation_pipeline._role_profile("judge", "gemma")
     assert resolved["generation_params"]["max_tokens"] == 2048
+    assert resolved["generation_params"]["temperature"] == 1.0
+    assert resolved["generation_params"]["top_p"] == 0.95
     assert resolved["generation_params"]["top_k"] == 64
     assert resolved["generation_params"]["extra_body"][
         "chat_template_kwargs"
@@ -2866,7 +2868,7 @@ def test_role_profile_preserves_profile_defaults_but_role_limits_win() -> None:
     assert gemma_judge["generation_params"]["extra_body"][
         "chat_template_kwargs"
     ]["enable_thinking"] is True
-    assert gemma_judge["max_concurrent_requests"] == 8
+    assert gemma_judge["max_concurrent_requests"] == 45
 
 
 def test_output_rescue_raises_only_the_recovery_completion_budget() -> None:
@@ -2875,15 +2877,17 @@ def test_output_rescue_raises_only_the_recovery_completion_budget() -> None:
     assert generation["generation_params"]["max_tokens"] == 8192
     assert generation_rescue is not None
     assert generation_rescue["generation_params"]["max_tokens"] == 12000
-    assert generation_rescue["max_concurrent_requests"] == 16
+    assert generation_rescue["max_concurrent_requests"] == 45
 
-    judge = generation_pipeline._role_profile("judge", "ministral")
+    judge = generation_pipeline._role_profile("judge", "gemma_thinking")
     judge_rescue = generation_pipeline._output_rescue_profile(judge)
     assert judge["generation_params"]["max_tokens"] == 2048
     assert judge_rescue is not None
     assert judge_rescue["generation_params"]["max_tokens"] == 4096
-    assert judge_rescue["max_concurrent_requests"] == 8
-    assert judge_rescue["generation_params"]["temperature"] == 0.05
+    assert judge_rescue["max_concurrent_requests"] == 45
+    assert judge_rescue["generation_params"]["temperature"] == 1.0
+    assert judge_rescue["generation_params"]["top_p"] == 0.95
+    assert judge_rescue["generation_params"]["top_k"] == 64
     assert generation_pipeline._rescue_input(
         {"record_id": "one"}, 4096
     )["_output_rescue_max_tokens"] == 4096
@@ -2996,7 +3000,7 @@ def test_thinking_generation_profile_preserves_template_and_sampling() -> None:
     assert resolved["served_model_env"] == "MODEL"
     assert resolved["base_url_env"] == "LLM_BASE_URL"
     assert resolved["api_key_env"] == "LLM_API_KEY"
-    assert resolved["max_concurrent_requests"] == 8
+    assert resolved["max_concurrent_requests"] == 45
     assert params["temperature"] == 1.0
     assert params["top_p"] == 0.95
     assert params["top_k"] == 64
