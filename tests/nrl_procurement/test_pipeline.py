@@ -123,7 +123,7 @@ from source_windows import (  # noqa: E402
     build_source_windows,
     resolve_component_references,
 )
-from validate_run import validate_run  # noqa: E402
+from validate_run import _failure_distribution, validate_run  # noqa: E402
 from validation import (  # noqa: E402
     SOURCE_FRAMING_PREFIX,
     answer_format_issues,
@@ -4330,6 +4330,31 @@ def test_release_validation_detects_train_eval_overlap(tmp_path: Path) -> None:
     report = validate_run(files_dir)
     assert "train_record_in_eval_export" in report["issues"]
     assert "training_eval_record_id_overlap" in report["issues"]
+
+
+def test_failure_distribution_prefers_the_structured_error_category(
+    tmp_path: Path,
+) -> None:
+    """T19: real failure causes, not a regex over prompt text that never matches."""
+    stage_dir = tmp_path / "generation" / "fingerprint-a"
+    stage_dir.mkdir(parents=True)
+    rows = [
+        {"model": "m", "messages": [], "error_category": "timeout"},
+        {"model": "m", "messages": [], "error_category": "timeout"},
+        {"model": "m", "messages": [], "error_category": "truncation"},
+        # No error_category at all (older run captured before this field
+        # existed): falls back to the legacy regex heuristic rather than
+        # silently disappearing from the distribution.
+        {"model": "m", "messages": ["describe the procurement policy"]},
+    ]
+    (stage_dir / "failed_requests.jsonl").write_text(
+        "\n".join(json.dumps(row) for row in rows) + "\n",
+        encoding="utf-8",
+    )
+
+    distribution = _failure_distribution(tmp_path, manifest=None)
+
+    assert distribution == {"other": 1, "timeout": 2, "truncation": 1}
 
 
 def test_run_layout_and_curator_cache_are_project_local(tmp_path: Path, monkeypatch) -> None:
