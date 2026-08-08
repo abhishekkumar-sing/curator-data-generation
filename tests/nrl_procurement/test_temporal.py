@@ -13,6 +13,7 @@ from temporal import (  # noqa: E402
     assign_temporal_splits,
     build_temporal_alignments,
     build_temporal_records,
+    classify_change,
     ensure_temporal_pair_rows,
     extract_temporal_changes,
     load_temporal_config,
@@ -189,6 +190,38 @@ def test_bounded_alignment_change_and_six_exports():
     }
     assert all(len(rows) == 1 for rows in exports.values())
     assert all(not temporal_record_issues(row) for rows in exports.values() for row in rows)
+
+
+def test_classify_change_detects_restructure_instead_of_a_shadowing_numeric_diff():
+    # Regression for the inconsistent-scope bug: modality/polarity/condition/
+    # exception checks only ever looked at targets[0], while the numeric check
+    # concatenated across every target. A second target that merely contributes
+    # an unrelated number (near-guaranteed whenever there is more than one
+    # target) used to trigger numeric_or_threshold_change before the
+    # len(targets) > 1 branch was ever reached, making one_to_many_restructure
+    # almost unreachable and silently dropping target_b's real modality change.
+    historical = _proposition(
+        "prop-old",
+        "goods_2017",
+        "2017",
+        "The procuring entity shall publish the tender notice within 21 days.",
+    )
+    target_a = _proposition(
+        "prop-new-a",
+        "goods_2024",
+        "2024",
+        "The procuring entity shall publish the tender notice within 21 days.",
+    )
+    target_b = _proposition(
+        "prop-new-b",
+        "goods_2024",
+        "2024",
+        "The procuring entity may separately notify bidders within 5 days.",
+        modality="permissive",
+    )
+    change_type, issues = classify_change(historical, [target_a, target_b])
+    assert change_type == "one_to_many_restructure"
+    assert issues == []
 
 
 def test_rejects_reversed_dates_authority_leakage_and_identical_states():
