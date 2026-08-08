@@ -224,6 +224,8 @@ source_registry:
 quality:
   # CoT candidates have a lower validation/judge survival rate than direct QA.
   # Plan 40% so the accepted pool can meet the separate 20% release floor.
+  # Provisional: an explicit operational target (raised from 0.25 per
+  # TASKS.md), not a literature-derived or corpus-calibrated optimum.
   qa_cot_fraction: 0.40
   cross_qa_cot_fraction: 0.25
   # Direct facts remain one-shot. Only source-feasible multi-operation cells
@@ -240,6 +242,10 @@ quality:
   # Constructed only from accepted answerable seeds plus same-type distractors,
   # then promoted by an independent full-context answerability judge.
   unanswerable_fraction: 0.10
+  # Provisional: see the judge_calibration block below — human labels, not
+  # this hand-picked score, are meant to select the production threshold, and
+  # full runs remain blocked until a passing calibration artifact is
+  # SHA-pinned there.
   minimum_judge_score: 4
   # The configured Gemma judge server has an 8,192-token runtime context.
   judge_batch_size: 1
@@ -273,11 +279,17 @@ quality:
   # Corpus-level cap: no single normalized 4-word question opener may exceed
   # this share of the deterministic-pass, deduplicated pool. Grounded in
   # Self-Instruct's pool-similarity filtering (ACL 2023) generalized from
-  # near-duplicate full text to shared opening templates.
+  # near-duplicate full text to shared opening templates. Provisional: a
+  # reasoned project pilot target (lowered from 0.15 per TASKS.md), not yet
+  # empirically calibrated against this corpus.
   max_question_opener_share: 0.08
   # Preserve some exact-answer records, but prevent the SFT corpus from mostly
   # teaching source-span copying. Answers shorter than four words are exempt.
+  # Provisional: a conservative project policy, not a literature-derived
+  # optimum; must be calibrated with downstream and human evaluation.
   max_extractive_answer_share: 0.35
+  # Provisional, paired with qa_cot_fraction above: an explicit operational
+  # floor, not a claim of universal optimality.
   minimum_qa_cot_share: 0.20
   allow_unjudged_exports: false
   require_independent_judge: true
