@@ -2166,6 +2166,18 @@ def main(argv: list[str] | None = None) -> None:
         files_dir / "source_quality_rejected.jsonl",
         source_quality_rejected,
     )
+    # NOTE: build_source_windows() groups adjacent same-section chunks into
+    # bounded, multi-chunk windows with resolved cross-references. It is
+    # currently audit-only: the accepted/rejected windows below are persisted
+    # for inspection and reported in the manifest, but no generation stage
+    # (planned_single, propositions, path_qa, cross_document, drafting) reads
+    # `source_windows`/`rejected_source_windows` as an input. Every stage
+    # still builds its inputs from single-chunk `rows`/`all_rows`. The
+    # `source_windows.*` config keys consumed elsewhere in this file
+    # (`safety_margin_tokens`, `conservative_chars_per_token`, etc.) are a
+    # separate, actively used prompt-budgeting namespace and are unaffected by
+    # this. See TASKS.md's "Use bounded multi-chunk source windows" section
+    # for the (still open) intended integration.
     source_window_stats: dict[str, Any] = {"enabled": False}
     source_window_config = CONFIG.get("source_windows", {})
     if source_window_config.get("enabled", False):
@@ -2183,6 +2195,10 @@ def main(argv: list[str] | None = None) -> None:
             "accepted": len(source_windows),
             "rejected": len(rejected_source_windows),
             "schema_version": (source_windows[0]["schema_version"] if source_windows else None),
+            # No generation/proposition/path_qa/cross_document/drafting stage
+            # currently consumes these windows; they are computed and audited
+            # only. Do not read this manifest section as an active QC gate.
+            "consumed_by": [],
         }
     seed = str(SPLITS.get("seed", "nrl-procurement-v1"))
     rows = representative_rows(all_rows, args.limit, seed)

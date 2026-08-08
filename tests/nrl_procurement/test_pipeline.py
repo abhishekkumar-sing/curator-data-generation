@@ -865,6 +865,45 @@ def test_model_context_window_is_explicit_and_profile_local() -> None:
             raise AssertionError("missing or invalid model context must fail closed")
 
 
+def test_manifest_marks_source_windows_as_currently_unconsumed() -> None:
+    """Regression test for the dead source_windows stage (audit Track B, T6).
+
+    build_source_windows() computes bounded multi-chunk windows, but no
+    generation stage currently reads them -- the manifest must say so
+    explicitly rather than silently looking like an active QC gate.
+    """
+
+    def manifest(source_window_stats: dict | None) -> dict:
+        return generation_pipeline._final_manifest(
+            run_id="pilot-t6",
+            status="complete",
+            stats={},
+            manuals=[],
+            corpus_report={},
+            selected_rows=[],
+            single_coverage={},
+            cross_coverage={},
+            drafting_stats={"enabled": False},
+            duplicates=0,
+            source_window_stats=source_window_stats,
+        )
+
+    disabled = manifest(None)
+    assert disabled["source_windows"] == {"enabled": False}
+
+    enabled = manifest(
+        {
+            "enabled": True,
+            "accepted": 3,
+            "rejected": 1,
+            "schema_version": "1",
+            "consumed_by": [],
+        }
+    )
+    assert enabled["source_windows"]["enabled"] is True
+    assert enabled["source_windows"]["consumed_by"] == []
+
+
 def test_judge_prompt_budget_reserves_output_and_quarantines_overflow() -> None:
     class Response:
         @classmethod
