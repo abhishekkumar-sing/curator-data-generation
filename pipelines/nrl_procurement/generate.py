@@ -57,6 +57,7 @@ from propositions import (
 )
 from reasoning_paths import build_reasoning_paths
 from retrieval_contexts import build_retrieval_contexts
+from review import validate_reviews
 from saturation import SaturationController, saturation_policy
 from semantic_diversity import run_semantic_diversity
 from temporal import (
@@ -1791,6 +1792,7 @@ def _final_manifest(
     semantic_diversity_stats: dict[str, Any] | None = None,
     unanswerable_stats: dict[str, Any] | None = None,
     evaluation_stats: dict[str, Any] | None = None,
+    human_review: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return {
         "run_id": run_id,
@@ -1832,8 +1834,10 @@ def _final_manifest(
             "started_at": _RUN_STARTED_AT,
             "elapsed_seconds": (round(time.monotonic() - _RUN_STARTED_MONOTONIC, 3) if _RUN_STARTED_MONOTONIC is not None else None),
         },
-        "human_review": {
+        "human_review": human_review
+        or {
             "required_accepted_records": 100,
+            "required_rejected_records": 25,
             "reviewed_accepted_records": 0,
             "reviewed_rejected_records": 0,
             "complete": False,
@@ -2091,6 +2095,15 @@ def main(argv: list[str] | None = None) -> None:
         "--max-passes",
         type=int,
         help=("Override the saturation pass limit; 0 removes the numeric cap " "and runs until per-parent convergence"),
+    )
+    parser.add_argument(
+        "--review-file",
+        type=Path,
+        help=(
+            "Optional path to a completed review.py output. When supplied, the "
+            "manifest's human_review block reflects real validate_reviews() "
+            "results instead of the honest zero-review placeholder."
+        ),
     )
     args = parser.parse_args(argv)
     dynamic_stage = re.compile(r"cross_(?:generation|judge)_pass_\d{3}")
@@ -3564,6 +3577,19 @@ def main(argv: list[str] | None = None) -> None:
         and (not cross_policy.enabled or args.skip_cross_document or cross_saturation.state["converged"])
         else "partial"
     )
+    human_review_summary: dict[str, Any] | None = None
+    if args.review_file is not None:
+        review_validation = validate_reviews(args.review_file)
+        human_review_summary = {
+            "review_file": str(args.review_file),
+            "required_accepted_records": review_validation["minimum_accepted_required"],
+            "required_rejected_records": review_validation["minimum_rejected_required"],
+            "reviewed_accepted_records": review_validation["reviewed_accepted"],
+            "reviewed_rejected_records": review_validation["reviewed_rejected"],
+            "complete": review_validation["passed"],
+            "issues": review_validation["issues"],
+            "note": "Human labels are external release evidence and are never inferred.",
+        }
     final_manifest = _final_manifest(
         run_id=run_id,
         status=status,
@@ -3597,6 +3623,7 @@ def main(argv: list[str] | None = None) -> None:
             "single_document": _batch_integrity_rejections(judged),
             "cross_document": _batch_integrity_rejections(cross_judged),
         },
+        human_review=human_review_summary,
     )
     final_manifest["required_task_type_counts"] = task_counts
     final_manifest["saturation"] = {

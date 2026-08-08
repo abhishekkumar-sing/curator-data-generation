@@ -3901,6 +3901,52 @@ def test_ablation_judge_reviews_only_complete_actual_trial_bundles() -> None:
     assert "ACTUAL OUTPUTS" in prompt
 
 
+def _minimal_final_manifest_kwargs() -> dict:
+    return {
+        "run_id": "run-1",
+        "status": "complete",
+        "stats": {"records": 1},
+        "manuals": [],
+        "corpus_report": {},
+        "selected_rows": [],
+        "single_coverage": {},
+        "cross_coverage": {},
+        "drafting_stats": {},
+        "duplicates": 0,
+    }
+
+
+def test_final_manifest_human_review_defaults_to_honest_placeholder() -> None:
+    manifest = generation_pipeline._final_manifest(**_minimal_final_manifest_kwargs())
+    assert manifest["human_review"] == {
+        "required_accepted_records": 100,
+        "required_rejected_records": 25,
+        "reviewed_accepted_records": 0,
+        "reviewed_rejected_records": 0,
+        "complete": False,
+        "note": "Human labels are external release evidence and are never inferred.",
+    }
+
+
+def test_final_manifest_reflects_real_review_data_when_supplied() -> None:
+    manifest = generation_pipeline._final_manifest(
+        **_minimal_final_manifest_kwargs(),
+        human_review={
+            "review_file": "reviews.jsonl",
+            "required_accepted_records": 100,
+            "required_rejected_records": 25,
+            "reviewed_accepted_records": 100,
+            "reviewed_rejected_records": 25,
+            "complete": True,
+            "issues": [],
+            "note": "Human labels are external release evidence and are never inferred.",
+        },
+    )
+    assert manifest["human_review"]["reviewed_accepted_records"] == 100
+    assert manifest["human_review"]["reviewed_rejected_records"] == 25
+    assert manifest["human_review"]["complete"] is True
+
+
 def test_human_review_template_is_reproducible_and_never_self_certifies(
     tmp_path: Path,
 ) -> None:
