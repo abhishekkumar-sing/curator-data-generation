@@ -118,6 +118,7 @@ def validate_reviews(
     path: Path,
     *,
     minimum_accepted: int = 100,
+    minimum_rejected: int = 25,
 ) -> dict[str, Any]:
     """Verify completeness and immutable record hashes for supplied labels."""
     rows = _read_jsonl(path)
@@ -149,11 +150,16 @@ def validate_reviews(
         reviewed_accepted += disposition == "accepted"
         reviewed_rejected += disposition == "rejected"
     return {
-        "passed": not issues and reviewed_accepted >= minimum_accepted,
+        "passed": (
+            not issues
+            and reviewed_accepted >= minimum_accepted
+            and reviewed_rejected >= minimum_rejected
+        ),
         "issues": sorted(set(issues)),
         "reviewed_accepted": reviewed_accepted,
         "reviewed_rejected": reviewed_rejected,
         "minimum_accepted_required": minimum_accepted,
+        "minimum_rejected_required": minimum_rejected,
         "frozen_evaluation_complete": False,
         "frozen_evaluation_note": (
             "Reviewed generated training records are not an independent gold set."
@@ -173,6 +179,8 @@ def main() -> None:
     prepare.add_argument("--seed", default="nrl-human-review-v1")
     validate = subparsers.add_parser("validate")
     validate.add_argument("reviews", type=Path)
+    validate.add_argument("--minimum-accepted", type=int, default=100)
+    validate.add_argument("--minimum-rejected", type=int, default=25)
     args = parser.parse_args()
     if args.command == "prepare":
         result = prepare_review(
@@ -183,7 +191,11 @@ def main() -> None:
             seed=args.seed,
         )
     else:
-        result = validate_reviews(args.reviews)
+        result = validate_reviews(
+            args.reviews,
+            minimum_accepted=args.minimum_accepted,
+            minimum_rejected=args.minimum_rejected,
+        )
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
 

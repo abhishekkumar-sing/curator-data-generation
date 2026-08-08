@@ -3923,6 +3923,55 @@ def test_human_review_template_is_reproducible_and_never_self_certifies(
     assert row["overall_accept"] is None
 
 
+def _complete_review_row(record_id: str, disposition: str, accept: bool) -> dict:
+    record = {"record_id": record_id, "question": "Question?"}
+    return {
+        "review_id": f"review-{record_id}",
+        "record_id": record_id,
+        "pipeline_disposition": disposition,
+        "record_sha256": hashlib.sha256(
+            json.dumps(record, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest(),
+        "record": record,
+        "reviewer_id": "reviewer-1",
+        "reviewed_at": "2026-08-08T00:00:00Z",
+        "dimensions": dict.fromkeys(REVIEW_DIMENSIONS, accept),
+        "overall_accept": accept,
+        "notes": "",
+    }
+
+
+def test_validate_reviews_enforces_the_rejected_sample_minimum(
+    tmp_path: Path,
+) -> None:
+    reviews = tmp_path / "reviews.jsonl"
+    rows = [
+        _complete_review_row(f"accepted-{index}", "accepted", True)
+        for index in range(100)
+    ]
+    reviews.write_text(
+        "\n".join(json.dumps(row) for row in rows) + "\n",
+        encoding="utf-8",
+    )
+    result = validate_reviews(reviews)
+    assert result["reviewed_accepted"] == 100
+    assert result["reviewed_rejected"] == 0
+    assert result["minimum_rejected_required"] == 25
+    assert not result["passed"]
+
+    rows.extend(
+        _complete_review_row(f"rejected-{index}", "rejected", False)
+        for index in range(25)
+    )
+    reviews.write_text(
+        "\n".join(json.dumps(row) for row in rows) + "\n",
+        encoding="utf-8",
+    )
+    result = validate_reviews(reviews)
+    assert result["reviewed_rejected"] == 25
+    assert result["passed"]
+
+
 def test_judge_threshold_is_selected_on_development_and_verified_on_holdout(
     tmp_path: Path,
 ) -> None:
