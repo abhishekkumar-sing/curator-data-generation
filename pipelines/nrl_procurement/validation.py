@@ -59,6 +59,7 @@ def quarantine_invalid_judge_batch(
         for item in judge_items
     ]
 
+
 # Keep the numeric core separate from prose. The previous ``\s+\w+`` suffix
 # swallowed arbitrary words (for example, ``2019 Manual``), turning ordinary
 # document-version metadata into a fabricated "unit".
@@ -129,8 +130,7 @@ DANGLING_FINAL_WORD = re.compile(
     re.IGNORECASE,
 )
 ANSWER_DANGLING_FINAL_WORD = re.compile(
-    r"\b(?:a|an|and|are|at|but|by|for|from|has|have|if|in|is|of|on|or|over|"
-    r"than|that|the|to|under|was|were|when|which|while|whose|with)\s*$",
+    r"\b(?:a|an|and|are|at|but|by|for|from|has|have|if|in|is|of|on|or|over|" r"than|that|the|to|under|was|were|when|which|while|whose|with)\s*$",
     re.IGNORECASE,
 )
 TRUNCATED_TERMINAL = re.compile(r"(?:[,;:]|\.{3}|…)\s*$")
@@ -241,11 +241,7 @@ def answer_format_issues(
 def _unsupported_acronyms(answer: str, support_text: str) -> list[str]:
     supported = set(ACRONYM.findall(str(support_text or "")))
     ignored = {"QA", "SOP"} if not support_text else {"QA"}
-    return sorted(
-        acronym
-        for acronym in set(ACRONYM.findall(str(answer or "")))
-        if acronym not in supported and acronym not in ignored
-    )
+    return sorted(acronym for acronym in set(ACRONYM.findall(str(answer or ""))) if acronym not in supported and acronym not in ignored)
 
 
 _QUOTE_MARK_PAIRS = (('"', '"'), ("'", "'"), ("“", "”"), ("‘", "’"))
@@ -311,11 +307,7 @@ def recover_grounded_judge_quotes(
         return judge_quotes, False
     recovered: list[str] = []
     for quote in evidence_quotes:
-        if (
-            quote
-            and quote not in recovered
-            and judge_quotes_are_grounded([quote], source_text, evidence_quotes)
-        ):
+        if quote and quote not in recovered and judge_quotes_are_grounded([quote], source_text, evidence_quotes):
             recovered.append(quote)
         if len(recovered) >= maximum:
             break
@@ -332,16 +324,8 @@ def semantic_support_issues(answer: str, support_text: str) -> list[str]:
     if ABSENCE_CLAIM.search(answer) and not ABSENCE_CLAIM.search(support_text):
         issues.append("unsupported_absence_claim")
 
-    answer_modalities = {
-        category
-        for category, patterns in DEONTIC_PATTERNS.items()
-        if _has_pattern(answer, patterns)
-    }
-    support_modalities = {
-        category
-        for category, patterns in DEONTIC_PATTERNS.items()
-        if _has_pattern(support_text, patterns)
-    }
+    answer_modalities = {category for category, patterns in DEONTIC_PATTERNS.items() if _has_pattern(answer, patterns)}
+    support_modalities = {category for category, patterns in DEONTIC_PATTERNS.items() if _has_pattern(support_text, patterns)}
     # Prohibitions contain obligation/permission auxiliaries lexically but are
     # semantically their own category.
     if "prohibition" in answer_modalities:
@@ -391,9 +375,7 @@ def validate_record(record: dict[str, Any], passage: str) -> list[str]:
     for claim in claims:
         if not str(claim.get("statement", "")).strip():
             reasons.append("claim_without_statement")
-        claim_evidence = [
-            item["quote"].strip() for item in claim.get("evidence", [])
-        ]
+        claim_evidence = [item["quote"].strip() for item in claim.get("evidence", [])]
         if not claim_evidence:
             reasons.append("claim_without_evidence")
             continue
@@ -437,16 +419,10 @@ def validate_record(record: dict[str, Any], passage: str) -> list[str]:
     if record["task_type"] == "qa" and steps:
         reasons.append("qa_must_not_include_reasoning_steps")
     if len(steps) > 1:
-        normalized_steps = {
-            " ".join(str(step.get("statement", "")).lower().split())
-            for step in steps
-        }
+        normalized_steps = {" ".join(str(step.get("statement", "")).lower().split()) for step in steps}
         if len(normalized_steps) != len(steps):
             reasons.append("cot_repeats_reasoning_step")
-        evidence_sets = {
-            tuple(sorted(str(quote).strip() for quote in step.get("evidence_quotes", [])))
-            for step in steps
-        }
+        evidence_sets = {tuple(sorted(str(quote).strip() for quote in step.get("evidence_quotes", []))) for step in steps}
         if len(evidence_sets) == 1:
             reasons.append("cot_reuses_identical_evidence_for_all_steps")
     for step in steps:
@@ -468,13 +444,22 @@ def validate_record(record: dict[str, Any], passage: str) -> list[str]:
     return sorted(set(reasons))
 
 
-def deduplicate(records: Iterable[dict[str, Any]], threshold: float = 94.0) -> tuple[list[dict[str, Any]], int]:
-    """Remove exact and near-duplicate questions deterministically."""
+def deduplicate(
+    records: Iterable[dict[str, Any]],
+    threshold: float = 94.0,
+    preserve_within_group: str | None = None,
+) -> tuple[list[dict[str, Any]], int]:
+    """Remove near duplicates, optionally preserving deliberate sibling trials."""
     accepted: list[dict[str, Any]] = []
     removed = 0
     for record in records:
         question = " ".join(record["question"].lower().split())
-        if any(token_set_ratio(question, existing["_normalized_question"]) >= threshold for existing in accepted):
+        group = str(record.get(preserve_within_group, "")) if preserve_within_group else ""
+        if any(
+            not (preserve_within_group and group and group == str(existing.get(preserve_within_group, "")))
+            and token_set_ratio(question, existing["_normalized_question"]) >= threshold
+            for existing in accepted
+        ):
             removed += 1
             continue
         record["_normalized_question"] = question
@@ -491,8 +476,7 @@ def question_opener_key(question: str, words: int = 4) -> str:
 
 
 SOURCE_FRAMING_PREFIX = re.compile(
-    r"^\s*(?:according\s+to|as\s+per|in\s+accordance\s+with|"
-    r"under\s+(?:the\s+)?(?:manual|policy|rules?|guidelines?))\b",
+    r"^\s*(?:according\s+to|as\s+per|in\s+accordance\s+with|" r"under\s+(?:the\s+)?(?:manual|policy|rules?|guidelines?))\b",
     re.IGNORECASE,
 )
 
@@ -569,6 +553,22 @@ def canonical_reasoning_operation(operation: str) -> str | None:
     return None
 
 
+def realign_whitespace_verbatim_quote(quote: str, passage: str) -> str | None:
+    """Recover an exact source span when only whitespace formatting changed.
+
+    Markdown line wrapping and list layout are presentation differences.
+    Punctuation, spelling, casing, and token changes remain unrecoverable and
+    therefore fail closed.
+    """
+    if quote in passage:
+        return quote
+    tokens = str(quote).split()
+    if not tokens:
+        return None
+    match = re.search(r"\s+".join(re.escape(token) for token in tokens), passage)
+    return match.group(0) if match else None
+
+
 def is_extractive_answer(record: dict[str, Any], minimum_words: int = 4) -> bool:
     """Return whether an answer is a substantial verbatim evidence span.
 
@@ -582,10 +582,7 @@ def is_extractive_answer(record: dict[str, Any], minimum_words: int = 4) -> bool
     if len(answer_words) < minimum_words:
         return False
     answer = " ".join(answer_words)
-    return any(
-        answer in " ".join(re.findall(r"[a-z0-9]+", str(item.get("quote", "")).casefold()))
-        for item in record.get("evidence", [])
-    )
+    return any(answer in " ".join(re.findall(r"[a-z0-9]+", str(item.get("quote", "")).casefold())) for item in record.get("evidence", []))
 
 
 def _cap_binary_share(
@@ -730,9 +727,7 @@ def validate_cross_record(record: dict[str, Any], documents: list[dict[str, Any]
             if _is_incomplete_evidence_fragment(quote):
                 reasons.append("incomplete_evidence_fragment")
             used_claim_sources.add(source_id)
-        claim_support = " ".join(
-            evidence.get("quote", "") for evidence in claim.get("evidence", [])
-        )
+        claim_support = " ".join(evidence.get("quote", "") for evidence in claim.get("evidence", []))
         reasons.extend(
             f"claim_{issue}"
             for issue in semantic_support_issues(
@@ -765,9 +760,7 @@ def validate_cross_record(record: dict[str, Any], documents: list[dict[str, Any]
             reasons.append("cot_step_missing_or_invalid_operation")
         if not step.get("evidence"):
             reasons.append("cot_step_has_no_grounded_input")
-        step_support = " ".join(
-            evidence.get("quote", "") for evidence in step.get("evidence", [])
-        )
+        step_support = " ".join(evidence.get("quote", "") for evidence in step.get("evidence", []))
         reasons.extend(
             f"reasoning_{issue}"
             for issue in semantic_support_issues(
@@ -784,10 +777,7 @@ def validate_cross_record(record: dict[str, Any], documents: list[dict[str, Any]
             used_reasoning_sources.add(source_id)
     steps = record.get("reasoning_steps", [])
     if len(steps) > 1:
-        normalized_steps = {
-            " ".join(str(step.get("statement", "")).lower().split())
-            for step in steps
-        }
+        normalized_steps = {" ".join(str(step.get("statement", "")).lower().split()) for step in steps}
         if len(normalized_steps) != len(steps):
             reasons.append("cot_repeats_reasoning_step")
         evidence_sets = {
@@ -824,14 +814,7 @@ def validate_cross_record(record: dict[str, Any], documents: list[dict[str, Any]
                 "conclude",
             }
         ]
-        if not any(
-            {
-                str(evidence.get("source_id", ""))
-                for evidence in step.get("evidence", [])
-            }
-            == {"source_a", "source_b"}
-            for step in synthesis_steps
-        ):
+        if not any({str(evidence.get("source_id", "")) for evidence in step.get("evidence", [])} == {"source_a", "source_b"} for step in synthesis_steps):
             reasons.append("cot_missing_two_source_synthesis_step")
     if not is_cot and record.get("reasoning_steps"):
         reasons.append("qa_must_not_include_reasoning_steps")

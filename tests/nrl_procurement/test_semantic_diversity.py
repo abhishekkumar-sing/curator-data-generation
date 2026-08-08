@@ -17,6 +17,7 @@ from semantic_diversity import (  # noqa: E402
     load_embedding_settings,
     run_semantic_diversity,
     semantic_select,
+    verified_equivalence_select,
 )
 
 
@@ -155,6 +156,97 @@ def test_selection_requires_calibrated_threshold(monkeypatch) -> None:
         assert "human-calibrated" in str(exc)
     else:
         raise AssertionError("selection unexpectedly accepted a missing threshold")
+
+
+def test_verified_equivalence_mode_needs_no_cosine_cutoff(monkeypatch) -> None:
+    monkeypatch.setenv("EMBEDDING_API_KEY", "secret")
+    monkeypatch.setenv("EMBEDDING_BASE_URL", "https://example.invalid/embeddings")
+    monkeypatch.setenv("EMBEDDING_MODEL", "model")
+    settings = load_embedding_settings(
+        {
+            "embeddings": {
+                "enabled": True,
+                "selection_enabled": True,
+                "selection_mode": "verified_equivalence",
+                "dimensions": 2,
+            }
+        }
+    )
+    assert settings is not None
+    assert settings.selection_mode == "verified_equivalence"
+    assert settings.similarity_threshold is None
+
+
+def test_verified_equivalence_removes_only_same_grounded_target(
+    tmp_path: Path, monkeypatch
+) -> None:
+    base = {
+        "task_type": "qa",
+        "task": "compliance_and_audit",
+        "persona": "auditor",
+        "question_type": "compliance_check",
+        "answer_format": "audit_check",
+        "answerable": True,
+        "reasoning_operation": "lookup",
+        "difficulty": "basic",
+        "material_focus": "evidence_requirement",
+        "answer": "Retain the approved procurement record.",
+        "evidence": [{"chunk_id": "chunk-1", "quote": "Retain the approved procurement record."}],
+        "source_chunk_ids": ["chunk-1"],
+        "claims": [{"evidence": [{"quote": "Retain the approved procurement record."}]}],
+    }
+    records = [
+        {
+            **base,
+            "record_id": "weak",
+            "question": "Which approved procurement record must be retained?",
+            "judge": {"score": 4, "preserves_qualifications": True},
+        },
+        {
+            **base,
+            "record_id": "strong",
+            "question": "What approved procurement record must the buyer keep?",
+            "judge": {"score": 5, "preserves_qualifications": True},
+        },
+        {
+            **base,
+            "record_id": "distinct",
+            "question": "When does the retention exception apply?",
+            "material_focus": "exception",
+            "judge": {"score": 5, "preserves_qualifications": True},
+        },
+    ]
+    vectors = {
+        "weak": [1.0, 0.0],
+        "strong": [0.99, 0.01],
+        "distinct": [0.98, 0.02],
+    }
+    kept, removed, stats = verified_equivalence_select(records, vectors)
+    assert {row["record_id"] for row in kept} == {"strong", "distinct"}
+    assert [row["record_id"] for row in removed] == ["weak"]
+    assert removed[0]["semantic_selection"]["reason"] == "verified_grounded_equivalence"
+    assert stats["records_removed"] == 1
+    monkeypatch.setenv("EMBEDDING_API_KEY", "secret")
+    monkeypatch.setenv("EMBEDDING_BASE_URL", "https://example.invalid/embeddings")
+    monkeypatch.setenv("EMBEDDING_MODEL", "model")
+    run_kept, run_removed, _candidates, run_stats = run_semantic_diversity(
+        records,
+        {
+            "embeddings": {
+                "enabled": True,
+                "selection_enabled": True,
+                "selection_mode": "verified_equivalence",
+                "dimensions": 2,
+                "batch_size": 3,
+                "calibration_neighbors_per_record": 1,
+            }
+        },
+        tmp_path,
+        _FakeClient(),
+    )
+    assert {row["record_id"] for row in run_kept} == {"strong", "distinct"}
+    assert [row["record_id"] for row in run_removed] == ["weak"]
+    assert run_stats["selection"]["selection_mode"] == "verified_equivalence"
 
 
 def test_embedding_endpoint_rejects_url_credentials(monkeypatch) -> None:

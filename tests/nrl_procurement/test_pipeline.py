@@ -57,7 +57,9 @@ from generate import (  # noqa: E402
     _budget_judge_rows,
     _judge_prompt_budget,
     _singular_judge_batch_size,
+    build_generation_validation_rescue_inputs,
     eligible_question_types,
+    expand_single_generation_candidates,
     judge_eligible_planned,
     materialize_blueprint_rejection,
     materialize_terminal_failures,
@@ -66,6 +68,7 @@ from generate import (  # noqa: E402
     plan_question_types,
     plan_single_document_requests,
     request_coverage,
+    select_best_single_candidates,
 )
 from judge_calibration import calibrate_judge, load_judge_calibration  # noqa: E402
 from path_qa import (  # noqa: E402
@@ -129,6 +132,7 @@ from validation import (  # noqa: E402
     judge_batch_identity_issues,
     judge_quotes_are_grounded,
     question_style_issues,
+    realign_whitespace_verbatim_quote,
     recover_grounded_judge_quotes,
     remove_cosmetic_persona_prefix,
     semantic_support_issues,
@@ -169,18 +173,8 @@ def test_judge_batch_identity_reports_duplicate_missing_and_unexpected_ids() -> 
 
 
 def test_singular_judge_contracts_are_direct_objects_and_batch_size_fails_closed() -> None:
-    assert (
-        "judgments"
-        not in SingularProcurementJudge.response_format.model_json_schema()[
-            "properties"
-        ]
-    )
-    assert (
-        "judgments"
-        not in SingularCrossDocumentJudge.response_format.model_json_schema()[
-            "properties"
-        ]
-    )
+    assert "judgments" not in SingularProcurementJudge.response_format.model_json_schema()["properties"]
+    assert "judgments" not in SingularCrossDocumentJudge.response_format.model_json_schema()["properties"]
     assert _singular_judge_batch_size() == 1
     original = generation_pipeline.QUALITY["judge_batch_size"]
     generation_pipeline.QUALITY["judge_batch_size"] = 2
@@ -242,12 +236,7 @@ def test_cross_judge_quarantines_entire_batch_when_model_duplicates_an_id() -> N
         {"record_id": "record-a"},
         {"record_id": "record-b"},
     ]
-    row = {
-        "judge_items": [
-            {"record_id": record["record_id"], "record": record}
-            for record in records
-        ]
-    }
+    row = {"judge_items": [{"record_id": record["record_id"], "record": record} for record in records]}
     response = CrossJudgeBatch.model_validate(
         {
             "judgments": [
@@ -280,14 +269,8 @@ def test_cross_judge_quarantines_entire_batch_when_model_duplicates_an_id() -> N
     assert [record["record_id"] for record in judged] == ["record-a", "record-b"]
     assert all(record["judge"]["accepted"] is False for record in judged)
     assert all(record["judge"]["batch_integrity_passed"] is False for record in judged)
-    assert all(
-        "duplicate_judge_record_ids:record-a" in record["judge"]["issues"]
-        for record in judged
-    )
-    assert all(
-        "missing_judge_record_ids:record-b" in record["judge"]["issues"]
-        for record in judged
-    )
+    assert all("duplicate_judge_record_ids:record-a" in record["judge"]["issues"] for record in judged)
+    assert all("missing_judge_record_ids:record-b" in record["judge"]["issues"] for record in judged)
 
 
 def test_export_identity_gate_rejects_duplicate_and_missing_stable_ids() -> None:
@@ -340,10 +323,7 @@ def test_ablation_trials_are_three_blind_context_variants() -> None:
         ["prop-a"],
         ["prop-b"],
     ]
-    prompts = [
-        SourceAblationAnswerGenerator.prompt(SimpleNamespace(), trial)
-        for trial in trials
-    ]
+    prompts = [SourceAblationAnswerGenerator.prompt(SimpleNamespace(), trial) for trial in trials]
     assert all("Canonical claim" not in prompt for prompt in prompts)
     assert all("source_a_only" not in prompt and "source_b_only" not in prompt for prompt in prompts)
 
@@ -416,18 +396,7 @@ def test_real_ablation_adjudication_requires_full_claim_coverage() -> None:
             "variant": variant,
             "trial_output": {
                 "answerable": answerable,
-                "claims": (
-                    [
-                        {
-                            "evidence": [
-                                {"proposition_id": proposition_id}
-                                for proposition_id in proposition_ids
-                            ]
-                        }
-                    ]
-                    if proposition_ids
-                    else []
-                ),
+                "claims": ([{"evidence": [{"proposition_id": proposition_id} for proposition_id in proposition_ids]}] if proposition_ids else []),
             },
             "deterministic_checks": {"passed": True},
         }
@@ -492,9 +461,7 @@ def test_grounded_blueprint_is_singular_and_auditable() -> None:
         QABlueprintDraft(
             task="compliance_and_audit",
             persona="auditor",
-            persona_need=(
-                "Check whether the procurement record was retained for audit."
-            ),
+            persona_need=("Check whether the procurement record was retained for audit."),
             instruction_goal="Determine which procurement record must be retained.",
             must_cover=["The buyer must retain the procurement record."],
             evidence=[{"quote": row["passage"]}],
@@ -510,9 +477,7 @@ def test_grounded_blueprint_is_singular_and_auditable() -> None:
         QABlueprintDraft(
             task="auditor",
             persona="compliance_and_audit",
-            persona_need=(
-                "Check whether the procurement record was retained for audit."
-            ),
+            persona_need=("Check whether the procurement record was retained for audit."),
             instruction_goal="Determine which procurement record must be retained.",
             must_cover=["The buyer must retain the procurement record."],
             evidence=[{"quote": row["passage"]}],
@@ -521,6 +486,98 @@ def test_grounded_blueprint_is_singular_and_auditable() -> None:
     assert swapped["task"] == "compliance_and_audit"
     assert swapped["persona"] == "auditor"
     assert swapped["blueprint_repairs"] == ["swapped_task_and_persona"]
+
+
+def test_blueprint_realigns_whitespace_only_to_exact_source_span() -> None:
+    passage = "The exceptions are:\n\n- first condition;\n- second condition."
+    flattened = "The exceptions are: - first condition; - second condition."
+    assert realign_whitespace_verbatim_quote(flattened, passage) == passage
+    assert (
+        realign_whitespace_verbatim_quote(
+            "The exceptions are: - changed condition.", passage
+        )
+        is None
+    )
+    row = {
+        "planned_request_id": "single-whitespace",
+        "planned_task_type": "qa",
+        "planned_question_type": "exception",
+        "planned_answer_format": "rule_and_exception",
+        "planned_answerable": True,
+        "passage": passage,
+    }
+    result = ProcurementBlueprintGenerator.parse(
+        SimpleNamespace(model_name="generator"),
+        row,
+        QABlueprintDraft(
+            task="compliance_and_audit",
+            persona="auditor",
+            persona_need="Check which listed exception applies to the review.",
+            instruction_goal="Identify both listed exception conditions.",
+            must_cover=["Both conditions must be identified."],
+            evidence=[{"quote": flattened}],
+        ),
+    )
+    assert result["blueprint_checks"]["passed"] is True
+    assert result["blueprint_evidence"] == [{"quote": passage}]
+    assert result["blueprint_repairs"] == [
+        "realigned_blueprint_evidence_whitespace:0"
+    ]
+
+
+def test_generation_validation_rescue_is_bounded_per_wholly_invalid_blueprint() -> None:
+    inputs = [
+        {
+            "blueprint_id": "bp-invalid",
+            "candidate_request_id": "bp-invalid-candidate-01",
+            "candidate_index": 1,
+        },
+        {
+            "blueprint_id": "bp-invalid",
+            "candidate_request_id": "bp-invalid-candidate-02",
+            "candidate_index": 2,
+        },
+        {
+            "blueprint_id": "bp-valid",
+            "candidate_request_id": "bp-valid-candidate-01",
+            "candidate_index": 1,
+        },
+    ]
+    audit = [
+        {
+            "record_id": "invalid-1",
+            "blueprint_id": "bp-invalid",
+            "candidate_request_id": "bp-invalid-candidate-01",
+            "question": "Question one?",
+            "answer": "Unsupported answer.",
+            "claims": [],
+            "reasoning_steps": [],
+            "deterministic_checks": {
+                "passed": False,
+                "issues": ["unsupported_number:10"],
+            },
+        },
+        {
+            "record_id": "invalid-2",
+            "blueprint_id": "bp-invalid",
+            "candidate_request_id": "bp-invalid-candidate-02",
+            "deterministic_checks": {
+                "passed": False,
+                "issues": ["incomplete_evidence_fragment"],
+            },
+        },
+        {
+            "record_id": "valid",
+            "blueprint_id": "bp-valid",
+            "candidate_request_id": "bp-valid-candidate-01",
+            "deterministic_checks": {"passed": True, "issues": []},
+        },
+    ]
+    rescue = build_generation_validation_rescue_inputs(inputs, audit)
+    assert len(rescue) == 1
+    assert rescue[0]["candidate_request_id"].endswith("-validation-rescue")
+    assert rescue[0]["validation_rescue_of"] == "invalid-1"
+    assert rescue[0]["validation_rescue_issues"] == ["unsupported_number:10"]
 
 
 def test_manifest_metadata_and_stable_chunk(tmp_path: Path) -> None:
@@ -783,9 +840,7 @@ def test_vllm_tokenize_chat_uses_root_route_and_template_inputs(monkeypatch) -> 
     assert result == {"count": 42, "max_model_len": 8192}
     assert captured["url"] == "http://127.0.0.1:8000/tokenize"
     assert captured["payload"]["model"] == "/models/judge"
-    assert captured["payload"]["chat_template_kwargs"] == {
-        "enable_thinking": False
-    }
+    assert captured["payload"]["chat_template_kwargs"] == {"enable_thinking": False}
     assert captured["payload"]["tools"][0]["function"]["name"] == "Result"
     assert captured["headers"]["Authorization"] == "Bearer secret"
     assert captured["timeout"] == 30.0
@@ -797,21 +852,9 @@ def test_model_context_window_is_explicit_and_profile_local() -> None:
 
     assert configured_context_window(nemotron) == 131072
     assert nemotron["structured_output_mode"] == "tools_auto"
-    assert (
-        generation_pipeline.CONFIG["model_profiles"]["glm"][
-            "structured_output_mode"
-        ]
-        == "json_schema"
-    )
-    assert configured_context_window(
-        generation_pipeline.CONFIG["model_profiles"]["glm"]
-    ) == 32768
-    assert (
-        generation_pipeline.CONFIG["model_profiles"]["gemma"][
-            "structured_output_mode"
-        ]
-        == "json_schema"
-    )
+    assert generation_pipeline.CONFIG["model_profiles"]["glm"]["structured_output_mode"] == "json_schema"
+    assert configured_context_window(generation_pipeline.CONFIG["model_profiles"]["glm"]) == 32768
+    assert generation_pipeline.CONFIG["model_profiles"]["gemma"]["structured_output_mode"] == "json_schema"
     assert source_windows["max_input_tokens"] == 8192
     for invalid in ({}, {"context_window": 0}, {"context_window": True}):
         try:
@@ -819,9 +862,7 @@ def test_model_context_window_is_explicit_and_profile_local() -> None:
         except ValueError as exc:
             assert "positive context_window" in str(exc)
         else:
-            raise AssertionError(
-                "missing or invalid model context must fail closed"
-            )
+            raise AssertionError("missing or invalid model context must fail closed")
 
 
 def test_judge_prompt_budget_reserves_output_and_quarantines_overflow() -> None:
@@ -854,9 +895,7 @@ def test_judge_prompt_budget_reserves_output_and_quarantines_overflow() -> None:
     assert budget["reserved_completion_tokens"] == 40
     assert budget["passed"] is False
     assert accepted == []
-    assert rejected[0]["judge"]["issues"] == [
-        "judge_prompt_exceeds_context_window"
-    ]
+    assert rejected[0]["judge"]["issues"] == ["judge_prompt_exceeds_context_window"]
     assert rejected[0]["judge_prompt_budget"] == budget
 
 
@@ -1437,14 +1476,20 @@ def test_semantic_support_rejects_absence_and_deontic_drift() -> None:
         "The provision was not present in the 2019 Manual.",
         "The contractor is liable to pay liquidated damages.",
     ) == ["unsupported_absence_claim"]
-    assert semantic_support_issues(
-        "There is no provision for consortium registration.",
-        "There is no provision for registration of Consortium.",
-    ) == []
-    assert semantic_support_issues(
-        "The supplier must deliver the goods.",
-        "The supplier shall deliver the goods.",
-    ) == []
+    assert (
+        semantic_support_issues(
+            "There is no provision for consortium registration.",
+            "There is no provision for registration of Consortium.",
+        )
+        == []
+    )
+    assert (
+        semantic_support_issues(
+            "The supplier must deliver the goods.",
+            "The supplier shall deliver the goods.",
+        )
+        == []
+    )
 
 
 def test_drafting_validation_applies_modality_support_gate() -> None:
@@ -1462,9 +1507,7 @@ def test_drafting_validation_applies_modality_support_gate() -> None:
                 {
                     "block_type": "heading",
                     "text": "Liquidated Damages",
-                    "instruction_evidence_quotes": [
-                        "liquidated damages clause"
-                    ],
+                    "instruction_evidence_quotes": ["liquidated damages clause"],
                 },
                 {
                     "block_type": "paragraph",
@@ -1484,10 +1527,7 @@ def test_drafting_validation_applies_modality_support_gate() -> None:
 
     issues = drafting_validation_issues(row, result)
     assert "strengthened_modality:permission_to_obligation" in issues
-    assert (
-        "block_1:strengthened_modality:permission_to_obligation"
-        in issues
-    )
+    assert "block_1:strengthened_modality:permission_to_obligation" in issues
 
 
 def test_judge_witness_accepts_only_lossless_grounded_forms() -> None:
@@ -1659,10 +1699,7 @@ def test_validation_requires_atomic_claim_evidence_without_cross_claim_leakage()
     record = {
         "task_type": "qa",
         "question": "What remedies apply?",
-        "answer": (
-            "NRL may cancel the order, and the supplier shall replace rejected "
-            "goods."
-        ),
+        "answer": ("NRL may cancel the order, and the supplier shall replace rejected " "goods."),
         "answerable": True,
         "claims": [
             {
@@ -1700,10 +1737,7 @@ def test_cross_validation_checks_each_claim_against_its_own_evidence() -> None:
     record = {
         "task_type": "cross_document_qa",
         "question": "What remedies do the two sources provide?",
-        "answer": (
-            "The buyer may cancel the bid, and the supplier shall replace "
-            "rejected goods."
-        ),
+        "answer": ("The buyer may cancel the bid, and the supplier shall replace " "rejected goods."),
         "answerable": True,
         "claims": [
             {
@@ -1727,10 +1761,7 @@ def test_cross_validation_checks_each_claim_against_its_own_evidence() -> None:
         ],
         "reasoning_steps": [],
     }
-    assert (
-        "claim_strengthened_modality:permission_to_obligation"
-        in validate_cross_record(record, documents)
-    )
+    assert "claim_strengthened_modality:permission_to_obligation" in validate_cross_record(record, documents)
 
 
 def test_validation_rejects_dangling_evidence_without_requiring_punctuation() -> None:
@@ -1759,6 +1790,13 @@ def test_dedup_and_amendment_connected_split() -> None:
     ]
     unique, removed = deduplicate(records)
     assert removed == 1
+    siblings = [
+        {"record_id": "s1", "blueprint_id": "bp", "question": "What is the threshold?"},
+        {"record_id": "s2", "blueprint_id": "bp", "question": "What is the threshold?"},
+    ]
+    preserved, sibling_removed = deduplicate(siblings, preserve_within_group="blueprint_id")
+    assert len(preserved) == 2
+    assert sibling_removed == 0
     manuals = [
         {"manual_id": "base"},
         {"manual_id": "amendment", "amends": ["base"]},
@@ -2090,6 +2128,57 @@ def test_qa_evidence_offsets_resolve_against_original_source_chunk() -> None:
     assert record["citations"][0]["start_char"] == evidence["start_char"]
 
 
+def test_cot_must_execute_its_planned_reasoning_operation() -> None:
+    quote = "The bidder may proceed only if the authority approves the exception."
+    row = {
+        **_cross_row("manual", "chunk-1", quote),
+        "planned_request_id": "single-request",
+        "planned_task_type": "qa_cot",
+        "planned_question_type": "exception",
+        "planned_question_style": "exception_check",
+        "planned_answer_format": "rule_and_exception",
+        "planned_answerable": True,
+        "planned_reasoning_operation": "apply_condition",
+        "planned_difficulty": "intermediate",
+        "planned_material_focus": "exception",
+        "planned_coverage_cell_id": "qacell-test",
+        "blueprint_id": "qabp-test",
+        "candidate_request_id": "qabp-test-candidate-01",
+        "task": "compliance_and_audit",
+        "persona": "auditor",
+        "persona_need": "Decide whether the stated exception permits proceeding.",
+        "instruction_goal": "Apply the approval condition to the exception.",
+        "must_cover": ["Approval is required."],
+        "blueprint_evidence": [{"quote": quote}],
+    }
+    response = GroundedCandidateDraft.model_validate(
+        {
+            "question": "When may the bidder proceed under the exception?",
+            "answer": "The bidder may proceed only after authority approval.",
+            "claims": [
+                {
+                    "statement": "Authority approval is required to proceed.",
+                    "evidence": [{"quote": quote}],
+                }
+            ],
+            "reasoning_steps": [
+                {
+                    "operation": "lookup",
+                    "statement": "Identify the exception rule.",
+                    "evidence_quotes": [quote],
+                },
+                {
+                    "operation": "conclude",
+                    "statement": "State that approval is required.",
+                    "evidence_quotes": [quote],
+                },
+            ],
+        }
+    )
+    result = ProcurementGenerator.parse(SimpleNamespace(model_name="generator"), row, response)[0]
+    assert "planned_reasoning_operation_missing" in result["deterministic_checks"]["issues"]
+
+
 def test_qa_evidence_rejects_unresolvable_citation_offset() -> None:
     quote = "The buyer shall retain the record for 5 years."
     row = {
@@ -2155,15 +2244,11 @@ def test_drafting_seed_resolution_validation_and_compact_output(tmp_path: Path) 
         document_blocks=[
             DraftingBlock(
                 text="Delayed Delivery & Liquidated Damages",
-                instruction_evidence_quotes=[
-                    "Draft the delayed-delivery clause."
-                ],
+                instruction_evidence_quotes=["Draft the delayed-delivery clause."],
             ),
             DraftingBlock(
                 text="LD is 0.5% per week and capped at 5% of delayed goods.",
-                manual_evidence_quotes=[
-                    "LD is 0.5% per week and capped at 5% of delayed goods."
-                ],
+                manual_evidence_quotes=["LD is 0.5% per week and capped at 5% of delayed goods."],
             ),
             DraftingBlock(
                 text="Tender mode: Limited.",
@@ -2177,9 +2262,7 @@ def test_drafting_seed_resolution_validation_and_compact_output(tmp_path: Path) 
                 block_index=1,
                 field_name="liquidated damages rule",
                 value="LD is 0.5% per week and capped at 5% of delayed goods.",
-                manual_evidence_quotes=[
-                    "LD is 0.5% per week and capped at 5% of delayed goods."
-                ],
+                manual_evidence_quotes=["LD is 0.5% per week and capped at 5% of delayed goods."],
             ),
             DraftingFieldClaim(
                 block_index=2,
@@ -2229,9 +2312,7 @@ def test_drafting_seed_resolution_validation_and_compact_output(tmp_path: Path) 
     ]
     assert compact["citations"] == ["chunk-1", "tender-1"]
     assert inputs[0]["candidate_citation_ids"][0] == "chunk-1"
-    assert inputs[0]["candidate_citation_ids"][1].startswith(
-        "tender-1:fact:"
-    )
+    assert inputs[0]["candidate_citation_ids"][1].startswith("tender-1:fact:")
 
 
 def test_drafting_field_claims_and_tender_citations_are_atomic(tmp_path: Path) -> None:
@@ -2295,11 +2376,7 @@ def test_drafting_field_claims_and_tender_citations_are_atomic(tmp_path: Path) -
         result,
     )[0]
     assert parsed["deterministic_checks"] == {"passed": True, "issues": []}
-    tender_details = [
-        detail
-        for detail in parsed["citation_details"]
-        if detail["source_type"] == "tender_seed"
-    ]
+    tender_details = [detail for detail in parsed["citation_details"] if detail["source_type"] == "tender_seed"]
     assert tender_details[0]["fact"] == "Tender mode: Limited."
     assert tender_details[0]["citation_id"].startswith("tender-1:fact:")
     assert parsed["field_claims"][1]["block_index"] == 2
@@ -2335,9 +2412,7 @@ def test_drafting_support_reconciliation_is_exact_and_audited() -> None:
             ),
             DraftingBlock(
                 text="The total damages shall not exceed 5%.",
-                manual_evidence_quotes=[
-                    "## Damages\nThe total damages shall not exceed 5%."
-                ],
+                manual_evidence_quotes=["## Damages\nThe total damages shall not exceed 5%."],
                 instruction_evidence_quotes=["with the ... cap"],
             ),
         ],
@@ -2355,9 +2430,7 @@ def test_drafting_support_reconciliation_is_exact_and_audited() -> None:
                 block_index=1,
                 field_name="cap",
                 value="5%",
-                manual_evidence_quotes=[
-                    "The total damages shall not exceed 5%."
-                ],
+                manual_evidence_quotes=["The total damages shall not exceed 5%."],
                 instruction_evidence_quotes=["with the ... cap"],
             ),
         ],
@@ -2476,9 +2549,7 @@ def test_single_document_prompts_preserve_specification_contract() -> None:
         "persona": "technical_evaluator",
         "instruction_goal": "Verify whether the bidder submitted bid security.",
         "must_cover": ["The bidder shall submit bid security."],
-        "blueprint_evidence": [
-            {"quote": "The bidder shall submit bid security."}
-        ],
+        "blueprint_evidence": [{"quote": "The bidder shall submit bid security."}],
     }
     prompt = ProcurementGenerator.prompt(None, row)
     for required in (
@@ -2679,10 +2750,7 @@ def test_generation_text_and_representative_pilot_selection() -> None:
 
 
 def test_source_quality_preflight_rejects_non_answer_bearing_structures() -> None:
-    toc = "\n".join(
-        f"{index}. Procurement topic ........ {index + 10}"
-        for index in range(1, 8)
-    )
+    toc = "\n".join(f"{index}. Procurement topic ........ {index + 10}" for index in range(1, 8))
     toc_row = {
         "generation_passage": toc,
         "content_class": "policy",
@@ -2692,10 +2760,7 @@ def test_source_quality_preflight_rejects_non_answer_bearing_structures() -> Non
     html_toc = {
         "generation_passage": (
             "MANUAL FOR PROCUREMENT\nTable of Contents\n<table>"
-            + "".join(
-                f"<tr><td>{index}. Rule</td><td>{index + 20}</td></tr>"
-                for index in range(8)
-            )
+            + "".join(f"<tr><td>{index}. Rule</td><td>{index + 20}</td></tr>" for index in range(8))
             + "</table>"
         ),
         "content_class": "table",
@@ -2787,12 +2852,7 @@ def test_question_intent_planning_is_feasible_balanced_and_deterministic(
 
 
 def test_question_style_planning_is_compatible_balanced_and_deterministic() -> None:
-    question_types = {
-        f"row-{index}": question_type
-        for index, question_type in enumerate(
-            ["direct_fact", "procedure", "exception", "comparison"] * 4
-        )
-    }
+    question_types = {f"row-{index}": question_type for index, question_type in enumerate(["direct_fact", "procedure", "exception", "comparison"] * 4)}
     first = plan_question_styles(question_types, "style-seed")
     assert first == plan_question_styles(question_types, "style-seed")
     for chunk_id, style in first.items():
@@ -2802,16 +2862,63 @@ def test_question_style_planning_is_compatible_balanced_and_deterministic() -> N
     assert max(counts.values()) <= 4
 
 
+def test_coverage_planner_never_assigns_cot_to_direct_fact(monkeypatch) -> None:
+    monkeypatch.setitem(generation_pipeline.QUALITY, "question_type_weights", {"direct_fact": 1.0})
+    monkeypatch.setitem(generation_pipeline.QUALITY, "qa_cot_fraction", 1.0)
+    planned = plan_single_document_requests(
+        [
+            {
+                "chunk_id": "complex-looking-fact",
+                "generation_passage": ("If approved, the buyer shall retain the record unless the " "authority directs otherwise."),
+            }
+        ],
+        "coverage-seed",
+    )[0]
+    assert planned["planned_task_type"] == "qa"
+    assert planned["planned_reasoning_operation"] == "lookup"
+    assert planned["planned_difficulty"] == "basic"
+    assert planned["planned_coverage_cell_id"].startswith("qacell-")
+
+
+def test_difficult_cot_cells_expand_and_grounded_quality_wins(monkeypatch) -> None:
+    monkeypatch.setitem(
+        generation_pipeline.QUALITY,
+        "single_document_best_of_n",
+        {"basic": 1, "intermediate": 2, "advanced": 3},
+    )
+    blueprint = {
+        "blueprint_id": "blueprint-1",
+        "planned_task_type": "qa_cot",
+        "planned_reasoning_operation": "apply_condition",
+        "planned_difficulty": "advanced",
+    }
+    expanded = expand_single_generation_candidates([blueprint])
+    assert len(expanded) == 3
+    assert len({row["candidate_request_id"] for row in expanded}) == 3
+
+    weak = {
+        "record_id": "weak",
+        "blueprint_id": "blueprint-1",
+        "answer": "A longer but weaker answer.",
+        "claims": [{"evidence": [{"quote": "rule"}]}],
+        "evidence": [{"quote": "rule"}],
+        "judge": {"score": 4, "preserves_qualifications": True},
+    }
+    strong = {
+        **weak,
+        "record_id": "strong",
+        "answer": "Qualified answer.",
+        "judge": {"score": 5, "preserves_qualifications": True},
+    }
+    selected, rejected = select_best_single_candidates([weak, strong])
+    assert [row["record_id"] for row in selected] == ["strong"]
+    assert rejected[0]["best_of_n"]["reason"] == "weaker_grounded_sibling"
+
+
 def test_question_style_gate_rejects_source_and_cosmetic_persona_templates() -> None:
-    assert question_style_issues(
-        "According to the manual, who approves the tender?", "general_user"
-    ) == ["templated_source_attribution_opener"]
-    assert question_style_issues(
-        "As an auditor, what record should I inspect?", "auditor"
-    ) == ["cosmetic_persona_preamble"]
-    assert question_style_issues(
-        "Under what circumstances may the authority reject the bid?", "auditor"
-    ) == []
+    assert question_style_issues("According to the manual, who approves the tender?", "general_user") == ["templated_source_attribution_opener"]
+    assert question_style_issues("As an auditor, what record should I inspect?", "auditor") == ["cosmetic_persona_preamble"]
+    assert question_style_issues("Under what circumstances may the authority reject the bid?", "auditor") == []
 
 
 def test_cosmetic_persona_prefix_and_operation_aliases_are_narrowly_repaired() -> None:
@@ -2844,9 +2951,7 @@ def test_role_profile_preserves_profile_defaults_but_role_limits_win() -> None:
     assert resolved["generation_params"]["temperature"] == 1.0
     assert resolved["generation_params"]["top_p"] == 0.95
     assert resolved["generation_params"]["top_k"] == 64
-    assert resolved["generation_params"]["extra_body"][
-        "chat_template_kwargs"
-    ]["enable_thinking"] is False
+    assert resolved["generation_params"]["extra_body"]["chat_template_kwargs"]["enable_thinking"] is False
 
     ministral = generation_pipeline._role_profile("judge", "ministral")
     assert ministral["generation_params"]["temperature"] == 0.05
@@ -2857,17 +2962,13 @@ def test_role_profile_preserves_profile_defaults_but_role_limits_win() -> None:
     assert configured_context_window(ministral) == 65536
 
     gemma_judge = generation_pipeline._role_profile("judge", "gemma_structured")
-    assert generation_pipeline.CONFIG["models"]["judge"]["default_profile"] == (
-        "gemma_structured"
-    )
+    assert generation_pipeline.CONFIG["models"]["judge"]["default_profile"] == ("gemma_structured")
     assert gemma_judge["profile_name"] == "gemma_structured"
     assert gemma_judge["generation_params"]["max_tokens"] == 2048
     assert gemma_judge["generation_params"]["temperature"] == 1.0
     assert gemma_judge["generation_params"]["top_p"] == 0.95
     assert gemma_judge["generation_params"]["top_k"] == 64
-    assert gemma_judge["generation_params"]["extra_body"][
-        "chat_template_kwargs"
-    ]["enable_thinking"] is False
+    assert gemma_judge["generation_params"]["extra_body"]["chat_template_kwargs"]["enable_thinking"] is False
     assert gemma_judge["max_concurrent_requests"] == 45
 
 
@@ -2888,9 +2989,7 @@ def test_output_rescue_raises_only_the_recovery_completion_budget() -> None:
     assert judge_rescue["generation_params"]["temperature"] == 1.0
     assert judge_rescue["generation_params"]["top_p"] == 0.95
     assert judge_rescue["generation_params"]["top_k"] == 64
-    assert generation_pipeline._rescue_input(
-        {"record_id": "one"}, 4096
-    )["_output_rescue_max_tokens"] == 4096
+    assert generation_pipeline._rescue_input({"record_id": "one"}, 4096)["_output_rescue_max_tokens"] == 4096
 
 
 def test_output_rescue_retries_only_missing_rows_in_separate_checkpoint(
@@ -2928,16 +3027,14 @@ def test_output_rescue_retries_only_missing_rows_in_separate_checkpoint(
         "output_rescue_max_tokens": 4096,
         "generation_params": {"max_tokens": 2048},
     }
-    rows, rescued, rejected = (
-        generation_pipeline._rescue_missing_generation_rows(
-            stage="example",
-            llm_type=RescueLLM,
-            profile=profile,
-            inputs=[{"id": "one"}, {"id": "two"}],
-            outputs=[{"id": "one", "value": "primary"}],
-            input_id=lambda row: row["id"],
-            output_id=lambda row: row.get("id"),
-        )
+    rows, rescued, rejected = generation_pipeline._rescue_missing_generation_rows(
+        stage="example",
+        llm_type=RescueLLM,
+        profile=profile,
+        inputs=[{"id": "one"}, {"id": "two"}],
+        outputs=[{"id": "one", "value": "primary"}],
+        input_id=lambda row: row["id"],
+        output_id=lambda row: row.get("id"),
     )
     assert {row["id"] for row in rows} == {"one", "two"}
     assert rescued == 1
@@ -3047,9 +3144,7 @@ def test_thinking_generation_profile_preserves_template_and_sampling() -> None:
     assert params["top_p"] == 0.95
     assert params["top_k"] == 64
     assert params["max_tokens"] == 5000
-    assert params["extra_body"]["chat_template_kwargs"][
-        "enable_thinking"
-    ] is True
+    assert params["extra_body"]["chat_template_kwargs"]["enable_thinking"] is True
 
 
 def test_stringified_json_list_recovery_is_narrow_and_audited() -> None:
@@ -3057,10 +3152,7 @@ def test_stringified_json_list_recovery_is_narrow_and_audited() -> None:
         {
             "question": "What record must the buyer retain?",
             "answer": "The procurement record.",
-            "claims": (
-                '[{"statement":"Retain the record.",'
-                '"evidence":[{"quote":"procurement record"}]}]'
-            ),
+            "claims": ('[{"statement":"Retain the record.",' '"evidence":[{"quote":"procurement record"}]}]'),
             "reasoning_steps": "[]",
         }
     )
@@ -3069,9 +3161,7 @@ def test_stringified_json_list_recovery_is_narrow_and_audited() -> None:
         "stringified_json_list:claims",
         "stringified_json_list:reasoning_steps",
     ]
-    assert "_structural_repairs" not in GroundedCandidateDraft.model_json_schema()[
-        "properties"
-    ]
+    assert "_structural_repairs" not in GroundedCandidateDraft.model_json_schema()["properties"]
     try:
         GroundedCandidateDraft.model_validate(
             {
@@ -3095,15 +3185,10 @@ def test_blueprint_scalar_and_overlong_lists_are_bounded_and_audited() -> None:
             "persona_need": "Check the record before taking procurement action.",
             "instruction_goal": "Identify the complete source-supported requirement.",
             "must_cover": "The buyer retains the procurement record.",
-            "evidence": [
-                {"quote": f"complete evidence quote {index}"}
-                for index in range(5)
-            ],
+            "evidence": [{"quote": f"complete evidence quote {index}"} for index in range(5)],
         }
     )
-    assert blueprint.must_cover == [
-        "The buyer retains the procurement record."
-    ]
+    assert blueprint.must_cover == ["The buyer retains the procurement record."]
     assert len(blueprint.evidence) == 4
     assert collect_structural_repairs(blueprint) == [
         "scalar_string_to_list:must_cover",
@@ -3165,12 +3250,15 @@ def test_answer_format_and_category_portfolio_checks() -> None:
         "concise_direct": [3, 12],
         "ordered_steps": [3, 30],
     }
-    assert answer_format_issues(
-        "The authority approves the tender.",
-        "The authority approves the tender.",
-        "concise_direct",
-        bounds,
-    ) == []
+    assert (
+        answer_format_issues(
+            "The authority approves the tender.",
+            "The authority approves the tender.",
+            "concise_direct",
+            bounds,
+        )
+        == []
+    )
     issues = answer_format_issues(
         "Lecture point: imagine a bidder using 99 percent.",
         "The bidder shall submit its tender.",
@@ -3180,10 +3268,7 @@ def test_answer_format_and_category_portfolio_checks() -> None:
     assert "unsupported_instructional_embellishment:lecture_point" in issues
     assert "ordered_steps_format_missing_structure" in issues
 
-    records = [
-        {"question_type": "direct_fact", "record_id": f"direct-{index}"}
-        for index in range(8)
-    ] + [
+    records = [{"question_type": "direct_fact", "record_id": f"direct-{index}"} for index in range(8)] + [
         {"question_type": "threshold", "record_id": "threshold"},
         {"question_type": "exception", "record_id": "exception"},
     ]
@@ -3236,10 +3321,7 @@ def test_explicit_task_planning_and_request_coverage(monkeypatch) -> None:
 
 
 def test_judge_coverage_excludes_deterministic_and_budget_rejections() -> None:
-    planned = [
-        {"planned_request_id": f"request-{index}", "planned_task_type": "qa"}
-        for index in range(4)
-    ]
+    planned = [{"planned_request_id": f"request-{index}", "planned_task_type": "qa"} for index in range(4)]
     # request-0: deterministically rejected, never reached the judge.
     # request-1: passed determinism/dedup but was prompt-budget rejected.
     # request-2: passed determinism/dedup and reached the judge stage.
@@ -3277,11 +3359,7 @@ def test_post_retry_omissions_become_terminal_audit_rows() -> None:
         },
     )
     assert request_coverage(planned, terminal)["missing_request_ids"] == []
-    failure = next(
-        row
-        for row in terminal
-        if row.get("parent_request_id") == "request-b"
-    )
+    failure = next(row for row in terminal if row.get("parent_request_id") == "request-b")
     assert failure["terminal_state"] == "model_failure_after_retries"
 
 
@@ -3300,9 +3378,7 @@ def test_failed_blueprint_retains_answerability_in_generation_audit() -> None:
     )
     assert failure["answerable"] is True
     assert failure["terminal_state"] == "blueprint_rejected_or_failed"
-    assert failure["deterministic_checks"]["issues"] == [
-        "model_failure_after_retries"
-    ]
+    assert failure["deterministic_checks"]["issues"] == ["model_failure_after_retries"]
 
 
 def test_judge_rejects_false_abstention_and_taxonomy_acquiescence() -> None:
@@ -3776,15 +3852,9 @@ def test_leakage_audit_covers_single_document_manual_and_section() -> None:
     ]
     audit = leakage_audit(rows)
     assert not audit["passed"]
-    assert audit["collisions"]["manual"] == [
-        {"value": "goods-2021", "splits": ["train", "validation"]}
-    ]
-    assert audit["collisions"]["section"] == [
-        {"value": "goods-2021:Supply order rules", "splits": ["train", "validation"]}
-    ]
-    assert audit["collisions"]["source_hash"] == [
-        {"value": "sha-goods-2021", "splits": ["train", "validation"]}
-    ]
+    assert audit["collisions"]["manual"] == [{"value": "goods-2021", "splits": ["train", "validation"]}]
+    assert audit["collisions"]["section"] == [{"value": "goods-2021:Supply order rules", "splits": ["train", "validation"]}]
+    assert audit["collisions"]["source_hash"] == [{"value": "sha-goods-2021", "splits": ["train", "validation"]}]
     assert audit["unique_values"]["manual"] == 3
 
 
@@ -3873,11 +3943,7 @@ def test_judge_threshold_is_selected_on_development_and_verified_on_holdout(
             )
         }
         record = {"record_id": record_id, "judge": {**judge, "score": score}}
-        record_hash = hashlib.sha256(
-            json.dumps(
-                record, sort_keys=True, separators=(",", ":")
-            ).encode()
-        ).hexdigest()
+        record_hash = hashlib.sha256(json.dumps(record, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
         return {
             "review_id": f"review-{record_id}",
             "record_id": record_id,
@@ -3895,20 +3961,14 @@ def test_judge_threshold_is_selected_on_development_and_verified_on_holdout(
     holdout = tmp_path / "holdout.jsonl"
     development.write_text(
         "\n".join(
-            json.dumps(review_row(f"dev-{index}", score, accepted))
-            for index, (score, accepted) in enumerate(
-                [(5, True), (4, True), (3, False), (2, False)]
-            )
+            json.dumps(review_row(f"dev-{index}", score, accepted)) for index, (score, accepted) in enumerate([(5, True), (4, True), (3, False), (2, False)])
         )
         + "\n",
         encoding="utf-8",
     )
     holdout.write_text(
         "\n".join(
-            json.dumps(review_row(f"hold-{index}", score, accepted))
-            for index, (score, accepted) in enumerate(
-                [(5, True), (4, True), (3, False), (1, False)]
-            )
+            json.dumps(review_row(f"hold-{index}", score, accepted)) for index, (score, accepted) in enumerate([(5, True), (4, True), (3, False), (1, False)])
         )
         + "\n",
         encoding="utf-8",
@@ -3955,13 +4015,13 @@ def test_release_validation_requires_all_four_exports_and_human_review(
                     "qa_cot": 1,
                     "cross_document_qa": 1,
                     "cross_document_qa_cot": 1,
-                    },
-                    "quality_acceptance": {"portfolio_quality_complete": True},
-                    "stage_quality_evidence": {
-                        "cross_document": {"required": True, "passed": True},
-                        "drafting": {"required": True, "passed": True},
-                    },
-                }
+                },
+                "quality_acceptance": {"portfolio_quality_complete": True},
+                "stage_quality_evidence": {
+                    "cross_document": {"required": True, "passed": True},
+                    "drafting": {"required": True, "passed": True},
+                },
+            }
         ),
         encoding="utf-8",
     )
@@ -3994,9 +4054,7 @@ def test_release_validation_requires_all_four_exports_and_human_review(
     assert report["issues"] == ["human_review_not_supplied"]
     manifest = json.loads((files_dir / "manifest.json").read_text(encoding="utf-8"))
     manifest["stage_quality_evidence"]["drafting"]["passed"] = False
-    (files_dir / "manifest.json").write_text(
-        json.dumps(manifest), encoding="utf-8"
-    )
+    (files_dir / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
     failed_stage = validate_run(files_dir)
     assert "stage_quality_evidence_incomplete:drafting" in failed_stage["issues"]
 
@@ -4016,9 +4074,7 @@ def test_release_validation_detects_train_eval_overlap(tmp_path: Path) -> None:
         ),
         encoding="utf-8",
     )
-    (files_dir / "leakage_audit.json").write_text(
-        json.dumps({"passed": True}), encoding="utf-8"
-    )
+    (files_dir / "leakage_audit.json").write_text(json.dumps({"passed": True}), encoding="utf-8")
     row = json.dumps({"record_id": "shared", "split": "train"}) + "\n"
     (files_dir / "qa_sft.jsonl").write_text(row, encoding="utf-8")
     (files_dir / "eval.jsonl").write_text(row, encoding="utf-8")
@@ -4158,19 +4214,25 @@ def test_completed_stage_survives_generation_and_judge_model_changes(
     first.start()
     calls: list[str] = []
     expected = [{"record_id": "kept", "generation_model": "model-a"}]
-    assert first.execute_llm_stage(
-        stage="generation",
-        role="generation",
-        llm=_FakeStageLLM(expected, calls),
-        inputs=[{"planned_request_id": "one"}],
-    ) == expected
+    assert (
+        first.execute_llm_stage(
+            stage="generation",
+            role="generation",
+            llm=_FakeStageLLM(expected, calls),
+            inputs=[{"planned_request_id": "one"}],
+        )
+        == expected
+    )
     judged = [{"record_id": "kept", "judge_model": "judge-a"}]
-    assert first.execute_llm_stage(
-        stage="judge",
-        role="judge",
-        llm=_FakeStageLLM(judged, calls),
-        inputs=expected,
-    ) == judged
+    assert (
+        first.execute_llm_stage(
+            stage="judge",
+            role="judge",
+            llm=_FakeStageLLM(judged, calls),
+            inputs=expected,
+        )
+        == judged
+    )
     first.finish("partial")
 
     second = _resume_manager(
@@ -4197,12 +4259,8 @@ def test_completed_stage_survives_generation_and_judge_model_changes(
     )
     assert reused_judgment == judged
     assert len(calls) == 2
-    assert second.summary()["stage_events"]["generation"]["status"] == (
-        "reused_checkpoint"
-    )
-    assert second.summary()["stage_events"]["judge"]["status"] == (
-        "reused_checkpoint"
-    )
+    assert second.summary()["stage_events"]["generation"]["status"] == ("reused_checkpoint")
+    assert second.summary()["stage_events"]["judge"]["status"] == ("reused_checkpoint")
 
 
 def test_transport_only_change_reuses_partial_cache_identity(
@@ -4265,12 +4323,8 @@ def test_transport_tuning_does_not_change_scientific_contract(
             },
         },
     )
-    assert first._contract_hash("generation") == second._contract_hash(
-        "generation"
-    )
-    assert first._stage_fingerprint(
-        "generation", "generation"
-    ) == second._stage_fingerprint("generation", "generation")
+    assert first._contract_hash("generation") == second._contract_hash("generation")
+    assert first._stage_fingerprint("generation", "generation") == second._stage_fingerprint("generation", "generation")
 
 
 def test_saturation_replay_can_reuse_integrity_checked_historical_contract(
@@ -4287,23 +4341,18 @@ def test_saturation_replay_can_reuse_integrity_checked_historical_contract(
     first.start()
     calls: list[str] = []
     expected = [{"record_id": "historical-record"}]
-    assert first.execute_llm_stage(
-        stage="cross_generation_pass_001",
-        role="generation",
-        llm=_FakeStageLLM(expected, calls),
-        inputs=[{"planned_request_id": "one"}],
-    ) == expected
+    assert (
+        first.execute_llm_stage(
+            stage="cross_generation_pass_001",
+            role="generation",
+            llm=_FakeStageLLM(expected, calls),
+            inputs=[{"planned_request_id": "one"}],
+        )
+        == expected
+    )
     first.finish("partial")
 
-    metadata_path = next(
-        (
-            tmp_path
-            / "outputs"
-            / "same-run"
-            / "checkpoints"
-            / "cross_generation_pass_001"
-        ).glob("*/metadata.json")
-    )
+    metadata_path = next((tmp_path / "outputs" / "same-run" / "checkpoints" / "cross_generation_pass_001").glob("*/metadata.json"))
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
     metadata["contract_sha256"] = "legacy-transport-inclusive-contract"
     metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
@@ -4324,9 +4373,7 @@ def test_saturation_replay_can_reuse_integrity_checked_historical_contract(
         prefer_historical_checkpoint=True,
     )
     assert reused == expected
-    assert replay.summary()["stage_events"]["cross_generation_pass_001"][
-        "compatibility"
-    ] == "saturation_replay_candidate_historical_artifact"
+    assert replay.summary()["stage_events"]["cross_generation_pass_001"]["compatibility"] == "saturation_replay_candidate_historical_artifact"
 
 
 def test_completed_stage_survives_pipeline_source_change(
@@ -4343,12 +4390,15 @@ def test_completed_stage_survives_pipeline_source_change(
     first.start()
     expected = [{"record_id": "immutable-result"}]
     calls: list[str] = []
-    assert first.execute_llm_stage(
-        stage="generation",
-        role="generation",
-        llm=_FakeStageLLM(expected, calls),
-        inputs=[{"planned_request_id": "one"}],
-    ) == expected
+    assert (
+        first.execute_llm_stage(
+            stage="generation",
+            role="generation",
+            llm=_FakeStageLLM(expected, calls),
+            inputs=[{"planned_request_id": "one"}],
+        )
+        == expected
+    )
     first.finish("partial")
 
     pipeline_source = tmp_path / "pipeline" / "stage.py"
@@ -4361,17 +4411,17 @@ def test_completed_stage_survives_pipeline_source_change(
         generation_deployment="deployment-a",
     )
     second.start()
-    assert second.execute_llm_stage(
-        stage="generation",
-        role="generation",
-        llm=_FakeStageLLM([], calls, fail=True),
-        inputs=[{"planned_request_id": "one"}],
-    ) == expected
-    assert len(calls) == 1
     assert (
-        second.summary()["stage_events"]["generation"]["compatibility"]
-        == "current_contract"
+        second.execute_llm_stage(
+            stage="generation",
+            role="generation",
+            llm=_FakeStageLLM([], calls, fail=True),
+            inputs=[{"planned_request_id": "one"}],
+        )
+        == expected
     )
+    assert len(calls) == 1
+    assert second.summary()["stage_events"]["generation"]["compatibility"] == "current_contract"
 
 
 def test_v1_completed_checkpoint_is_invalidated_after_resume_contract_upgrade(
@@ -4388,14 +4438,7 @@ def test_v1_completed_checkpoint_is_invalidated_after_resume_contract_upgrade(
     manager.start()
     inputs = [{"planned_request_id": "one"}]
     input_hash = resume_module._canonical_hash(resume_module._checkpoint_input(inputs))
-    legacy_dir = (
-        tmp_path
-        / "outputs"
-        / "same-run"
-        / "checkpoints"
-        / "generation"
-        / "legacy-v1-key"
-    )
+    legacy_dir = tmp_path / "outputs" / "same-run" / "checkpoints" / "generation" / "legacy-v1-key"
     legacy_dir.mkdir(parents=True)
     (legacy_dir / "records.jsonl").write_text(
         '{"record_id":"legacy"}\n',
@@ -4463,9 +4506,6 @@ def test_refresh_stage_preserves_checkpoint_history_and_redacts_secrets(
     ) == [{"value": "new"}]
     checkpoint_root = tmp_path / "outputs" / "same-run" / "checkpoints"
     assert list(checkpoint_root.rglob("history/*/records.jsonl"))
-    serialized = "\n".join(
-        path.read_text(encoding="utf-8")
-        for path in (tmp_path / "outputs" / "same-run").rglob("*.json")
-    )
+    serialized = "\n".join(path.read_text(encoding="utf-8") for path in (tmp_path / "outputs" / "same-run").rglob("*.json"))
     assert "secret-generation-key" not in serialized
     assert "secret-judge-key" not in serialized

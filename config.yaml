@@ -226,6 +226,17 @@ quality:
   # Plan 40% so the accepted pool can meet the separate 20% release floor.
   qa_cot_fraction: 0.40
   cross_qa_cot_fraction: 0.25
+  # Direct facts remain one-shot. Only source-feasible multi-operation cells
+  # receive independent alternatives, which are deterministically validated,
+  # independently judged, and reduced to one grounded winner.
+  single_document_best_of_n:
+    basic: 1
+    intermediate: 2
+    advanced: 3
+  # One bounded corrected replacement per blueprint when every generated
+  # sibling fails deterministic grounding/format validation. Strict validators
+  # remain unchanged; the failed original stays in the audit trail.
+  generation_validation_rescue: true
   # Constructed only from accepted answerable seeds plus same-type distractors,
   # then promoted by an independent full-context answerability judge.
   unanswerable_fraction: 0.10
@@ -285,8 +296,10 @@ judge_calibration:
 
 # Optional semantic-diversity analysis. Only generated questions are sent to
 # this endpoint; source passages, answers, evidence, and credentials are not.
-# Selection stays disabled until `semantic_calibration.jsonl` has human labels
-# and a model-specific threshold is justified from those labels.
+# Verified-equivalence selection is safe without a universal cosine cutoff:
+# questions are removed only when their grounded target, evidence, sources, and
+# coverage contract are identical. A broader cosine-threshold mode still
+# requires reviewed development and holdout calibration.
 embeddings:
   enabled: true
   api_key_env: EMBEDDING_API_KEY
@@ -298,7 +311,8 @@ embeddings:
   batch_size: 64
   timeout_seconds: 120
   calibration_neighbors_per_record: 5
-  selection_enabled: false
+  selection_enabled: true
+  selection_mode: verified_equivalence
   similarity_threshold: null
 
 propositions:

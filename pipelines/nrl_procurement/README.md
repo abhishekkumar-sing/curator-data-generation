@@ -130,19 +130,21 @@ adversarial decisions.
 ### Diverse instruction and QA-CoT generation
 
 Treat diversity as a coverage-and-selection problem, not a request to “word the
-question differently.” This pipeline plans source-feasible question intent,
-wording style, answer format, procurement task, authentic persona need, direct
-versus CoT shape, and single- versus multi-document evidence before generation.
-It then applies deterministic grounding checks, an independent judge, lexical
-portfolio caps, and semantic-neighbor calibration.
+question differently.” Before model calls, the pipeline now plans a
+source-feasible question intent, wording style, answer format, direct/CoT shape,
+reasoning operation, difficulty, and material-focus axis. The grounded blueprint
+then supplies the source-supported procurement task, persona, and concrete
+persona need. Planned cells are written to `instruction_coverage_plan.jsonl` and
+accepted completed cells to `instruction_coverage_matrix.jsonl`.
 
-For deeper instruction pairs, add an explicit difficulty and reasoning-operation
-axis to that planner. A candidate is materially new only if it changes a
+A candidate is materially new only if it changes a
 supported rule, condition, exception, threshold boundary, stakeholder decision,
 evidence requirement, temporal state, or reasoning path. Cross product only the
 axis combinations supported by the source; do not invent a scenario merely to
-fill a quota. Generate several candidates for hard cells, then select for
-grounded quality and semantic coverage rather than retaining every sample.
+fill a quota. Intermediate CoT cells generate two independent candidates and
+advanced cells generate three. Every candidate is deterministically checked and
+independently judged; one winner is retained by grounded quality and
+qualification preservation before any diversity tie-break.
 
 Use `qa_cot` only for genuine two-to-four-step problems. Student-facing
 rationales are concise auditable steps with an operation, an evidence-based
@@ -193,7 +195,7 @@ parameters, model environment-variable names, and privacy behavior. `.env`
 overrides its Curator switches and supplies endpoint-specific values and
 credentials.
 
-### Optional semantic-diversity calibration
+### Semantic-diversity selection and calibration
 
 The checked-in embedding analysis profile is enabled. It uses NVIDIA's
 OpenAI-compatible `llama-nemotron-embed-1b-v2` endpoint only for generated
@@ -207,7 +209,15 @@ included in the embedding input. Configure a newly issued key in the untracked
 
 An enabled run caches question vectors under
 `.curator_working/semantic_embeddings/` and writes nearest-neighbor pairs to
-`outputs/<run-id>/files/semantic_calibration.jsonl`. Reviewers set
+`outputs/<run-id>/files/semantic_calibration.jsonl`. The default
+`verified_equivalence` selection mode is active without a cosine cutoff. It
+removes a paraphrased question only when the independently judged record has the
+same normalized answer, exact evidence, source identity, task, persona, intent,
+answer format, operation, difficulty, and material focus. Cosine similarity is
+retained in the rejection audit but cannot override those invariants.
+
+For broader embedding-only clustering, switch to `calibrated_threshold` only
+after reviewers set
 `human_label` to `duplicate`, `related`, or `distinct`. Produce a secret-free
 development calibration report with:
 
@@ -220,8 +230,9 @@ development calibration report with:
 The command will not recommend a threshold without at least 50 labeled pairs,
 including at least 10 duplicates and 10 non-duplicates. Its recommendation is
 still in-sample: validate the proposed threshold on a separate reviewed holdout
-before setting `embeddings.selection_enabled: true`. Until then, embedding
-analysis emits candidates and metrics but removes no records.
+before configuring `selection_mode: calibrated_threshold` and its recommended
+`similarity_threshold`. The verified-equivalence default does not depend on
+that optional broader threshold.
 
 The comprehensive configuration also enables proposition extraction, connected
 reasoning paths, temporal artifacts, path QA, and cross-document saturation.
@@ -348,6 +359,14 @@ That `files/` directory contains:
   duplicate/related/distinct human labels when embeddings are enabled
 - `semantic_rejected.jsonl`: quality-ranked semantic-cluster removals; empty
   until a separately validated threshold is explicitly enabled
+- `instruction_coverage_plan.jsonl`: source-feasible intent, operation,
+  difficulty, format, and material-focus assignments made before model calls
+- `instruction_coverage_matrix.jsonl`: accepted cells completed with grounded
+  procurement task, authentic persona need, and judge score
+- `qa_generation_validation_rescue_audit.jsonl`: the single bounded corrected
+  replacement attempted for each blueprint whose primary candidates all failed
+  deterministic grounding or format validation; original failures remain in
+  `qa_generated_audit.jsonl`
 - `qa_sft.jsonl`: concise QA chat training data
 - `qa_cot_sft.jsonl`: QA with short evidence-based teaching rationales
 - `rag.jsonl`: questions, contexts, and answerability labels

@@ -6,6 +6,7 @@ import hashlib
 import json
 import math
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -34,6 +35,7 @@ class EmbeddingSettings:
     truncate: str = "NONE"
     top_k: int = 5
     selection_enabled: bool = False
+    selection_mode: str = "calibrated_threshold"
     similarity_threshold: float | None = None
 
     @property
@@ -62,6 +64,7 @@ class EmbeddingSettings:
             "truncate": self.truncate,
             "cache_fingerprint": self.fingerprint,
             "selection_enabled": self.selection_enabled,
+            "selection_mode": self.selection_mode,
             "similarity_threshold": self.similarity_threshold,
         }
 
@@ -106,7 +109,19 @@ def load_embedding_settings(config: dict[str, Any]) -> EmbeddingSettings | None:
         if not 0.0 < threshold <= 1.0:
             raise RuntimeError("embeddings.similarity_threshold must be in (0, 1]")
     selection_enabled = bool(section.get("selection_enabled", False))
-    if selection_enabled and threshold is None:
+    selection_mode = str(
+        section.get("selection_mode", "calibrated_threshold")
+    ).strip()
+    if selection_mode not in {"calibrated_threshold", "verified_equivalence"}:
+        raise RuntimeError(
+            "embeddings.selection_mode must be calibrated_threshold or "
+            "verified_equivalence"
+        )
+    if (
+        selection_enabled
+        and selection_mode == "calibrated_threshold"
+        and threshold is None
+    ):
         raise RuntimeError(
             "Semantic selection requires a human-calibrated "
             "embeddings.similarity_threshold"
@@ -134,6 +149,7 @@ def load_embedding_settings(config: dict[str, Any]) -> EmbeddingSettings | None:
         truncate=truncate,
         top_k=max(1, int(section.get("calibration_neighbors_per_record", 5))),
         selection_enabled=selection_enabled,
+        selection_mode=selection_mode,
         similarity_threshold=threshold,
     )
 
@@ -547,6 +563,120 @@ def semantic_select(
     }
 
 
+def _normalized_semantic_text(value: Any) -> str:
+    """Normalize generated target text for a strict equivalence signature."""
+    return " ".join(re.findall(r"[a-z0-9]+", str(value).casefold()))
+
+
+def _grounded_equivalence_signature(record: dict[str, Any]) -> tuple[Any, ...]:
+    """Identify the same grounded training target without using question wording."""
+    evidence = tuple(
+        sorted(
+            (
+                str(item.get("chunk_id", item.get("source_id", ""))),
+                " ".join(str(item.get("quote", "")).split()),
+            )
+            for item in record.get("evidence", [])
+        )
+    )
+    sources = tuple(sorted(str(item) for item in record.get("source_chunk_ids", [])))
+    required = (
+        record.get("record_id"),
+        record.get("task_type"),
+        record.get("task"),
+        record.get("persona"),
+        record.get("question_type"),
+        record.get("answer"),
+        evidence,
+        sources,
+    )
+    if not all(required):
+        # Defensive fail-closed behavior for malformed or legacy rows: an
+        # incomplete signature can never authorize deletion.
+        return ("ineligible_for_verified_equivalence", str(record.get("record_id", "")))
+    return (
+        str(record.get("task_type", "")),
+        str(record.get("task", "")),
+        str(record.get("persona", "")),
+        str(record.get("question_type", "")),
+        str(record.get("answer_format", "")),
+        bool(record.get("answerable", True)),
+        str(record.get("reasoning_operation", "")),
+        str(record.get("difficulty", "")),
+        str(record.get("material_focus", "")),
+        _normalized_semantic_text(record.get("answer", "")),
+        evidence,
+        sources,
+    )
+
+
+def verified_equivalence_select(
+    records: list[dict[str, Any]],
+    vectors: dict[str, list[float]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
+    """Delete only paraphrases of the same grounded training target.
+
+    Dense similarity remains an auditable diagnostic. It is not trusted as the
+    deletion boundary: records must share every source, evidence, answer, and
+    coverage invariant in `_grounded_equivalence_signature`.
+    """
+    grouped: dict[tuple[Any, ...], list[int]] = {}
+    for index, record in enumerate(records):
+        grouped.setdefault(_grounded_equivalence_signature(record), []).append(index)
+    kept_indexes: set[int] = set()
+    removed: list[dict[str, Any]] = []
+    multi_record_groups = 0
+    for component in grouped.values():
+        if len(component) > 1:
+            multi_record_groups += 1
+        ranked = sorted(
+            component,
+            key=lambda index: (
+                -_quality_key(records[index])[0],
+                -_quality_key(records[index])[1],
+                -_quality_key(records[index])[2],
+                -_quality_key(records[index])[3],
+                _quality_key(records[index])[4],
+            ),
+        )
+        winner = ranked[0]
+        kept_indexes.add(winner)
+        winner_vector = np.asarray(vectors[str(records[winner]["record_id"])], dtype=float)
+        winner_norm = float(np.linalg.norm(winner_vector))
+        for index in ranked[1:]:
+            candidate_vector = np.asarray(
+                vectors[str(records[index]["record_id"])], dtype=float
+            )
+            denominator = winner_norm * float(np.linalg.norm(candidate_vector))
+            similarity = (
+                float(np.dot(winner_vector, candidate_vector) / denominator)
+                if denominator
+                else 0.0
+            )
+            removed.append(
+                {
+                    **records[index],
+                    "semantic_selection": {
+                        "accepted": False,
+                        "reason": "verified_grounded_equivalence",
+                        "representative_record_id": records[winner]["record_id"],
+                        "cosine_similarity": round(similarity, 6),
+                        "verification": (
+                            "same_task_persona_intent_answer_evidence_operation_"
+                            "difficulty_material_focus_and_sources"
+                        ),
+                    },
+                }
+            )
+    kept = [record for index, record in enumerate(records) if index in kept_indexes]
+    return kept, removed, {
+        "selection_mode": "verified_equivalence",
+        "equivalence_groups": len(grouped),
+        "multi_record_groups": multi_record_groups,
+        "records_removed": len(removed),
+    }
+
+
 def run_semantic_diversity(
     records: list[dict[str, Any]],
     config: dict[str, Any],
@@ -571,15 +701,20 @@ def run_semantic_diversity(
     removed: list[dict[str, Any]] = []
     selection_stats: dict[str, Any] = {
         "enabled": False,
-        "reason": "human_calibrated_threshold_not_enabled",
+        "reason": "selection_not_enabled",
     }
     if settings.selection_enabled:
-        assert settings.similarity_threshold is not None
-        kept, removed, selection_stats = semantic_select(
-            records,
-            vectors,
-            settings.similarity_threshold,
-        )
+        if settings.selection_mode == "verified_equivalence":
+            kept, removed, selection_stats = verified_equivalence_select(
+                records, vectors
+            )
+        else:
+            assert settings.similarity_threshold is not None
+            kept, removed, selection_stats = semantic_select(
+                records,
+                vectors,
+                settings.similarity_threshold,
+            )
         selection_stats["enabled"] = True
     return kept, removed, candidates, {
         **settings.manifest(),

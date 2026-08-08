@@ -342,6 +342,15 @@ Research basis:
 
 ## Structured-output max-token recovery (2026-08-05)
 
+- [x] Keep deterministic generation validators fail-closed while allowing one
+  corrected replacement when every sibling for a blueprint fails. Supply the
+  exact validation issues and failed candidate to a separately checkpointed
+  `generation_validation_rescue` stage, and retain both attempts in audit
+  artifacts.
+- [x] Realign a blueprint evidence quote only when its token sequence matches
+  one exact source span and the difference is Markdown whitespace. Continue to
+  reject punctuation, spelling, casing, token, modality, and factual changes.
+
 - [x] Diagnose the live `saturation-500-001` evidence by stage. The ordinary
   blueprint and cross-generation truncations recovered on their same-budget
   retry, but cross-judge pass 1 permanently lost 6/167 singular judgments at
@@ -6172,11 +6181,11 @@ Deferred staged work:
 
 - [x] Add an optional OpenAI-compatible NVIDIA embedding profile, mandatory
   capability probe, and persistent record-ID plus question-hash keyed cache.
-  Keep it disabled by default and do not add Torch/`sentence-transformers`.
+  Do not add Torch/`sentence-transformers`.
   Emit nearest-neighbor review pairs to `semantic_calibration.jsonl`; never send
   source passages, answers, or evidence to the public endpoint.
 - [ ] Hand-label a calibration set of duplicate/related/distinct question pairs
-  before selecting a cosine threshold; no universal embedding threshold is
+  before selecting a broad cosine threshold; no universal embedding threshold is
   accepted without calibration for the deployed model. The implemented
   `semantic_calibration.py calibrate` command requires both classes and a minimum
   sample before producing a development recommendation; validate it on a
@@ -6184,8 +6193,9 @@ Deferred staged work:
 - [x] Replace order-based retention inside semantic clusters with a
   quality-aware selector using deterministic validity, independent judge score,
   qualification preservation, grounded-claim/evidence completeness, and stable
-  record-ID tie-breaking. It is unreachable while `selection_enabled: false` and
-  refuses to start without an explicit calibrated threshold.
+  record-ID tie-breaking. The active `verified_equivalence` mode requires exact
+  grounded-target and coverage invariants and therefore needs no cosine cutoff;
+  the broader `calibrated_threshold` mode still refuses to start without one.
 - [ ] Implement adversarial unanswerable generation as an isolated stage with a
   plausible same-type distractor and an independent full-passage answerability
   judge. Keep `quality.unanswerable_fraction=0.0` until that stage exists.
@@ -6258,20 +6268,31 @@ Rejected alternatives:
   and validate `--max-num-seqs`, chunked prefill, and
   `--max-num-batched-tokens`; client concurrency cannot improve a stage that
   contains fewer requests than its ceiling.
-- [ ] Add an explicit, source-feasible difficulty/operation coverage matrix for
+- [x] Add an explicit, source-feasible difficulty/operation coverage matrix for
   instruction synthesis. Cross product only supported axes: procurement task,
   authentic persona need, question intent, reasoning operation, answer format,
   single/multi-hop context, and basic/intermediate/advanced difficulty. Never
-  manufacture a scenario solely to fill a quota.
-- [ ] Add materially distinct scenario planning for CoT: each variation must
+  manufacture a scenario solely to fill a quota. Implemented with pre-call
+  `instruction_coverage_plan.jsonl`, observable intent-to-operation mappings,
+  operation-gated CoT assignment, and an accepted
+  `instruction_coverage_matrix.jsonl` completed by the grounded blueprint's
+  task, persona, and concrete persona need.
+- [x] Add materially distinct scenario planning for CoT: each variation must
   change the governing condition, exception, threshold boundary, stakeholder
   decision, evidence requirement, temporal state, or reasoning path—not merely
   wording. Generate multiple candidate rationales only for genuinely multi-step
   records, verify every step against exact evidence, and select by grounded
-  correctness before semantic diversity.
-- [ ] Human-label the existing semantic-neighbor calibration artifact and set a
-  model-specific threshold before enabling embedding-based deletion. Lexical
-  opener/type/style balancing is not sufficient evidence of semantic diversity.
+  correctness before semantic diversity. Implemented as an explicit
+  source-supported material-focus contract, required planned operation in the
+  rationale, best-of-two intermediate and best-of-three advanced CoT generation,
+  deterministic validation, independent judgment, and auditable sibling
+  selection led by score and qualification preservation.
+- [x] Enable high-precision semantic deletion without inventing a cosine
+  threshold. The active verified-equivalence mode uses embeddings for neighbor
+  analysis and audit, but removes a question only when task, persona, intent,
+  normalized answer, exact evidence, operation, difficulty, material focus, and
+  source identity match. Human labels remain required before opting into broader
+  cosine-threshold deletion; lexical balancing is not semantic proof.
 
 Research basis:
 
