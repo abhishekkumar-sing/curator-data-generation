@@ -22,6 +22,10 @@ Attributes:
     token_usage: Token usage information for the request.
     response_cost: The cost of the request in USD.
     finish_reason: The reason for completion finish.
+    error_category: Coarse, best-effort classification of a terminal request
+        failure (e.g. "timeout", "truncation", "schema_validation",
+        "rate_limit", "other"). None when there are no errors. Additive field;
+        does not change the meaning or content of `response_errors`.
 """
 
 
@@ -39,6 +43,7 @@ class GenericResponse(BaseModel):
     token_usage: Optional[_TokenUsage] = None
     response_cost: Optional[float] = None
     finish_reason: Optional[str] = None
+    error_category: Optional[str] = None
 
     model_config = {
         "json_encoders": {datetime.datetime: lambda dt: dt.isoformat()},

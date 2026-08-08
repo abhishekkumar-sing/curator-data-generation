@@ -605,7 +605,13 @@ class BaseRequestProcessor(ABC):
             # Get all request files
             request_files = glob.glob(os.path.join(self.working_dir, "requests_*.jsonl"))
 
-            # Write all requests that don't have corresponding entries in the dataset
+            # Write all requests that don't have corresponding entries in the dataset.
+            # Additive only: every field already present on the raw request line is
+            # preserved unchanged; `error_category`/`response_errors` are merged in
+            # from the matching terminal response (if any) so root-causing a failure
+            # does not require grepping curator.log by hand. A request with no
+            # terminal response at all (e.g. the process was interrupted) gets
+            # `error_category: "unknown"` rather than a fabricated category.
             with open(failed_requests_file, "w") as failed_file:
                 for request_file in request_files:
                     with open(request_file, "r") as f:
@@ -617,7 +623,14 @@ class BaseRequestProcessor(ABC):
                                     original_idx is not None
                                     and original_idx not in terminal_successful_indices
                                 ):
-                                    failed_file.write(line)
+                                    terminal_response = terminal_by_index.get(original_idx)
+                                    request_data["error_category"] = (
+                                        (terminal_response or {}).get("error_category") or "unknown"
+                                    )
+                                    request_data["response_errors"] = (
+                                        (terminal_response or {}).get("response_errors")
+                                    )
+                                    failed_file.write(json.dumps(request_data) + "\n")
                             except json.JSONDecodeError:
                                 continue
 
