@@ -8,6 +8,7 @@ import asyncio
 import datetime
 import json
 import os
+import random
 import time
 import typing as t
 from abc import ABC, abstractmethod
@@ -324,6 +325,31 @@ class BaseOnlineRequestProcessor(BaseRequestProcessor, ABC):
         # which it otherwise ignores unlike requests/httpx (see issue #699).
         return aiohttp.ClientSession(connector=connector, trust_env=True)
 
+    async def _apply_submission_jitter(self) -> float:
+        """Sleep a small random delay before dispatching the next request.
+
+        Concurrently-dispatched requests that share the same ``request_timeout``
+        also share a near-identical deadline: if the server degrades mid-batch,
+        every in-flight request can time out within the same ~1-second window
+        (a self-synchronizing thundering herd; see the audit's `saturation-500-001`
+        evidence of 180/225 requests failing simultaneously at their shared
+        600-second deadline). Desynchronizing submission times spreads those
+        deadlines out so a transient slowdown produces a smoothed tail of
+        retries instead of a synchronized wave. Disabled by default (returns
+        0.0 immediately) unless ``submission_jitter_seconds`` is configured.
+
+        Returns:
+            The delay actually applied, in seconds (0.0 when jitter is disabled).
+            Returning this (rather than nothing) keeps the method easy to assert
+            on directly in tests without patching global state.
+        """
+        jitter_seconds = getattr(self.config, "submission_jitter_seconds", 0.0) or 0.0
+        if jitter_seconds <= 0:
+            return 0.0
+        delay = random.uniform(0.0, jitter_seconds)
+        await asyncio.sleep(delay)
+        return delay
+
     async def process_requests_from_file(
         self,
         generic_request_filepath: str,
@@ -393,6 +419,11 @@ class BaseOnlineRequestProcessor(BaseRequestProcessor, ABC):
 
                     # Consume capacity before making request
                     status_tracker.consume_capacity(token_estimate)
+
+                    # Desynchronize submission timing so concurrently-started
+                    # requests don't share a near-identical timeout deadline.
+                    await self._apply_submission_jitter()
+
                     task = asyncio.create_task(
                         self.handle_single_request_with_retries(
                             request=request,

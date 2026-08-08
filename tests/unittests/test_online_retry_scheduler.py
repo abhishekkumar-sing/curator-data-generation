@@ -458,3 +458,45 @@ def test_dataset_writer_normalizes_missing_columns_between_valid_rows(
             "terminal_state": "empty_generation",
         },
     ]
+
+
+def test_submission_jitter_disabled_by_default() -> None:
+    """No `submission_jitter_seconds` configured: no delay, no behavior change (T20)."""
+    processor = SimpleNamespace(config=SimpleNamespace(submission_jitter_seconds=0.0))
+
+    delay = asyncio.run(
+        BaseOnlineRequestProcessor._apply_submission_jitter(processor)
+    )
+
+    assert delay == 0.0
+
+
+def test_submission_jitter_sleeps_a_bounded_random_delay(monkeypatch) -> None:
+    """Configured jitter must actually sleep, stay in bounds, and vary (T20).
+
+    A synchronized batch of requests sharing one `request_timeout` also shares
+    one deadline; without variance in submission time, a slow window on the
+    server produces a synchronized wave of simultaneous timeouts (the
+    `saturation-500-001` evidence this fix targets). A constant, non-random
+    delay would not break that synchronization, so this asserts real variance,
+    not just a bounded value.
+    """
+    slept: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        slept.append(seconds)
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    processor = SimpleNamespace(config=SimpleNamespace(submission_jitter_seconds=2.0))
+
+    async def _drive() -> list[float]:
+        return [
+            await BaseOnlineRequestProcessor._apply_submission_jitter(processor)
+            for _ in range(50)
+        ]
+
+    delays = asyncio.run(_drive())
+
+    assert slept == delays
+    assert all(0.0 <= delay <= 2.0 for delay in delays)
+    assert len(set(delays)) > 1

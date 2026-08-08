@@ -169,6 +169,13 @@ models:
     # Explicit private-provider limits avoid Curator's public-provider fallback.
     max_requests_per_minute: 10000
     max_tokens_per_minute: 100000000
+    # `saturation-500-001`'s cross-generation pass 1 dispatched 225 requests at
+    # concurrency 128 essentially back to back; 180 of them shared the same
+    # 600s request_timeout deadline and failed within the same ~1-second
+    # window (a self-synchronizing thundering herd, not an ordinary latency
+    # tail). Spread submission times out so a slow server window produces a
+    # smoothed retry tail instead of a synchronized failure wave.
+    submission_jitter_seconds: 2.0
     # Terminal omissions (including max_tokens truncation) are retried once in
     # a separate checkpoint at this larger ceiling. Ordinary requests retain
     # the smaller scheduling reserve below.
@@ -195,6 +202,8 @@ models:
     # Keep judge throttling independent when it uses a separate local endpoint.
     max_requests_per_minute: 10000
     max_tokens_per_minute: 100000000
+    # Same synchronized-timeout-wave mitigation as the generation role above.
+    submission_jitter_seconds: 2.0
     # The 500-record saturation pilot proved that 2,048 truncates a small
     # fraction of otherwise valid singular cross-document judgments. Retry only
     # those missing decisions once at 4,096 after a context-window preflight.

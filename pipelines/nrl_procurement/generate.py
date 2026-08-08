@@ -389,6 +389,11 @@ def _llm_kwargs(profile: dict[str, Any]) -> dict[str, Any]:
                 "dereference_tool_schema",
                 False,
             ),
+            # Break the synchronized-timeout-wave failure mode (T20): with no
+            # jitter, a batch dispatched at high concurrency shares one
+            # request_timeout deadline, so a slow server window fails many
+            # requests in the same ~1-second window instead of a smoothed tail.
+            "submission_jitter_seconds": profile.get("submission_jitter_seconds", 0.0),
         },
     }
 
