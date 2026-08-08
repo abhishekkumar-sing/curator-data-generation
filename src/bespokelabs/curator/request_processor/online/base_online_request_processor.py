@@ -31,6 +31,41 @@ from bespokelabs.curator.types.token_usage import _TokenUsage
 
 _MAX_OUTPUT_MVA_WINDOW = 50
 
+# Coarse, best-effort terminal-failure categories. Order matters below: checks
+# run top to bottom and the first match wins, so more specific categories are
+# checked before "other". This intentionally stays a small, fixed vocabulary
+# rather than echoing raw exception class names, so downstream tooling (e.g.
+# failure-distribution reports) can rely on a stable set of values.
+_RATE_LIMIT_MARKERS = ("ratelimit", "rate limit", "429", "too many requests")
+_TIMEOUT_MARKERS = ("timeout", "timed out")
+_TRUNCATION_MARKERS = (
+    "incompleteoutput",
+    "max_tokens",
+    "finish_reason was",
+    "truncat",
+)
+_SCHEMA_MARKERS = ("validationerror", "validation error", "schema", "instructorretryexception")
+
+
+def classify_terminal_error(exc: BaseException) -> str:
+    """Coarsely categorize a terminal request exception for failure triage.
+
+    Best-effort and string/class-name based (the same information an operator
+    would otherwise grep out of ``curator.log`` by hand) so it works uniformly
+    across the many exception types raised by different providers/transports.
+    Never raises; unrecognized exceptions fall back to ``"other"``.
+    """
+    haystack = f"{exc.__class__.__name__} {exc}".casefold()
+    if any(marker in haystack for marker in _RATE_LIMIT_MARKERS):
+        return "rate_limit"
+    if any(marker in haystack for marker in _TIMEOUT_MARKERS):
+        return "timeout"
+    if any(marker in haystack for marker in _TRUNCATION_MARKERS):
+        return "truncation"
+    if any(marker in haystack for marker in _SCHEMA_MARKERS):
+        return "schema_validation"
+    return "other"
+
 
 @dataclass
 class APIRequest:
@@ -507,6 +542,10 @@ class BaseOnlineRequestProcessor(BaseRequestProcessor, ABC):
                             generic_request=request.generic_request,
                             created_at=request.created_at,
                             finished_at=datetime.datetime.now(),
+                            # Classify the most recent (terminal) exception. Earlier
+                            # attempts may have failed for different reasons; the
+                            # last one is what actually exhausted the retry budget.
+                            error_category=classify_terminal_error(exc),
                         )
                         await self.append_generic_response(status_tracker, failure_response, response_file)
                         status_tracker.num_tasks_in_progress -= 1
