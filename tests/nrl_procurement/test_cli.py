@@ -28,6 +28,7 @@ def test_all_help_is_forwarded_to_generation_parser(capsys) -> None:
     output = capsys.readouterr().out
     assert "--max-passes" in output
     assert "--cross-document-limit" in output
+    assert "--review-file" in output
 
 
 def test_all_help_lists_every_stage_skip_flag(capsys) -> None:
