@@ -11,11 +11,13 @@ from pydantic import BaseModel, ValidationError
 
 PIPELINE = Path(__file__).resolve().parents[2] / "pipelines" / "nrl_procurement"
 sys.path.insert(0, str(PIPELINE))
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 import generate as generation_pipeline  # noqa: E402
 import resume as resume_module  # noqa: E402
 from corpus import (  # noqa: E402
     _content_class,
+    _document_family,
     corpus_quality_report,
     generation_text,
     load_corpus,
@@ -2488,6 +2490,43 @@ def test_drafting_rejects_unknown_chunks_and_unsupported_values(tmp_path: Path) 
     issues = drafting_validation_issues(row, result)
     assert "unsupported_number:10%" in issues
     assert "unsupported_email:invented@example.com" in issues
+
+
+def test_registered_drafting_seeds_cover_multiple_categories_and_document_types() -> None:
+    """Regression test for the single-instance drafting seed pool.
+
+    The registered seed file must resolve against the real corpus and span
+    more than one procurement category (goods/works/services) and more than
+    one tender instance, so `drafting.minimum_accepted_records: 1` cannot be
+    satisfied entirely from one narrow scenario.
+    """
+    seed_path = REPO_ROOT / "data" / "seeds" / "drafting_requests.jsonl"
+    seeds = read_drafting_seeds(seed_path)
+    assert len(seeds) >= 5
+
+    rows, _manuals = load_corpus(
+        REPO_ROOT / "data" / "source", REPO_ROOT / "data" / "interim" / "ocr"
+    )
+    # build_drafting_inputs raises if any seed references an unknown/stale chunk.
+    inputs = build_drafting_inputs(seeds, rows)
+    chunks_by_id = {str(row["chunk_id"]): row for row in rows}
+
+    categories: set[str] = set()
+    for seed in seeds:
+        manual_ids = {
+            str(chunks_by_id[chunk_id]["manual_id"]) for chunk_id in seed.manual_chunk_ids
+        }
+        categories.update(_document_family(manual_id) for manual_id in manual_ids)
+    assert categories >= {"goods", "works", "services"}, categories
+
+    tender_ids = {seed.tender_id for seed in seeds}
+    assert len(tender_ids) >= 3, "seeds should not all reference one tender instance"
+
+    # Document-type diversity: distinct id prefixes stand in for distinct
+    # drafted-document types (NIT header vs. clause vs. applicability note).
+    id_prefixes = {seed.id.split("-", 2)[1] for seed in seeds}
+    assert len(id_prefixes) >= 3, id_prefixes
+    assert len(inputs) == len(seeds)
 
 
 def test_drafting_citation_integrity_is_bidirectional_and_allows_repeated_details() -> None:
