@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import math
 import os
 import re
@@ -18,7 +19,10 @@ from jsonl_io import write_jsonl_rows
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+logger = logging.getLogger(__name__)
+
 CALIBRATION_LABELS = frozenset({"duplicate", "related", "distinct"})
+_LOCAL_EMBEDDING_HOSTS = {"localhost", "127.0.0.1", "::1"}
 
 
 @dataclass(frozen=True)
@@ -97,11 +101,8 @@ def load_embedding_settings(config: dict[str, Any]) -> EmbeddingSettings | None:
         raise RuntimeError(
             f"{endpoint_env} must not contain query parameters or a fragment"
         )
-    if parsed.scheme != "https" and parsed.hostname not in {
-        "localhost",
-        "127.0.0.1",
-        "::1",
-    }:
+    is_local_host = parsed.hostname in _LOCAL_EMBEDDING_HOSTS
+    if parsed.scheme != "https" and not is_local_host:
         raise RuntimeError("Public embedding endpoints must use HTTPS")
     threshold = section.get("similarity_threshold")
     if threshold is not None:
@@ -138,6 +139,12 @@ def load_embedding_settings(config: dict[str, Any]) -> EmbeddingSettings | None:
     timeout_seconds = float(section.get("timeout_seconds", 120))
     if timeout_seconds <= 0:
         raise RuntimeError("embeddings.timeout_seconds must be positive")
+    if not is_local_host:
+        logger.warning(
+            "Embeddings endpoint %s is a public host — only generated "
+            "question text is sent, never source/answer text.",
+            parsed.hostname,
+        )
     return EmbeddingSettings(
         endpoint=endpoint,
         model=os.environ[model_env].strip(),
