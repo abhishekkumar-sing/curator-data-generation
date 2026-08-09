@@ -46,6 +46,7 @@ from export import (  # noqa: E402
     answer_length_statistics,
     answer_style_diversity,
     assert_unique_record_ids,
+    assign_drafting_splits,
     assign_splits,
     categorical_diversity,
     export_records,
@@ -2104,6 +2105,79 @@ def test_connected_split_targets_records_without_leaking_components() -> None:
     assert all(counts[split] > 0 for split in counts)
     assert counts["train"] >= counts["validation"]
     assert counts["train"] >= counts["test"]
+
+
+def test_assign_drafting_splits_matches_the_manual_fold_qa_records_use() -> None:
+    manuals = [{"manual_id": "m-train"}, {"manual_id": "m-test"}]
+    manual_folds = {"m-train": "train", "m-test": "test"}
+    chunk_manuals = {
+        "chunk-train-1": {"manual_id": "m-train", "source_sha256": "sha-train", "section": "s1"},
+        "chunk-test-1": {"manual_id": "m-test", "source_sha256": "sha-test", "section": "s2"},
+    }
+    drafting_records = [
+        {"id": "draft-train", "instruction": "Draft A", "manual_chunk_ids": ["chunk-train-1"]},
+        {"id": "draft-test", "instruction": "Draft B", "manual_chunk_ids": ["chunk-test-1"]},
+    ]
+    assign_drafting_splits(
+        drafting_records,
+        manuals,
+        chunk_manuals,
+        0.8,
+        0.1,
+        "seed",
+        manual_folds=manual_folds,
+    )
+    by_id = {row["id"]: row["split"] for row in drafting_records}
+    assert by_id["draft-train"] == "train"
+    assert by_id["draft-test"] == "test"
+
+    # A QA record citing the same eval-fold manual must land in the identical split
+    # a drafting record referencing it does — the T13a invariant.
+    qa_record = {"record_id": "qa-1", "manual_id": "m-test"}
+    assign_splits([qa_record], manuals, 0.8, 0.1, "seed", manual_folds=manual_folds)
+    assert qa_record["split"] == by_id["draft-test"]
+
+
+def test_drafting_records_are_now_covered_by_leakage_audit_against_qa_records() -> None:
+    # Regression for the T13/T13b bypass: before this fix, drafting_accepted was
+    # written straight to drafting.jsonl and never entered leakage_audit at all, so
+    # a drafting record built from an eval-fold chunk that collides with a train-fold
+    # QA record's source would have gone undetected. It must now be caught.
+    manuals = [{"manual_id": "m-a"}, {"manual_id": "m-b"}]
+    manual_folds = {"m-a": "train", "m-b": "test"}
+    qa_record = {
+        "record_id": "qa-1",
+        "split": "train",
+        "question": "What is the threshold?",
+        "manual_id": "m-a",
+        "source_sha256": "shared-sha",
+        "source_chunk_ids": ["shared-chunk"],
+        "citations": [{"section": "s"}],
+    }
+    # A corpus/config inconsistency (the exact class of bug this gate exists to
+    # catch) puts the same source hash under a chunk resolved to the test-fold
+    # manual for the drafting seed.
+    chunk_manuals = {
+        "shared-chunk": {"manual_id": "m-b", "source_sha256": "shared-sha", "section": "s"},
+    }
+    drafting_records = [
+        {"id": "draft-leak", "instruction": "Draft something", "manual_chunk_ids": ["shared-chunk"]},
+    ]
+    assign_drafting_splits(
+        drafting_records,
+        manuals,
+        chunk_manuals,
+        0.8,
+        0.1,
+        "seed",
+        manual_folds=manual_folds,
+    )
+    assert drafting_records[0]["split"] == "test"
+    audit = leakage_audit([qa_record, *drafting_records])
+    assert not audit["passed"]
+    assert audit["collisions"]["source_hash"] == [
+        {"value": "shared-sha", "splits": ["test", "train"]}
+    ]
 
 
 def _cross_row(manual_id: str, chunk_id: str, passage: str) -> dict:
