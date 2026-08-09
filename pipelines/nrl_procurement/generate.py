@@ -29,7 +29,13 @@ from corpus import (
 from cross_document import build_bundles
 from cross_stage import (
     CrossDocumentGenerator,
+    CrossSourceAblationAnswerGenerator,
+    CrossSourceAblationJudge,
     SingularCrossDocumentJudge,
+    adjudicate_cross_ablation_trials,
+    apply_cross_ablation_gate,
+    build_cross_ablation_judge_inputs,
+    build_cross_ablation_trial_inputs,
     cross_judge_rows,
     select_best_cross_candidates,
 )
@@ -160,6 +166,8 @@ LLM_STAGE_NAMES = {
     "judge",
     "cross_generation",
     "cross_judge",
+    "cross_ablation_trials",
+    "cross_ablation_judge",
     "drafting_generation",
     "drafting_judge",
     "unanswerable_generation",
@@ -1851,6 +1859,7 @@ def _final_manifest(
     source_window_stats: dict[str, Any] | None = None,
     path_qa_stats: dict[str, Any] | None = None,
     temporal_stats: dict[str, Any] | None = None,
+    cross_ablation_stats: dict[str, Any] | None = None,
     judge_batch_integrity_rejections: dict[str, int] | None = None,
     semantic_diversity_stats: dict[str, Any] | None = None,
     unanswerable_stats: dict[str, Any] | None = None,
@@ -1881,6 +1890,7 @@ def _final_manifest(
         "source_windows": source_window_stats or {"enabled": False},
         "path_qa": path_qa_stats or {"enabled": False},
         "temporal": temporal_stats or {"enabled": False},
+        "cross_document_empirical_ablation": cross_ablation_stats or {"enabled": False},
         "semantic_diversity": semantic_diversity_stats or {"enabled": False},
         "adversarial_unanswerable": unanswerable_stats or {"enabled": False},
         "evaluation": evaluation_stats or {"frozen_external": {"verified": False}},
@@ -2150,6 +2160,14 @@ def main(argv: list[str] | None = None) -> None:
         help="Limit cross-document source bundles (defaults to --limit for pilots)",
     )
     parser.add_argument("--skip-cross-document", action="store_true")
+    parser.add_argument(
+        "--skip-cross-ablation",
+        action="store_true",
+        help=(
+            "Force-disable the empirical cross-document source-ablation gate even if "
+            "cross_document.empirical_ablation is enabled in config.yaml."
+        ),
+    )
     parser.add_argument("--drafting-limit", type=int, help="Limit authored drafting seeds for a pilot")
     parser.add_argument("--skip-drafting", action="store_true")
     parser.add_argument("--skip-propositions", action="store_true")
@@ -3467,6 +3485,139 @@ def main(argv: list[str] | None = None) -> None:
     kept_after_semantic = {row["record_id"] for row in accepted}
     single_accepted = [row for row in single_accepted if row["record_id"] in kept_after_semantic]
     cross_accepted = [row for row in cross_accepted if row["record_id"] in kept_after_semantic]
+
+    # T14e: empirical cross-document source-ablation gate. Off by default (both the
+    # cross_document.empirical_ablation config toggle and --skip-cross-ablation must
+    # allow it) since it roughly doubles LLM call volume for surviving cross-document
+    # candidates. Runs here — after novelty passes, best-of-N selection, and
+    # semantic-dedup/diversity filtering have already reduced the pool — so ablation
+    # cost is never spent on a candidate that would be discarded anyway. This never
+    # weakens CrossDocumentJudge's existing imagined
+    # unsupported_without_source_ids/source_ablation_passed check (left untouched);
+    # it is a strictly additive gate that can only remove records that check would
+    # have kept, based on actual (not imagined) source-removal trial outputs.
+    cross_ablation_config_enabled = bool(cross_config.get("empirical_ablation", False))
+    run_empirical_cross_ablation = cross_ablation_config_enabled and not args.skip_cross_ablation and bool(cross_accepted)
+    cross_ablation_stats: dict[str, Any] = {
+        "enabled": cross_ablation_config_enabled,
+        "skipped": bool(args.skip_cross_ablation),
+        "candidates_evaluated": 0,
+        "trials_planned": 0,
+        "trials_prompt_rejected": 0,
+        "trials_valid": 0,
+        "deterministic_adjudication_passed": 0,
+        "independent_judge_accepted": 0,
+        "accepted": len(cross_accepted),
+        "rejected": 0,
+    }
+    if run_empirical_cross_ablation:
+        pre_ablation_cross_accepted = cross_accepted
+        cross_ablation_generator = CrossSourceAblationAnswerGenerator(**_llm_kwargs(GENERATION))
+        cross_ablation_trial_inputs = build_cross_ablation_trial_inputs(pre_ablation_cross_accepted)
+        budgeted_cross_ablation_inputs = []
+        cross_ablation_prompt_rejected = []
+        for row in cross_ablation_trial_inputs:
+            budget = _rendered_prompt_budget(cross_ablation_generator, row, GENERATION)
+            item = {**row, "prompt_budget": budget}
+            (budgeted_cross_ablation_inputs if budget["passed"] else cross_ablation_prompt_rejected).append(item)
+        _write_audit(
+            files_dir / "cross_ablation_prompt_rejected.jsonl",
+            cross_ablation_prompt_rejected,
+        )
+        cross_ablation_trials_audit: list[dict[str, Any]] = []
+        if budgeted_cross_ablation_inputs:
+            os.environ["HOSTED_VLLM_API_KEY"] = _model_settings(GENERATION)[2]
+            cross_ablation_trials_audit = _execute_llm_stage(
+                "cross_ablation_trials",
+                "generation",
+                cross_ablation_generator,
+                budgeted_cross_ablation_inputs,
+            )
+        cross_ablation_trials_audit = materialize_terminal_failures(
+            budgeted_cross_ablation_inputs,
+            cross_ablation_trials_audit,
+            planned_id=lambda row: row["trial_id"],
+            record_id=lambda row: row.get("trial_id"),
+            stage="cross_ablation_trials",
+            base_fields=lambda row: {
+                "trial_id": row["trial_id"],
+                "record_id": row["record_id"],
+                "variant": row["variant"],
+            },
+        )
+        _write_audit(
+            files_dir / "cross_ablation_trials_audit.jsonl",
+            cross_ablation_trials_audit,
+        )
+        valid_cross_ablation_trials = [
+            row for row in cross_ablation_trials_audit if row.get("deterministic_checks", {}).get("passed", False)
+        ]
+        cross_ablation_adjudications = adjudicate_cross_ablation_trials(
+            pre_ablation_cross_accepted,
+            valid_cross_ablation_trials,
+        )
+        _write_audit(
+            files_dir / "cross_ablation_adjudications.jsonl",
+            cross_ablation_adjudications,
+        )
+        cross_ablation_judge_inputs = build_cross_ablation_judge_inputs(
+            pre_ablation_cross_accepted,
+            valid_cross_ablation_trials,
+            cross_ablation_adjudications,
+        )
+        cross_ablation_judged: list[dict[str, Any]] = []
+        if cross_ablation_judge_inputs and not args.skip_judge:
+            os.environ["HOSTED_VLLM_API_KEY"] = _model_settings(JUDGE)[2]
+            cross_ablation_judged = _execute_llm_stage(
+                "cross_ablation_judge",
+                "judge",
+                CrossSourceAblationJudge(**_llm_kwargs(JUDGE)),
+                cross_ablation_judge_inputs,
+            )
+        cross_ablation_judged = materialize_terminal_failures(
+            cross_ablation_judge_inputs,
+            cross_ablation_judged,
+            planned_id=lambda row: row["record_id"],
+            record_id=lambda row: row.get("record_id"),
+            stage="cross_ablation_judge",
+            base_fields=lambda row: {
+                **row,
+                "judge": {
+                    "accepted": False,
+                    "issues": ["model_failure_after_retries"],
+                },
+            },
+        )
+        _write_audit(
+            files_dir / "cross_ablation_judged.jsonl",
+            cross_ablation_judged,
+        )
+        _cross_ablation_kept, cross_ablation_rejected = apply_cross_ablation_gate(
+            pre_ablation_cross_accepted,
+            cross_ablation_adjudications,
+            cross_ablation_judged,
+        )
+        _write_audit(
+            files_dir / "cross_ablation_rejected.jsonl",
+            cross_ablation_rejected,
+        )
+        cross_ablation_dropped_ids = {row["record_id"] for row in cross_ablation_rejected}
+        if cross_ablation_dropped_ids:
+            accepted = [row for row in accepted if row["record_id"] not in cross_ablation_dropped_ids]
+        cross_accepted = [row for row in cross_accepted if row["record_id"] not in cross_ablation_dropped_ids]
+        cross_ablation_stats.update(
+            {
+                "candidates_evaluated": len(pre_ablation_cross_accepted),
+                "trials_planned": len(cross_ablation_trial_inputs),
+                "trials_prompt_rejected": len(cross_ablation_prompt_rejected),
+                "trials_valid": len(valid_cross_ablation_trials),
+                "deterministic_adjudication_passed": sum(1 for row in cross_ablation_adjudications if row["passed"]),
+                "independent_judge_accepted": sum(1 for row in cross_ablation_judged if row.get("judge", {}).get("accepted", False)),
+                "accepted": len(cross_accepted),
+                "rejected": len(cross_ablation_rejected),
+            }
+        )
+
     _write_audit(
         files_dir / "instruction_coverage_matrix.jsonl",
         [
@@ -3754,6 +3905,7 @@ def main(argv: list[str] | None = None) -> None:
         source_window_stats=source_window_stats,
         path_qa_stats=path_qa_stats,
         temporal_stats=temporal_stats,
+        cross_ablation_stats=cross_ablation_stats,
         semantic_diversity_stats=semantic_stats,
         unanswerable_stats=unanswerable_stats,
         evaluation_stats={

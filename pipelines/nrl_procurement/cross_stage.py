@@ -510,6 +510,55 @@ def build_cross_ablation_judge_inputs(
     return inputs
 
 
+def apply_cross_ablation_gate(
+    candidates: list[dict[str, Any]],
+    adjudications: list[dict[str, Any]],
+    judged: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Keep a candidate only if its empirical trials *and* independent judge both pass.
+
+    This is the real T14e acceptance gate applied once
+    ``CrossSourceAblationAnswerGenerator``/``adjudicate_cross_ablation_trials``/
+    ``CrossSourceAblationJudge`` have produced actual trial outputs for a candidate —
+    it never trusts the single imagined ``CrossDocumentJudge`` ablation
+    (``unsupported_without_source_ids``) on its own, and it can only remove
+    candidates that imagined judgment would have kept, never let through one it
+    rejected (that decision is left completely untouched upstream). A candidate is
+    kept only when the deterministic adjudication passed *and* the independent
+    judge accepted the actual trial outputs; any other outcome (including a
+    missing adjudication or judge response, e.g. after retries were exhausted) is
+    a rejection with the concrete issue(s) attached for audit.
+    """
+    adjudications_by_id = {str(row["record_id"]): row for row in adjudications}
+    judged_by_id = {str(row["record_id"]): row for row in judged}
+    kept: list[dict[str, Any]] = []
+    rejected: list[dict[str, Any]] = []
+    for candidate in candidates:
+        record_id = str(candidate["record_id"])
+        adjudication = adjudications_by_id.get(record_id)
+        judgment = judged_by_id.get(record_id)
+        issues: list[str] = []
+        if adjudication is None:
+            issues.append("missing_ablation_adjudication")
+        elif not adjudication.get("passed", False):
+            issues.extend(adjudication.get("issues", []) or ["ablation_adjudication_failed"])
+        if judgment is None:
+            issues.append("missing_ablation_judge_response")
+        elif not judgment.get("judge", {}).get("accepted", False):
+            issues.append("ablation_judge_rejected")
+        empirical_ablation = {
+            "passed": not issues,
+            "issues": sorted(set(issues)),
+            "deterministic_adjudication": adjudication,
+            "independent_judge": judgment.get("judge") if judgment else None,
+        }
+        if issues:
+            rejected.append({**candidate, "empirical_ablation": empirical_ablation})
+        else:
+            kept.append({**candidate, "empirical_ablation": empirical_ablation})
+    return kept, rejected
+
+
 class CrossSourceAblationJudge(curator.LLM):
     """Independently judge actual three-context cross-document outputs.
 

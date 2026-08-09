@@ -32,6 +32,7 @@ from cross_stage import (  # noqa: E402
     CrossSourceAblationJudge,
     SingularCrossDocumentJudge,
     adjudicate_cross_ablation_trials,
+    apply_cross_ablation_gate,
     build_cross_ablation_judge_inputs,
     build_cross_ablation_trial_inputs,
     cross_ablation_trial_validation_issues,
@@ -473,6 +474,113 @@ def test_real_cross_ablation_adjudication_requires_full_claim_coverage() -> None
     result = adjudicate_cross_ablation_trials([candidate], same_source_leak)[0]
     assert result["passed"] is False
     assert "source_a_only_fully_covers_answer" in result["issues"]
+
+
+def test_cross_ablation_gate_rejects_a_same_source_leak_the_imagined_judge_would_pass() -> None:
+    # T14e regression: before this empirical gate existed, CrossDocumentJudge's
+    # single imagined ablation judgment (unsupported_without_source_ids) was the
+    # only signal deciding whether a cross-document candidate needed both
+    # sources. A same-source leak -- where source_a alone can trivially answer
+    # the question even though the imagined judge reported both sources
+    # necessary -- went undetected and would have been exported. It must now be
+    # caught by the real 3-trial empirical gate.
+    candidate = {
+        "record_id": "record-leak",
+        "answerable": True,
+        "claims": [
+            {"evidence": [{"source_id": "source_a"}]},
+            {"evidence": [{"source_id": "source_b"}]},
+        ],
+        # The old imagined ablation judgment: both sources reported necessary --
+        # exactly what the pre-T14e gate alone would have accepted.
+        "judge": {
+            "unsupported_without_source_ids": ["source_a", "source_b"],
+            "source_ablation_passed": True,
+            "accepted": True,
+        },
+    }
+    assert set(candidate["judge"]["unsupported_without_source_ids"]) == {"source_a", "source_b"}
+    assert candidate["judge"]["source_ablation_passed"] is True
+
+    def trial(variant: str, answerable: bool, source_ids: list[str]) -> dict:
+        return {
+            "record_id": "record-leak",
+            "variant": variant,
+            "trial_output": {
+                "answerable": answerable,
+                "claims": ([{"evidence": [{"source_id": source_id} for source_id in source_ids]}] if source_ids else []),
+            },
+            "deterministic_checks": {"passed": True},
+        }
+
+    # The actual source_a_only trial fully reproduces the answer using both
+    # claims' evidence -- a same-source leak the imagined judge never tested.
+    leaking_trials = [
+        trial("full", True, ["source_a", "source_b"]),
+        trial("source_a_only", True, ["source_a", "source_b"]),
+        trial("source_b_only", False, []),
+    ]
+    adjudications = adjudicate_cross_ablation_trials([candidate], leaking_trials)
+    assert adjudications[0]["passed"] is False
+    assert "source_a_only_fully_covers_answer" in adjudications[0]["issues"]
+
+    # Even though an independent judge reviewing only the actual trial bundle
+    # accepted it, the failed deterministic adjudication alone must still
+    # reject the candidate -- the gate requires both to pass.
+    judged = [{"record_id": "record-leak", "judge": {"accepted": True, "score": 5}}]
+    kept, rejected = apply_cross_ablation_gate([candidate], adjudications, judged)
+    assert kept == []
+    assert len(rejected) == 1
+    assert rejected[0]["record_id"] == "record-leak"
+    assert rejected[0]["empirical_ablation"]["passed"] is False
+    assert "source_a_only_fully_covers_answer" in rejected[0]["empirical_ablation"]["issues"]
+
+
+def test_cross_ablation_gate_keeps_a_genuinely_two_source_dependent_candidate() -> None:
+    candidate = {
+        "record_id": "record-valid",
+        "answerable": True,
+        "claims": [
+            {"evidence": [{"source_id": "source_a"}]},
+            {"evidence": [{"source_id": "source_b"}]},
+        ],
+    }
+
+    def trial(variant: str, answerable: bool, source_ids: list[str]) -> dict:
+        return {
+            "record_id": "record-valid",
+            "variant": variant,
+            "trial_output": {
+                "answerable": answerable,
+                "claims": ([{"evidence": [{"source_id": source_id} for source_id in source_ids]}] if source_ids else []),
+            },
+            "deterministic_checks": {"passed": True},
+        }
+
+    valid_trials = [
+        trial("full", True, ["source_a", "source_b"]),
+        trial("source_a_only", False, []),
+        trial("source_b_only", False, []),
+    ]
+    adjudications = adjudicate_cross_ablation_trials([candidate], valid_trials)
+    assert adjudications[0]["passed"] is True
+    judged = [{"record_id": "record-valid", "judge": {"accepted": True, "score": 5}}]
+    kept, rejected = apply_cross_ablation_gate([candidate], adjudications, judged)
+    assert rejected == []
+    assert len(kept) == 1
+    assert kept[0]["record_id"] == "record-valid"
+    assert kept[0]["empirical_ablation"]["passed"] is True
+
+
+def test_cross_ablation_gate_rejects_missing_judge_response() -> None:
+    # A candidate whose deterministic adjudication passed but never received an
+    # independent judge response (e.g. exhausted retries) must still be
+    # rejected, not silently accepted on deterministic evidence alone.
+    candidate = {"record_id": "record-missing", "answerable": True, "claims": []}
+    adjudications = [{"record_id": "record-missing", "passed": True, "issues": []}]
+    kept, rejected = apply_cross_ablation_gate([candidate], adjudications, [])
+    assert kept == []
+    assert rejected[0]["empirical_ablation"]["issues"] == ["missing_ablation_judge_response"]
 
 
 def test_cross_ablation_judge_reviews_only_complete_actual_trial_bundles() -> None:

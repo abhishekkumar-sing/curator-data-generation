@@ -39,6 +39,7 @@ def test_all_help_lists_every_stage_skip_flag(capsys) -> None:
     assert raised.value.code == 0
     output = capsys.readouterr().out
     assert "--skip-cross-document" in output
+    assert "--skip-cross-ablation" in output
     assert "--skip-drafting" in output
     assert "--skip-propositions" in output
     assert "--skip-temporal" in output
