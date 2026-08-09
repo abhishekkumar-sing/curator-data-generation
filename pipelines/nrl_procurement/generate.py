@@ -3520,7 +3520,12 @@ def main(argv: list[str] | None = None) -> None:
         "independent_judge_accepted": 0,
         "accepted": len(cross_accepted),
         "rejected": 0,
+        "missing_judge_responses": 0,
     }
+    # Default so the completeness computation below can reference this
+    # unconditionally, mirroring `judged`/`accepted`'s own pre-initialization
+    # pattern elsewhere in this file.
+    missing_cross_ablation_judge_responses = 0
     if run_empirical_cross_ablation:
         pre_ablation_cross_accepted = cross_accepted
         cross_ablation_generator = CrossSourceAblationAnswerGenerator(**_llm_kwargs(GENERATION))
@@ -3616,6 +3621,17 @@ def main(argv: list[str] | None = None) -> None:
         if cross_ablation_dropped_ids:
             accepted = [row for row in accepted if row["record_id"] not in cross_ablation_dropped_ids]
         cross_accepted = [row for row in cross_accepted if row["record_id"] not in cross_ablation_dropped_ids]
+        # `apply_cross_ablation_gate` fails closed on a missing judge response
+        # (correctly -- no unsafe candidate is exported), but that safety
+        # property was previously invisible to `terminal_request_completeness`
+        # below, which only ever looked at qa_rejected/cross_rejected's
+        # ordinary judge and temporal's judge. A run could report
+        # `terminal_request_completeness.complete: true` while genuinely
+        # missing every cross-ablation judge response -- confirmed live.
+        missing_cross_ablation_judge_responses = sum(
+            "missing_ablation_judge_response" in row.get("empirical_ablation", {}).get("issues", [])
+            for row in cross_ablation_rejected
+        )
         cross_ablation_stats.update(
             {
                 "candidates_evaluated": len(pre_ablation_cross_accepted),
@@ -3626,6 +3642,7 @@ def main(argv: list[str] | None = None) -> None:
                 "independent_judge_accepted": sum(1 for row in cross_ablation_judged if row.get("judge", {}).get("accepted", False)),
                 "accepted": len(cross_accepted),
                 "rejected": len(cross_ablation_rejected),
+                "missing_judge_responses": missing_cross_ablation_judge_responses,
             }
         )
 
@@ -3876,6 +3893,7 @@ def main(argv: list[str] | None = None) -> None:
         if not required_missing
         and not incomplete_requests
         and missing_temporal_judge_responses == 0
+        and missing_cross_ablation_judge_responses == 0
         and portfolio_quality_complete
         and stage_quality_evidence_complete
         and (not cross_policy.enabled or args.skip_cross_document or cross_saturation.state["converged"])
@@ -3939,10 +3957,16 @@ def main(argv: list[str] | None = None) -> None:
     final_manifest["missing_required_task_types"] = required_missing
     final_manifest["stage_quality_evidence"] = stage_quality_evidence
     final_manifest["terminal_request_completeness"] = {
-        "complete": (not incomplete_requests and missing_judge_responses == 0 and missing_temporal_judge_responses == 0),
+        "complete": (
+            not incomplete_requests
+            and missing_judge_responses == 0
+            and missing_temporal_judge_responses == 0
+            and missing_cross_ablation_judge_responses == 0
+        ),
         "missing_generation_request_ids": incomplete_requests,
         "missing_judge_responses": missing_judge_responses,
         "missing_temporal_judge_responses": missing_temporal_judge_responses,
+        "missing_cross_ablation_judge_responses": missing_cross_ablation_judge_responses,
     }
     final_manifest["quality_acceptance"] = {
         "accepted_records": len(accepted),
@@ -3963,7 +3987,7 @@ def main(argv: list[str] | None = None) -> None:
         "portfolio_quality_complete": portfolio_quality_complete,
         "stage_quality_evidence_complete": stage_quality_evidence_complete,
     }
-    if missing_judge_responses or missing_temporal_judge_responses:
+    if missing_judge_responses or missing_temporal_judge_responses or missing_cross_ablation_judge_responses:
         final_manifest["status"] = "partial"
     final_manifest["release_ready"] = _release_ready(
         final_manifest["status"], final_manifest["human_review"]
