@@ -2804,6 +2804,46 @@ def test_late_introduction_is_policy_not_front_matter() -> None:
     assert _content_class(row) == "policy"
 
 
+def test_short_manual_is_not_treated_as_all_front_matter() -> None:
+    # A one-page Office Memorandum whose entire loaded content fits inside
+    # the position-based front-matter window (start_page..start_page+7) has
+    # no front matter to skip -- unlike a 260+ page manual, applying the
+    # position rule here would zero out the whole manual.
+    row = {
+        "generation_passage": "It has been decided to partially amend para 5.6.8 as under.",
+        "section": None,
+        "page": 1,
+        "start_page": 1,
+        "manual_page_count": 1,
+    }
+    assert _content_class(row) == "policy"
+
+
+def test_position_rule_still_applies_when_manual_extends_past_the_window() -> None:
+    # A manual long enough that page 1 really is inside real front matter
+    # (e.g. a cover page) keeps the existing behavior.
+    row = {
+        "generation_passage": "MANUAL FOR PROCUREMENT OF GOODS 2017",
+        "section": None,
+        "page": 1,
+        "start_page": 1,
+        "manual_page_count": 262,
+    }
+    assert _content_class(row) == "front_matter"
+
+
+def test_position_rule_applies_when_manual_page_count_is_unknown() -> None:
+    # Callers that don't supply manual_page_count (e.g. ad hoc row
+    # construction) keep the pre-fix position-only behavior.
+    row = {
+        "generation_passage": "Some early-page text.",
+        "section": None,
+        "page": 2,
+        "start_page": 1,
+    }
+    assert _content_class(row) == "front_matter"
+
+
 def test_short_exact_evidence_is_schema_valid() -> None:
     draft = QABlueprintDraft(
         task="general_reference",

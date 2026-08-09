@@ -17,7 +17,10 @@ from corpus import (  # noqa: E402
     image_artifact_count,
     load_corpus,
     selection_coverage_report,
+    source_quality_issues,
 )
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _sha(path: Path) -> str:
@@ -104,6 +107,28 @@ def test_image_caption_line_is_removed_and_counted() -> None:
     cleaned = generation_text(passage)
     assert "generated caption" not in cleaned
     assert cleaned == "Policy before.\n\nPolicy after."
+
+
+def test_registered_corpus_gives_every_manual_at_least_one_eligible_chunk() -> None:
+    """Regression test for the front-matter heuristic zeroing out short manuals.
+
+    Every manual registered in data/source/manuals.yaml must contribute at
+    least one chunk with no source_quality_issues, otherwise it can never
+    produce a single-document QA/drafting record.
+    """
+    source_dir = REPO_ROOT / "data" / "source"
+    ocr_dir = REPO_ROOT / "data" / "interim" / "ocr"
+    rows, manuals = load_corpus(source_dir, ocr_dir)
+    eligible_manual_ids = {
+        row["manual_id"] for row in rows if not source_quality_issues(row)
+    }
+    registered_manual_ids = {manual["manual_id"] for manual in manuals}
+    missing = sorted(registered_manual_ids - eligible_manual_ids)
+    assert not missing, (
+        "Manuals with zero eligible (answer-bearing) chunks: "
+        f"{missing} -- every registered manual must contribute at least one "
+        "chunk that source_quality_issues does not reject."
+    )
 
 
 def test_selection_coverage_reports_strata() -> None:
