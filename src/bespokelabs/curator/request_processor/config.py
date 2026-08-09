@@ -101,6 +101,9 @@ class OnlineRequestProcessorConfig(RequestProcessorConfig):
         max_output_tokens_per_minute: Maximum number of output tokens allowed per minute
         max_concurrent_requests: Maximum number of concurrent requests
         seconds_to_pause_on_rate_limit: Duration to pause when rate limit is hit
+        submission_jitter_seconds: Upper bound (seconds) of a random delay applied
+            before dispatching each request, so concurrently-started requests don't
+            share a near-identical timeout deadline. 0 (default) disables jitter.
     """
 
     max_requests_per_minute: int | None = Field(default=None, gt=0)
@@ -109,6 +112,7 @@ class OnlineRequestProcessorConfig(RequestProcessorConfig):
     max_input_tokens_per_minute: int | None = Field(default=None, gt=0)
     max_output_tokens_per_minute: int | None = Field(default=None, gt=0)
     seconds_to_pause_on_rate_limit: int = Field(default=10, gt=0)
+    submission_jitter_seconds: float = Field(default=0.0, ge=0)
     structured_output_mode: t.Literal[
         "auto", "tools", "tools_auto", "json_schema", "json", "md_json"
     ] = "auto"
