@@ -150,6 +150,33 @@ def answer_length_statistics(records: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def batch_efficiency_stats(
+    generated_records: int,
+    accepted_records: int,
+    removed_by_reason: dict[str, int],
+) -> dict[str, Any]:
+    """Report how much of one generated batch survives to the accepted export.
+
+    `generated_records` should count every parsed generation candidate before
+    judging, deduplication, or diversity-cap removal; `accepted_records` is
+    the final exported pool. The gap between the two is already tracked
+    elsewhere in the manifest under several separately-named removal counts
+    (near-duplicates, opener/type/style/extractive overrepresentation); this
+    reports the generation-to-acceptance ratio and an overall removal rate so
+    a reader doesn't have to manually diff several scattered manifest fields
+    to see where generated candidates went.
+    """
+    total_removed = sum(removed_by_reason.values())
+    return {
+        "generated_records": generated_records,
+        "accepted_records": accepted_records,
+        "generation_to_acceptance_ratio": (round(accepted_records / generated_records, 4) if generated_records else 0.0),
+        "removed_by_reason": dict(sorted(removed_by_reason.items())),
+        "total_removed": total_removed,
+        "removal_rate": (round(total_removed / generated_records, 4) if generated_records else 0.0),
+    }
+
+
 def assert_unique_record_ids(
     rows: list[dict[str, Any]],
     *,

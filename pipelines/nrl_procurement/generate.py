@@ -45,6 +45,7 @@ from export import (
     assert_unique_record_ids,
     assign_drafting_splits,
     assign_splits,
+    batch_efficiency_stats,
     export_records,
     question_opener_diversity,
     write_manifest,
@@ -3792,6 +3793,17 @@ def main(argv: list[str] | None = None) -> None:
         final_manifest["status"] = "partial"
     final_manifest["release_ready"] = _release_ready(
         final_manifest["status"], final_manifest["human_review"]
+    )
+    final_manifest["batch_efficiency"] = batch_efficiency_stats(
+        int(single_coverage["generated"].get("materialized_records", 0)) + int(cross_coverage["generated"].get("materialized_records", 0)),
+        int(stats.get("records", 0)),
+        {
+            "near_duplicates": int(final_manifest["near_duplicates_removed"]),
+            "question_opener_overrepresented": int(final_manifest["question_opener_overrepresented_removed"]),
+            "question_type_overrepresented": int(final_manifest["question_type_overrepresented_removed"]),
+            "question_style_overrepresented": int(final_manifest["question_style_overrepresented_removed"]),
+            "extractive_answer_overrepresented": int(final_manifest["extractive_answer_overrepresented_removed"]),
+        },
     )
     write_manifest(files_dir, final_manifest)
     _RESUME_MANAGER.finish(str(final_manifest["status"]))
