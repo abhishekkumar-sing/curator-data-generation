@@ -30,6 +30,8 @@ from cross_stage import (  # noqa: E402
     CrossDocumentJudge,
     CrossSourceAblationAnswerGenerator,
     SingularCrossDocumentJudge,
+    adjudicate_cross_ablation_trials,
+    build_cross_ablation_trial_inputs,
     cross_ablation_trial_validation_issues,
 )
 from drafting import (  # noqa: E402
@@ -393,6 +395,83 @@ def test_cross_ablation_answer_generator_renders_only_visible_source() -> None:
     )
     assert parsed[0]["deterministic_checks"]["passed"] is False
     assert "trial_uses_non_visible_source" in parsed[0]["deterministic_checks"]["issues"]
+
+
+def test_cross_ablation_trials_are_three_blind_source_variants() -> None:
+    source_a = _cross_source_document("source_a", "Source A exact evidence text.")
+    source_b = _cross_source_document("source_b", "Source B exact evidence text.")
+    candidate = {
+        "record_id": "record-1",
+        "question": "What follows from source A and source B together?",
+        "task_type": "cross_document_qa",
+        "required_source_ids": ["source_a", "source_b"],
+        "source_documents": [source_a, source_b],
+        "claims": [{"statement": "Canonical claim", "evidence": []}],
+    }
+    trials = build_cross_ablation_trial_inputs([candidate])
+    assert [trial["variant"] for trial in trials] == [
+        "full",
+        "source_a_only",
+        "source_b_only",
+    ]
+    assert [trial["visible_source_ids"] for trial in trials] == [
+        ["source_a", "source_b"],
+        ["source_a"],
+        ["source_b"],
+    ]
+    prompts = [CrossSourceAblationAnswerGenerator.prompt(SimpleNamespace(), trial) for trial in trials]
+    assert all("Canonical claim" not in prompt for prompt in prompts)
+    assert all("source_a_only" not in prompt and "source_b_only" not in prompt for prompt in prompts)
+
+
+def test_build_cross_ablation_trial_inputs_skips_candidates_missing_a_required_source() -> None:
+    source_a = _cross_source_document("source_a", "Source A exact evidence text.")
+    single_source_candidate = {
+        "record_id": "record-single",
+        "question": "What follows from source A alone?",
+        "task_type": "cross_document_qa",
+        "required_source_ids": ["source_a", "source_b"],
+        "source_documents": [source_a],
+        "claims": [],
+    }
+    assert build_cross_ablation_trial_inputs([single_source_candidate]) == []
+
+
+def test_real_cross_ablation_adjudication_requires_full_claim_coverage() -> None:
+    candidate = {
+        "record_id": "record-1",
+        "claims": [
+            {"evidence": [{"source_id": "source_a"}]},
+            {"evidence": [{"source_id": "source_b"}]},
+        ],
+    }
+
+    def trial(variant: str, answerable: bool, source_ids: list[str]) -> dict:
+        return {
+            "record_id": "record-1",
+            "variant": variant,
+            "trial_output": {
+                "answerable": answerable,
+                "claims": ([{"evidence": [{"source_id": source_id} for source_id in source_ids]}] if source_ids else []),
+            },
+            "deterministic_checks": {"passed": True},
+        }
+
+    valid = [
+        trial("full", True, ["source_a", "source_b"]),
+        trial("source_a_only", False, []),
+        trial("source_b_only", True, ["source_b"]),
+    ]
+    assert adjudicate_cross_ablation_trials([candidate], valid)[0]["passed"] is True
+
+    same_source_leak = [*valid]
+    # source_a_only wrongly reproduces the full answer, including a claim that
+    # actually requires source_b (the "trivially answerable from source_a
+    # alone" same-source leak this stage exists to catch).
+    same_source_leak[1] = trial("source_a_only", True, ["source_a", "source_b"])
+    result = adjudicate_cross_ablation_trials([candidate], same_source_leak)[0]
+    assert result["passed"] is False
+    assert "source_a_only_fully_covers_answer" in result["issues"]
 
 
 def test_ablation_trial_validation_rejects_withheld_or_inexact_evidence() -> None:
