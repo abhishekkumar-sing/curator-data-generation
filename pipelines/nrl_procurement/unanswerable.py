@@ -107,6 +107,42 @@ def build_unanswerable_inputs(
     return inputs
 
 
+def unanswerable_fraction_gate(
+    total_records: int,
+    unanswerable_count: int,
+    target_fraction: float,
+    *,
+    relative_tolerance: float = 0.20,
+) -> dict[str, Any]:
+    """Flag when the achieved unanswerable share deviates materially from target.
+
+    `build_unanswerable_inputs` can silently return fewer candidates than its
+    own target (or none at all) when too few seeds have an eligible
+    same-type, non-overlapping distractor. Nothing previously compared the
+    achieved share of the final exported pool back to the configured
+    `quality.unanswerable_fraction`, so that shortfall was invisible. A
+    `target_fraction <= 0` means no target was configured, so it trivially
+    passes rather than dividing by zero.
+    """
+    achieved_fraction = (unanswerable_count / total_records) if total_records else 0.0
+    if target_fraction <= 0:
+        return {
+            "target_fraction": target_fraction,
+            "achieved_fraction": round(achieved_fraction, 4),
+            "relative_tolerance": relative_tolerance,
+            "relative_deviation": None,
+            "within_tolerance": True,
+        }
+    relative_deviation = abs(achieved_fraction - target_fraction) / target_fraction
+    return {
+        "target_fraction": target_fraction,
+        "achieved_fraction": round(achieved_fraction, 4),
+        "relative_tolerance": relative_tolerance,
+        "relative_deviation": round(relative_deviation, 4),
+        "within_tolerance": relative_deviation <= relative_tolerance,
+    }
+
+
 class AdversarialUnanswerableGenerator(curator.LLM):
     """Generate a plausible missing-premise question, never its answer label."""
 

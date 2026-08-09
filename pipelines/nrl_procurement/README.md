@@ -342,7 +342,10 @@ That `files/` directory contains:
   deterministic rejections and explicit empty results
 - `propositions_rejected.jsonl`: proposition records that failed exact grounding
 - `source_windows.jsonl`: bounded section/adjacency windows retaining every
-  constituent chunk, page, and source hash
+  constituent chunk, page, and source hash. Currently audit-only: computed and
+  reported in the manifest (`source_windows.consumed_by: []`), but no
+  generation stage reads these windows as an input yet -- every stage still
+  builds its inputs from single-chunk rows
 - `source_windows_rejected.jsonl`: source chunks that cannot fit the configured
   conservative prompt budget
 - `reasoning_paths.jsonl`: accepted pre-question, two-source reasoning DAGs

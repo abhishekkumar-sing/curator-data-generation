@@ -41,7 +41,15 @@ from drafting import (
     read_drafting_seeds,
     write_jsonl,
 )
-from export import assert_unique_record_ids, assign_splits, export_records, write_manifest
+from export import (
+    assert_unique_record_ids,
+    assign_drafting_splits,
+    assign_splits,
+    batch_efficiency_stats,
+    export_records,
+    question_opener_diversity,
+    write_manifest,
+)
 from evaluation import (
     frozen_overlap_issues,
     load_frozen_evaluation,
@@ -49,6 +57,7 @@ from evaluation import (
 )
 from jsonl_io import write_jsonl_rows
 from judge_calibration import load_judge_calibration
+from provenance import leakage_audit
 from propositions import (
     PropositionExtractor,
     proposition_cache_fingerprint,
@@ -57,6 +66,7 @@ from propositions import (
 )
 from reasoning_paths import build_reasoning_paths
 from retrieval_contexts import build_retrieval_contexts
+from review import validate_reviews
 from saturation import SaturationController, saturation_policy
 from semantic_diversity import run_semantic_diversity
 from temporal import (
@@ -75,6 +85,7 @@ from unanswerable import (
     AdversarialUnanswerableGenerator,
     IndependentAnswerabilityJudge,
     build_unanswerable_inputs,
+    unanswerable_fraction_gate,
 )
 from path_qa import (
     SourceAblationAnswerGenerator,
@@ -411,6 +422,11 @@ def _llm_kwargs(profile: dict[str, Any]) -> dict[str, Any]:
                 "dereference_tool_schema",
                 False,
             ),
+            # Break the synchronized-timeout-wave failure mode (T20): with no
+            # jitter, a batch dispatched at high concurrency shares one
+            # request_timeout deadline, so a slow server window fails many
+            # requests in the same ~1-second window instead of a smoothed tail.
+            "submission_jitter_seconds": profile.get("submission_jitter_seconds", 0.0),
         },
     }
 
@@ -1590,6 +1606,17 @@ def _output_rescue_profile(
             int(profile["max_concurrent_requests"]),
             int(rescue_concurrency),
         )
+    # The rescue completion budget is raised above the ordinary ceiling, but a
+    # generation that legitimately needs the larger budget also needs more
+    # wall-clock time to produce it. Without this, a genuinely-slow-but-valid
+    # rescue completion is killed by the same timeout that was already too
+    # short for it once, and the row is permanently dropped instead of rescued.
+    rescue_timeout = profile.get("output_rescue_request_timeout")
+    if rescue_timeout is not None:
+        rescue_profile["request_timeout"] = max(
+            int(profile["request_timeout"]),
+            int(rescue_timeout),
+        )
     return rescue_profile
 
 
@@ -1792,6 +1819,20 @@ def _batch_integrity_rejections(rows: list[dict[str, Any]]) -> int:
     return sum(row.get("judge", {}).get("batch_integrity_passed") is False for row in rows)
 
 
+def _release_ready(status: str, human_review: dict[str, Any]) -> bool:
+    """A run is release-ready only with both code-quality gates and a real human review.
+
+    `status` alone reports pipeline/code-quality completeness (zero missing
+    requests, portfolio diversity thresholds, stage minimums, and so on) and
+    is never sufficient by itself for release: it says nothing about whether
+    any human ever reviewed the output. This flag is the separate, additive
+    gate that also requires `human_review.complete` (populated from a real,
+    hash-verified `review.py` file, never fabricated) before a run can be
+    considered ready to release.
+    """
+    return bool(status == "complete" and human_review.get("complete", False))
+
+
 def _final_manifest(
     *,
     run_id: str,
@@ -1805,6 +1846,8 @@ def _final_manifest(
     drafting_stats: dict[str, Any],
     duplicates: int,
     opener_overrepresented: int = 0,
+    single_generated_pre_cap_count: int = 0,
+    question_opener_diversity_pre_cap: dict[str, Any] | None = None,
     question_type_overrepresented: int = 0,
     question_style_overrepresented: int = 0,
     extractive_overrepresented: int = 0,
@@ -1817,6 +1860,7 @@ def _final_manifest(
     semantic_diversity_stats: dict[str, Any] | None = None,
     unanswerable_stats: dict[str, Any] | None = None,
     evaluation_stats: dict[str, Any] | None = None,
+    human_review: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return {
         "run_id": run_id,
@@ -1848,6 +1892,11 @@ def _final_manifest(
         "judge_batch_integrity_rejections": judge_batch_integrity_rejections or {"single_document": 0, "cross_document": 0},
         "near_duplicates_removed": duplicates,
         "question_opener_overrepresented_removed": opener_overrepresented,
+        "question_opener_diversity_pre_cap": {
+            **(question_opener_diversity_pre_cap or {"unique_openers": 0, "top_opener": "", "top_opener_count": 0, "top_opener_share": 0.0}),
+            "pool_size": single_generated_pre_cap_count,
+            "cap_waste_ratio": (round(opener_overrepresented / single_generated_pre_cap_count, 4) if single_generated_pre_cap_count else 0.0),
+        },
         "question_type_overrepresented_removed": question_type_overrepresented,
         "question_style_overrepresented_removed": question_style_overrepresented,
         "extractive_answer_overrepresented_removed": extractive_overrepresented,
@@ -1858,8 +1907,10 @@ def _final_manifest(
             "started_at": _RUN_STARTED_AT,
             "elapsed_seconds": (round(time.monotonic() - _RUN_STARTED_MONOTONIC, 3) if _RUN_STARTED_MONOTONIC is not None else None),
         },
-        "human_review": {
+        "human_review": human_review
+        or {
             "required_accepted_records": 100,
+            "required_rejected_records": 25,
             "reviewed_accepted_records": 0,
             "reviewed_rejected_records": 0,
             "complete": False,
@@ -2106,6 +2157,10 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--skip-cross-document", action="store_true")
     parser.add_argument("--drafting-limit", type=int, help="Limit authored drafting seeds for a pilot")
     parser.add_argument("--skip-drafting", action="store_true")
+    parser.add_argument("--skip-propositions", action="store_true")
+    parser.add_argument("--skip-temporal", action="store_true")
+    parser.add_argument("--skip-path-qa", action="store_true")
+    parser.add_argument("--skip-reasoning-paths", action="store_true")
     parser.add_argument("--skip-judge", action="store_true", help="Development only")
     parser.add_argument(
         "--refresh-stage",
@@ -2117,6 +2172,15 @@ def main(argv: list[str] | None = None) -> None:
         "--max-passes",
         type=int,
         help=("Override the saturation pass limit; 0 removes the numeric cap " "and runs until per-parent convergence"),
+    )
+    parser.add_argument(
+        "--review-file",
+        type=Path,
+        help=(
+            "Optional path to a completed review.py output. When supplied, the "
+            "manifest's human_review block reflects real validate_reviews() "
+            "results instead of the honest zero-review placeholder."
+        ),
     )
     args = parser.parse_args(argv)
     dynamic_stage = re.compile(r"cross_(?:generation|judge)_pass_\d{3}")
@@ -2192,6 +2256,18 @@ def main(argv: list[str] | None = None) -> None:
         files_dir / "source_quality_rejected.jsonl",
         source_quality_rejected,
     )
+    # NOTE: build_source_windows() groups adjacent same-section chunks into
+    # bounded, multi-chunk windows with resolved cross-references. It is
+    # currently audit-only: the accepted/rejected windows below are persisted
+    # for inspection and reported in the manifest, but no generation stage
+    # (planned_single, propositions, path_qa, cross_document, drafting) reads
+    # `source_windows`/`rejected_source_windows` as an input. Every stage
+    # still builds its inputs from single-chunk `rows`/`all_rows`. The
+    # `source_windows.*` config keys consumed elsewhere in this file
+    # (`safety_margin_tokens`, `conservative_chars_per_token`, etc.) are a
+    # separate, actively used prompt-budgeting namespace and are unaffected by
+    # this. See TASKS.md's "Use bounded multi-chunk source windows" section
+    # for the (still open) intended integration.
     source_window_stats: dict[str, Any] = {"enabled": False}
     source_window_config = CONFIG.get("source_windows", {})
     if source_window_config.get("enabled", False):
@@ -2209,6 +2285,10 @@ def main(argv: list[str] | None = None) -> None:
             "accepted": len(source_windows),
             "rejected": len(rejected_source_windows),
             "schema_version": (source_windows[0]["schema_version"] if source_windows else None),
+            # No generation/proposition/path_qa/cross_document/drafting stage
+            # currently consumes these windows; they are computed and audited
+            # only. Do not read this manifest section as an active QC gate.
+            "consumed_by": [],
         }
     seed = str(SPLITS.get("seed", "nrl-procurement-v1"))
     rows = representative_rows(all_rows, args.limit, seed)
@@ -2219,7 +2299,7 @@ def main(argv: list[str] | None = None) -> None:
     )
     temporal_config = CONFIG.get("temporal", {})
     resolved_temporal = None
-    if temporal_config.get("enabled", False):
+    if temporal_config.get("enabled", False) and not args.skip_temporal:
         resolved_temporal = resolve_manifest_pairs(
             load_temporal_config(temporal_config),
             manuals,
@@ -2274,7 +2354,7 @@ def main(argv: list[str] | None = None) -> None:
     accepted_propositions: list[dict[str, Any]] = []
     accepted_paths: list[dict[str, Any]] = []
     proposition_config = CONFIG.get("propositions", {})
-    if proposition_config.get("enabled", False):
+    if proposition_config.get("enabled", False) and not args.skip_propositions:
         model_manifest = _non_secret_model_manifest(GENERATION)
         proposition_inputs = []
         for row in planned_single:
@@ -2331,7 +2411,7 @@ def main(argv: list[str] | None = None) -> None:
 
     reasoning_path_config = CONFIG.get("reasoning_paths", {})
     cross_config = CONFIG.get("cross_document", {})
-    if reasoning_path_config.get("enabled", False):
+    if reasoning_path_config.get("enabled", False) and not args.skip_reasoning_paths:
         accepted_paths, rejected_paths = build_reasoning_paths(
             accepted_propositions,
             cross_config,
@@ -2349,7 +2429,7 @@ def main(argv: list[str] | None = None) -> None:
             "schema_version": (accepted_paths[0]["schema_version"] if accepted_paths else None),
         }
 
-    if temporal_config.get("enabled", False):
+    if temporal_config.get("enabled", False) and not args.skip_temporal:
         assert resolved_temporal is not None
         temporal_candidates, _ = build_temporal_alignments(
             accepted_propositions,
@@ -2377,7 +2457,7 @@ def main(argv: list[str] | None = None) -> None:
         )
 
     path_qa_config = CONFIG.get("path_qa", {})
-    if path_qa_config.get("enabled", False) and accepted_paths:
+    if path_qa_config.get("enabled", False) and not args.skip_path_qa and accepted_paths:
         proposition_by_id = {row["proposition_id"]: row for row in accepted_propositions}
         path_question_inputs = [
             {
@@ -2832,6 +2912,12 @@ def main(argv: list[str] | None = None) -> None:
     single_generation_coverage = request_coverage(planned_single, generated_audit)
     deterministic_rejected = [row for row in generated_audit if not row.get("deterministic_checks", {}).get("passed", False)]
     generated = [row for row in generated_audit if row.get("deterministic_checks", {}).get("passed", False)]
+    # Captured before dedup and any portfolio cap runs, so the manifest can
+    # report how concentrated generation actually is before enforcement
+    # discards the overrepresented records — the post-cap pool is healthy by
+    # construction and cannot show this on its own (audit T9).
+    question_opener_diversity_pre_cap = question_opener_diversity(generated)
+    single_generated_pre_cap_count = len(generated)
     generated, duplicates = deduplicate(
         generated,
         float(QUALITY.get("dedupe_threshold", 94)),
@@ -2939,6 +3025,8 @@ def main(argv: list[str] | None = None) -> None:
                 drafting_stats={},
                 duplicates=duplicates,
                 opener_overrepresented=opener_overrepresented,
+                single_generated_pre_cap_count=single_generated_pre_cap_count,
+                question_opener_diversity_pre_cap=question_opener_diversity_pre_cap,
                 question_type_overrepresented=question_type_overrepresented,
                 question_style_overrepresented=question_style_overrepresented,
                 extractive_overrepresented=extractive_overrepresented,
@@ -3357,6 +3445,8 @@ def main(argv: list[str] | None = None) -> None:
                 drafting_stats={},
                 duplicates=duplicates + cross_duplicates,
                 opener_overrepresented=opener_overrepresented,
+                single_generated_pre_cap_count=single_generated_pre_cap_count,
+                question_opener_diversity_pre_cap=question_opener_diversity_pre_cap,
                 extractive_overrepresented=extractive_overrepresented,
                 proposition_stats=proposition_stats,
                 reasoning_path_stats=reasoning_path_stats,
@@ -3430,6 +3520,11 @@ def main(argv: list[str] | None = None) -> None:
         manual_folds=manual_folds,
     )
     stats = export_records(accepted, manuals, files_dir, run_id)
+    unanswerable_stats["achieved"] = unanswerable_fraction_gate(
+        int(stats.get("records", 0)),
+        int(stats.get("answerable_false", 0)),
+        float(QUALITY.get("unanswerable_fraction", 0.0)),
+    )
 
     drafting_accepted: list[dict[str, Any]] = []
     drafting_generated: list[dict[str, Any]] = []
@@ -3497,6 +3592,43 @@ def main(argv: list[str] | None = None) -> None:
                 key="id",
                 dataset_name="accepted drafting records",
             )
+            # Drafting records have no `claims`/`reasoning_steps`/`answer` fields, so
+            # the QA reasoning-graph gate (`build_reasoning_graph`) does not apply to
+            # them (T13c): running it would silently produce a trivial, always-passing
+            # graph with zero evidence references instead of a real check. Drafting's
+            # real content verification is `drafting_validation_issues()` +
+            # `drafting_citation_integrity_issues()` (deterministic, already applied
+            # above) plus `TenderDraftingJudge` (already applied above) — this block
+            # only adds the two gates that *do* apply: split assignment and leakage
+            # auditing (T13a/T13b), so drafting records get the same
+            # never-cross-the-eval-boundary guarantee QA/cross-document records get.
+            chunk_manuals = {
+                str(row["chunk_id"]): {
+                    "manual_id": str(row.get("manual_id", "")),
+                    "source_sha256": str(row.get("source_sha256", "")),
+                    "section": str(row.get("section") or ""),
+                }
+                for row in all_rows
+            }
+            assign_drafting_splits(
+                drafting_accepted,
+                manuals,
+                chunk_manuals,
+                train_fraction,
+                validation_fraction,
+                str(SPLITS.get("seed", "nrl-procurement-v1")),
+                manual_folds=manual_folds,
+            )
+            drafting_leakage = leakage_audit([*accepted, *drafting_accepted])
+            (files_dir / "drafting_leakage_audit.json").write_text(
+                json.dumps(drafting_leakage, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            if not drafting_leakage["passed"]:
+                raise SystemExit(
+                    "Cross-split leakage detected between drafting and QA records; "
+                    "see drafting_leakage_audit.json"
+                )
             write_jsonl(
                 files_dir / "drafting.jsonl",
                 [compact_drafting(row) for row in drafting_accepted],
@@ -3572,6 +3704,7 @@ def main(argv: list[str] | None = None) -> None:
     )
     extractive_share = float(stats.get("answer_style_diversity", {}).get("extractive_answer_share", 0.0))
     extractive_share_complete = extractive_share <= float(QUALITY.get("max_extractive_answer_share", 0.35))
+    unanswerable_fraction_complete = bool(unanswerable_stats["achieved"]["within_tolerance"])
     portfolio_quality_complete = (
         qa_cot_share_complete
         and opener_share_complete
@@ -3579,6 +3712,7 @@ def main(argv: list[str] | None = None) -> None:
         and question_type_coverage_complete
         and question_style_share_complete
         and extractive_share_complete
+        and unanswerable_fraction_complete
     )
     status = (
         "complete"
@@ -3590,6 +3724,19 @@ def main(argv: list[str] | None = None) -> None:
         and (not cross_policy.enabled or args.skip_cross_document or cross_saturation.state["converged"])
         else "partial"
     )
+    human_review_summary: dict[str, Any] | None = None
+    if args.review_file is not None:
+        review_validation = validate_reviews(args.review_file)
+        human_review_summary = {
+            "review_file": str(args.review_file),
+            "required_accepted_records": review_validation["minimum_accepted_required"],
+            "required_rejected_records": review_validation["minimum_rejected_required"],
+            "reviewed_accepted_records": review_validation["reviewed_accepted"],
+            "reviewed_rejected_records": review_validation["reviewed_rejected"],
+            "complete": review_validation["passed"],
+            "issues": review_validation["issues"],
+            "note": "Human labels are external release evidence and are never inferred.",
+        }
     final_manifest = _final_manifest(
         run_id=run_id,
         status=status,
@@ -3602,6 +3749,8 @@ def main(argv: list[str] | None = None) -> None:
         drafting_stats=drafting_stats,
         duplicates=duplicates + cross_duplicates,
         opener_overrepresented=opener_overrepresented,
+        single_generated_pre_cap_count=single_generated_pre_cap_count,
+        question_opener_diversity_pre_cap=question_opener_diversity_pre_cap,
         question_type_overrepresented=question_type_overrepresented,
         question_style_overrepresented=question_style_overrepresented,
         extractive_overrepresented=extractive_overrepresented,
@@ -3623,6 +3772,7 @@ def main(argv: list[str] | None = None) -> None:
             "single_document": _batch_integrity_rejections(judged),
             "cross_document": _batch_integrity_rejections(cross_judged),
         },
+        human_review=human_review_summary,
     )
     final_manifest["required_task_type_counts"] = task_counts
     final_manifest["saturation"] = {
@@ -3649,11 +3799,28 @@ def main(argv: list[str] | None = None) -> None:
         "question_type_coverage_complete": question_type_coverage_complete,
         "question_style_share_complete": question_style_share_complete,
         "extractive_answer_share_complete": extractive_share_complete,
+        "unanswerable_fraction": unanswerable_stats["achieved"]["achieved_fraction"],
+        "minimum_unanswerable_fraction_target": unanswerable_stats["achieved"]["target_fraction"],
+        "unanswerable_fraction_complete": unanswerable_fraction_complete,
         "portfolio_quality_complete": portfolio_quality_complete,
         "stage_quality_evidence_complete": stage_quality_evidence_complete,
     }
     if missing_judge_responses or missing_temporal_judge_responses:
         final_manifest["status"] = "partial"
+    final_manifest["release_ready"] = _release_ready(
+        final_manifest["status"], final_manifest["human_review"]
+    )
+    final_manifest["batch_efficiency"] = batch_efficiency_stats(
+        int(single_coverage["generated"].get("materialized_records", 0)) + int(cross_coverage["generated"].get("materialized_records", 0)),
+        int(stats.get("records", 0)),
+        {
+            "near_duplicates": int(final_manifest["near_duplicates_removed"]),
+            "question_opener_overrepresented": int(final_manifest["question_opener_overrepresented_removed"]),
+            "question_type_overrepresented": int(final_manifest["question_type_overrepresented_removed"]),
+            "question_style_overrepresented": int(final_manifest["question_style_overrepresented_removed"]),
+            "extractive_answer_overrepresented": int(final_manifest["extractive_answer_overrepresented_removed"]),
+        },
+    )
     write_manifest(files_dir, final_manifest)
     _RESUME_MANAGER.finish(str(final_manifest["status"]))
     _RUN_ATTEMPT_TERMINAL = True

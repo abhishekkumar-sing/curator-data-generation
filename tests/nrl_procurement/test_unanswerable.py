@@ -14,6 +14,7 @@ from unanswerable import (  # noqa: E402
     IndependentAnswerabilityJudge,
     answer_type,
     build_unanswerable_inputs,
+    unanswerable_fraction_gate,
 )
 
 
@@ -85,6 +86,40 @@ def test_generator_materializes_abstention_with_lineage() -> None:
     assert result["claims"] == []
     assert result["deterministic_checks"]["passed"]
     assert result["unanswerable_construction"]["distractor"]["quote"]
+
+
+def test_unanswerable_fraction_gate_passes_within_tolerance() -> None:
+    gate = unanswerable_fraction_gate(100, 10, 0.10)
+    assert gate["achieved_fraction"] == 0.10
+    assert gate["within_tolerance"] is True
+
+
+def test_unanswerable_fraction_gate_flags_material_shortfall() -> None:
+    # 10% target with a ±20% relative tolerance requires an achieved fraction
+    # of at least 0.08; a corpus that produced no unanswerable records at all
+    # (the extreme case of "too few eligible distractors") must be flagged.
+    gate = unanswerable_fraction_gate(100, 0, 0.10)
+    assert gate["achieved_fraction"] == 0.0
+    assert gate["within_tolerance"] is False
+
+
+def test_unanswerable_fraction_gate_is_trivially_satisfied_when_no_target_configured() -> None:
+    gate = unanswerable_fraction_gate(100, 0, 0.0)
+    assert gate["within_tolerance"] is True
+
+
+def test_corpus_with_no_eligible_distractors_produces_a_shortfall_the_gate_catches() -> None:
+    # Every record here is the same manual/type, so every candidate's own
+    # source chunk overlaps every alternative's source chunk and no eligible
+    # distractor exists for any of them.
+    records = [
+        _record("one", "chunk-shared", "Rs 5 lakh", "The limit is Rs 5 lakh."),
+        _record("two", "chunk-shared", "Rs 10 lakh", "The limit is Rs 10 lakh."),
+    ]
+    inputs = build_unanswerable_inputs(records, 0.5, "seed")
+    assert inputs == []
+    gate = unanswerable_fraction_gate(len(records), len(inputs), 0.10)
+    assert gate["within_tolerance"] is False
 
 
 def test_independent_judge_fails_closed() -> None:

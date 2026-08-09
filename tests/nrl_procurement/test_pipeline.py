@@ -46,7 +46,9 @@ from export import (  # noqa: E402
     answer_length_statistics,
     answer_style_diversity,
     assert_unique_record_ids,
+    assign_drafting_splits,
     assign_splits,
+    batch_efficiency_stats,
     categorical_diversity,
     export_records,
     question_opener_diversity,
@@ -867,6 +869,45 @@ def test_model_context_window_is_explicit_and_profile_local() -> None:
             assert "positive context_window" in str(exc)
         else:
             raise AssertionError("missing or invalid model context must fail closed")
+
+
+def test_manifest_marks_source_windows_as_currently_unconsumed() -> None:
+    """Regression test for the dead source_windows stage (audit Track B, T6).
+
+    build_source_windows() computes bounded multi-chunk windows, but no
+    generation stage currently reads them -- the manifest must say so
+    explicitly rather than silently looking like an active QC gate.
+    """
+
+    def manifest(source_window_stats: dict | None) -> dict:
+        return generation_pipeline._final_manifest(
+            run_id="pilot-t6",
+            status="complete",
+            stats={},
+            manuals=[],
+            corpus_report={},
+            selected_rows=[],
+            single_coverage={},
+            cross_coverage={},
+            drafting_stats={"enabled": False},
+            duplicates=0,
+            source_window_stats=source_window_stats,
+        )
+
+    disabled = manifest(None)
+    assert disabled["source_windows"] == {"enabled": False}
+
+    enabled = manifest(
+        {
+            "enabled": True,
+            "accepted": 3,
+            "rejected": 1,
+            "schema_version": "1",
+            "consumed_by": [],
+        }
+    )
+    assert enabled["source_windows"]["enabled"] is True
+    assert enabled["source_windows"]["consumed_by"] == []
 
 
 def test_judge_prompt_budget_reserves_output_and_quarantines_overflow() -> None:
@@ -1957,6 +1998,76 @@ def test_question_opener_diversity_reports_top_share() -> None:
     }
 
 
+def test_batch_efficiency_stats_reports_ratio_and_removal_rate() -> None:
+    report = batch_efficiency_stats(
+        200,
+        150,
+        {"near_duplicates": 30, "question_opener_overrepresented": 20},
+    )
+    assert report["generated_records"] == 200
+    assert report["accepted_records"] == 150
+    assert report["generation_to_acceptance_ratio"] == 0.75
+    assert report["total_removed"] == 50
+    assert report["removal_rate"] == 0.25
+    assert report["removed_by_reason"] == {
+        "near_duplicates": 30,
+        "question_opener_overrepresented": 20,
+    }
+
+
+def test_batch_efficiency_stats_handles_zero_generated_records() -> None:
+    report = batch_efficiency_stats(0, 0, {})
+    assert report["generation_to_acceptance_ratio"] == 0.0
+    assert report["removal_rate"] == 0.0
+
+
+def _manifest_kwargs(**overrides) -> dict:
+    base = {
+        "run_id": "run-1",
+        "status": "complete",
+        "stats": {"records": 0},
+        "manuals": [],
+        "corpus_report": {},
+        "selected_rows": [],
+        "single_coverage": {},
+        "cross_coverage": {},
+        "drafting_stats": {},
+        "duplicates": 0,
+    }
+    base.update(overrides)
+    return base
+
+
+def test_manifest_reports_pre_cap_opener_concentration_and_waste_ratio() -> None:
+    """T9: the post-cap `question_opener_diversity` stat is healthy by
+    construction, so the manifest must separately show how concentrated the
+    raw generated pool was before the cap ran, and how much it discarded.
+    """
+    pre_cap_report = question_opener_diversity(
+        [{"question": "According to the manual, what applies?"} for _ in range(9)] + [{"question": "Who approves this exception?"}]
+    )
+    manifest = generation_pipeline._final_manifest(
+        **_manifest_kwargs(
+            opener_overrepresented=6,
+            single_generated_pre_cap_count=10,
+            question_opener_diversity_pre_cap=pre_cap_report,
+        )
+    )
+    reported = manifest["question_opener_diversity_pre_cap"]
+    assert reported["top_opener"] == "according to the manual"
+    assert reported["top_opener_share"] == 0.9
+    assert reported["pool_size"] == 10
+    assert reported["cap_waste_ratio"] == 0.6
+
+
+def test_manifest_pre_cap_opener_field_defaults_safely_when_unset() -> None:
+    manifest = generation_pipeline._final_manifest(**_manifest_kwargs())
+    reported = manifest["question_opener_diversity_pre_cap"]
+    assert reported["pool_size"] == 0
+    assert reported["cap_waste_ratio"] == 0.0
+    assert reported["unique_openers"] == 0
+
+
 def test_extractive_answer_diversity_caps_final_pool_share() -> None:
     copied = [
         {
@@ -2018,6 +2129,79 @@ def test_connected_split_targets_records_without_leaking_components() -> None:
     assert all(counts[split] > 0 for split in counts)
     assert counts["train"] >= counts["validation"]
     assert counts["train"] >= counts["test"]
+
+
+def test_assign_drafting_splits_matches_the_manual_fold_qa_records_use() -> None:
+    manuals = [{"manual_id": "m-train"}, {"manual_id": "m-test"}]
+    manual_folds = {"m-train": "train", "m-test": "test"}
+    chunk_manuals = {
+        "chunk-train-1": {"manual_id": "m-train", "source_sha256": "sha-train", "section": "s1"},
+        "chunk-test-1": {"manual_id": "m-test", "source_sha256": "sha-test", "section": "s2"},
+    }
+    drafting_records = [
+        {"id": "draft-train", "instruction": "Draft A", "manual_chunk_ids": ["chunk-train-1"]},
+        {"id": "draft-test", "instruction": "Draft B", "manual_chunk_ids": ["chunk-test-1"]},
+    ]
+    assign_drafting_splits(
+        drafting_records,
+        manuals,
+        chunk_manuals,
+        0.8,
+        0.1,
+        "seed",
+        manual_folds=manual_folds,
+    )
+    by_id = {row["id"]: row["split"] for row in drafting_records}
+    assert by_id["draft-train"] == "train"
+    assert by_id["draft-test"] == "test"
+
+    # A QA record citing the same eval-fold manual must land in the identical split
+    # a drafting record referencing it does — the T13a invariant.
+    qa_record = {"record_id": "qa-1", "manual_id": "m-test"}
+    assign_splits([qa_record], manuals, 0.8, 0.1, "seed", manual_folds=manual_folds)
+    assert qa_record["split"] == by_id["draft-test"]
+
+
+def test_drafting_records_are_now_covered_by_leakage_audit_against_qa_records() -> None:
+    # Regression for the T13/T13b bypass: before this fix, drafting_accepted was
+    # written straight to drafting.jsonl and never entered leakage_audit at all, so
+    # a drafting record built from an eval-fold chunk that collides with a train-fold
+    # QA record's source would have gone undetected. It must now be caught.
+    manuals = [{"manual_id": "m-a"}, {"manual_id": "m-b"}]
+    manual_folds = {"m-a": "train", "m-b": "test"}
+    qa_record = {
+        "record_id": "qa-1",
+        "split": "train",
+        "question": "What is the threshold?",
+        "manual_id": "m-a",
+        "source_sha256": "shared-sha",
+        "source_chunk_ids": ["shared-chunk"],
+        "citations": [{"section": "s"}],
+    }
+    # A corpus/config inconsistency (the exact class of bug this gate exists to
+    # catch) puts the same source hash under a chunk resolved to the test-fold
+    # manual for the drafting seed.
+    chunk_manuals = {
+        "shared-chunk": {"manual_id": "m-b", "source_sha256": "shared-sha", "section": "s"},
+    }
+    drafting_records = [
+        {"id": "draft-leak", "instruction": "Draft something", "manual_chunk_ids": ["shared-chunk"]},
+    ]
+    assign_drafting_splits(
+        drafting_records,
+        manuals,
+        chunk_manuals,
+        0.8,
+        0.1,
+        "seed",
+        manual_folds=manual_folds,
+    )
+    assert drafting_records[0]["split"] == "test"
+    audit = leakage_audit([qa_record, *drafting_records])
+    assert not audit["passed"]
+    assert audit["collisions"]["source_hash"] == [
+        {"value": "shared-sha", "splits": ["test", "train"]}
+    ]
 
 
 def _cross_row(manual_id: str, chunk_id: str, passage: str) -> dict:
@@ -3171,13 +3355,18 @@ def test_role_profile_preserves_profile_defaults_but_role_limits_win() -> None:
     assert gemma_judge["max_concurrent_requests"] == 45
 
 
-def test_output_rescue_raises_only_the_recovery_completion_budget() -> None:
+def test_output_rescue_raises_the_recovery_completion_budget_and_timeout() -> None:
     generation = generation_pipeline._role_profile("generation", "glm")
     generation_rescue = generation_pipeline._output_rescue_profile(generation)
     assert generation["generation_params"]["max_tokens"] == 5000
     assert generation_rescue is not None
     assert generation_rescue["generation_params"]["max_tokens"] == 12000
     assert generation_rescue["max_concurrent_requests"] == 45
+    # The rescue's request_timeout must differ from and exceed the primary
+    # profile's, not be silently inherited unchanged (T18).
+    assert generation_rescue["request_timeout"] != generation["request_timeout"]
+    assert generation_rescue["request_timeout"] > generation["request_timeout"]
+    assert generation_rescue["request_timeout"] == 3600
 
     judge = generation_pipeline._role_profile("judge", "gemma_thinking")
     judge_rescue = generation_pipeline._output_rescue_profile(judge)
@@ -3188,7 +3377,41 @@ def test_output_rescue_raises_only_the_recovery_completion_budget() -> None:
     assert judge_rescue["generation_params"]["temperature"] == 1.0
     assert judge_rescue["generation_params"]["top_p"] == 0.95
     assert judge_rescue["generation_params"]["top_k"] == 64
+    assert judge_rescue["request_timeout"] > judge["request_timeout"]
     assert generation_pipeline._rescue_input({"record_id": "one"}, 4096)["_output_rescue_max_tokens"] == 4096
+
+
+def test_output_rescue_timeout_override_is_opt_in_and_never_lowers_timeout() -> None:
+    # No output_rescue_request_timeout configured: behavior is unchanged,
+    # request_timeout is inherited from the primary profile as before.
+    profile_without_override = {
+        "request_timeout": 1800,
+        "max_concurrent_requests": 128,
+        "context_window": 32768,
+        "output_rescue_max_tokens": 4096,
+        "generation_params": {"max_tokens": 2048},
+    }
+    rescue = generation_pipeline._output_rescue_profile(profile_without_override)
+    assert rescue is not None
+    assert rescue["request_timeout"] == 1800
+
+    # A configured override below the primary timeout never lowers it.
+    profile_with_low_override = {
+        **profile_without_override,
+        "output_rescue_request_timeout": 900,
+    }
+    rescue_low = generation_pipeline._output_rescue_profile(profile_with_low_override)
+    assert rescue_low is not None
+    assert rescue_low["request_timeout"] == 1800
+
+    # A configured override above the primary timeout raises it.
+    profile_with_high_override = {
+        **profile_without_override,
+        "output_rescue_request_timeout": 3600,
+    }
+    rescue_high = generation_pipeline._output_rescue_profile(profile_with_high_override)
+    assert rescue_high is not None
+    assert rescue_high["request_timeout"] == 3600
 
 
 def test_output_rescue_retries_only_missing_rows_in_separate_checkpoint(
@@ -4100,6 +4323,62 @@ def test_ablation_judge_reviews_only_complete_actual_trial_bundles() -> None:
     assert "ACTUAL OUTPUTS" in prompt
 
 
+def _minimal_final_manifest_kwargs() -> dict:
+    return {
+        "run_id": "run-1",
+        "status": "complete",
+        "stats": {"records": 1},
+        "manuals": [],
+        "corpus_report": {},
+        "selected_rows": [],
+        "single_coverage": {},
+        "cross_coverage": {},
+        "drafting_stats": {},
+        "duplicates": 0,
+    }
+
+
+def test_release_ready_requires_both_status_complete_and_human_review() -> None:
+    incomplete_review = {"complete": False}
+    complete_review = {"complete": True}
+    assert generation_pipeline._release_ready("complete", complete_review) is True
+    assert generation_pipeline._release_ready("complete", incomplete_review) is False
+    assert generation_pipeline._release_ready("partial", complete_review) is False
+    assert generation_pipeline._release_ready("partial", incomplete_review) is False
+    assert generation_pipeline._release_ready("complete", {}) is False
+
+
+def test_final_manifest_human_review_defaults_to_honest_placeholder() -> None:
+    manifest = generation_pipeline._final_manifest(**_minimal_final_manifest_kwargs())
+    assert manifest["human_review"] == {
+        "required_accepted_records": 100,
+        "required_rejected_records": 25,
+        "reviewed_accepted_records": 0,
+        "reviewed_rejected_records": 0,
+        "complete": False,
+        "note": "Human labels are external release evidence and are never inferred.",
+    }
+
+
+def test_final_manifest_reflects_real_review_data_when_supplied() -> None:
+    manifest = generation_pipeline._final_manifest(
+        **_minimal_final_manifest_kwargs(),
+        human_review={
+            "review_file": "reviews.jsonl",
+            "required_accepted_records": 100,
+            "required_rejected_records": 25,
+            "reviewed_accepted_records": 100,
+            "reviewed_rejected_records": 25,
+            "complete": True,
+            "issues": [],
+            "note": "Human labels are external release evidence and are never inferred.",
+        },
+    )
+    assert manifest["human_review"]["reviewed_accepted_records"] == 100
+    assert manifest["human_review"]["reviewed_rejected_records"] == 25
+    assert manifest["human_review"]["complete"] is True
+
+
 def test_human_review_template_is_reproducible_and_never_self_certifies(
     tmp_path: Path,
 ) -> None:
@@ -4305,6 +4584,76 @@ def test_release_validation_requires_all_four_exports_and_human_review(
     (files_dir / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
     failed_stage = validate_run(files_dir)
     assert "stage_quality_evidence_incomplete:drafting" in failed_stage["issues"]
+
+
+def test_release_validation_surfaces_pre_cap_and_post_cap_opener_diversity(
+    tmp_path: Path,
+) -> None:
+    files_dir = tmp_path / "files"
+    files_dir.mkdir()
+    (files_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "run_id": "run",
+                "status": "complete",
+                "terminal_request_completeness": {"complete": True},
+                "required_task_type_counts": {"qa": 1},
+                "quality_acceptance": {"portfolio_quality_complete": True},
+                "statistics": {
+                    "question_opener_diversity": {
+                        "unique_openers": 6,
+                        "top_opener": "what is",
+                        "top_opener_count": 12,
+                        "top_opener_share": 0.2,
+                    },
+                },
+                "question_opener_diversity_pre_cap": {
+                    "unique_openers": 2,
+                    "top_opener": "according to",
+                    "top_opener_count": 480,
+                    "top_opener_share": 0.8,
+                    "pool_size": 600,
+                    "cap_waste_ratio": 0.5,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    (files_dir / "leakage_audit.json").write_text(json.dumps({"passed": True}), encoding="utf-8")
+    row = json.dumps({"record_id": "r1", "split": "train"}) + "\n"
+    (files_dir / "qa_sft.jsonl").write_text(row, encoding="utf-8")
+    (files_dir / "eval.jsonl").write_text("", encoding="utf-8")
+    (files_dir / "canonical.jsonl").write_text("{}\n", encoding="utf-8")
+    report = validate_run(files_dir)
+    assert report["question_opener_diversity"]["post_cap"]["top_opener_share"] == 0.2
+    assert report["question_opener_diversity"]["pre_cap"]["top_opener_share"] == 0.8
+    assert report["question_opener_diversity"]["pre_cap"]["cap_waste_ratio"] == 0.5
+
+
+def test_release_validation_defaults_opener_diversity_when_manifest_predates_it(
+    tmp_path: Path,
+) -> None:
+    files_dir = tmp_path / "files"
+    files_dir.mkdir()
+    (files_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "run_id": "run",
+                "status": "complete",
+                "terminal_request_completeness": {"complete": True},
+                "required_task_type_counts": {"qa": 1},
+                "quality_acceptance": {"portfolio_quality_complete": True},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (files_dir / "leakage_audit.json").write_text(json.dumps({"passed": True}), encoding="utf-8")
+    row = json.dumps({"record_id": "r1", "split": "train"}) + "\n"
+    (files_dir / "qa_sft.jsonl").write_text(row, encoding="utf-8")
+    (files_dir / "eval.jsonl").write_text("", encoding="utf-8")
+    (files_dir / "canonical.jsonl").write_text("{}\n", encoding="utf-8")
+    report = validate_run(files_dir)
+    assert report["question_opener_diversity"] == {"post_cap": {}, "pre_cap": {}}
 
 
 def test_release_validation_detects_train_eval_overlap(tmp_path: Path) -> None:
