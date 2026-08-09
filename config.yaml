@@ -361,8 +361,14 @@ embeddings:
   timeout_seconds: 120
   calibration_neighbors_per_record: 5
   selection_enabled: true
-  selection_mode: verified_equivalence
-  similarity_threshold: null
+  selection_mode: hybrid_equivalence
+  # Calibrated 2026-08-09 from 20 manually-labeled semantic_calibration.jsonl
+  # pairs from a real smoke run (2 duplicate, 6 related, 12 distinct): clean
+  # gap between the highest non-duplicate (0.7633) and lowest duplicate
+  # (0.8215) score, so 0.80 sits in that gap with margin on both sides.
+  # Provisional -- only 2 duplicate examples supported this; revisit as more
+  # labeled pairs accumulate across real runs.
+  similarity_threshold: 0.80
 
 propositions:
   # Only path_qa and temporal consume propositions. quality.required_task_types
