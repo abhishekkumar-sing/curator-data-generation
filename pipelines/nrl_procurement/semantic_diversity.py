@@ -73,6 +73,10 @@ class EmbeddingSettings:
         }
 
 
+_CREDENTIAL_ROTATION_ENV = "EMBEDDING_CREDENTIAL_ROTATED"
+_ROTATION_TRUE_VALUES = {"1", "true", "t", "yes", "on"}
+
+
 def load_embedding_settings(config: dict[str, Any]) -> EmbeddingSettings | None:
     """Resolve an optional embedding profile from config and environment."""
     section = config.get("embeddings", {})
@@ -90,6 +94,21 @@ def load_embedding_settings(config: dict[str, Any]) -> EmbeddingSettings | None:
         raise RuntimeError(
             "Embedding generation is enabled but required environment settings "
             f"are missing: {', '.join(missing)}"
+        )
+    rotation_confirmed = (
+        os.environ.get(_CREDENTIAL_ROTATION_ENV, "").strip().lower()
+        in _ROTATION_TRUE_VALUES
+    )
+    if not rotation_confirmed:
+        raise RuntimeError(
+            f"Refusing to use {api_key_env}: this embedding credential was "
+            "exposed in a prior session on 2026-08-08 and has not been "
+            "confirmed rotated (see pipelines/nrl_procurement/TASKS.md, "
+            "'Rotate this embedding credential before release'). Rotate the "
+            "key with the credential issuer, put the new value in .env, then "
+            f"set {_CREDENTIAL_ROTATION_ENV}=1 in .env to confirm rotation "
+            "before embeddings functionality (probe, calibration, or "
+            "selection) will run."
         )
     try:
         endpoint = validate_endpoint_url(
