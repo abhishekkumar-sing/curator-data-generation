@@ -12,6 +12,7 @@ from typing import Any
 
 from cross_document import evidence_location
 from schemas import (
+    CrossAblationTrialDraft,
     CrossCandidateBatch,
     CrossJudgeBatch,
     CrossJudgedCandidate,
@@ -292,6 +293,85 @@ preserved authority and qualifications, and task_type-consistent rationale struc
                     "passed": False,
                     "issues": ["generator_returned_no_examples"],
                 },
+            }
+        ]
+
+
+def cross_ablation_trial_validation_issues(
+    draft: dict[str, Any],
+    row: dict[str, Any],
+) -> list[str]:
+    """Reject malformed trials and any evidence outside the visible sources.
+
+    Source-id-keyed analog of ``path_qa.ablation_trial_validation_issues``:
+    evidence must cite a source_id that is actually visible in this trial, and
+    the quote must be a real substring of that visible source's passage
+    (cross-document evidence spans are arbitrary substrings, not one fixed
+    canonical quote per source, so exactness is checked via
+    ``evidence_location`` rather than string equality).
+    """
+    issues: list[str] = []
+    visible = {document["source_id"]: document for document in row["visible_source_documents"]}
+    if draft.get("answerable"):
+        if not str(draft.get("answer", "")).strip():
+            issues.append("answerable_trial_has_empty_answer")
+        if not draft.get("claims"):
+            issues.append("answerable_trial_has_no_claims")
+    elif draft.get("claims"):
+        issues.append("abstaining_trial_has_claims")
+    elif not str(draft.get("limitation_reason", "")).strip():
+        issues.append("abstaining_trial_missing_limitation")
+    for claim in draft.get("claims", []):
+        if not claim.get("evidence"):
+            issues.append("trial_claim_has_no_evidence")
+        for evidence in claim.get("evidence", []):
+            source_id = evidence.get("source_id", "")
+            document = visible.get(source_id)
+            if document is None:
+                issues.append("trial_uses_non_visible_source")
+            elif evidence_location([document], source_id, evidence.get("quote", "")) is None:
+                issues.append("non_exact_trial_evidence")
+    return sorted(set(issues))
+
+
+class CrossSourceAblationAnswerGenerator(curator.LLM):
+    """Run one blind cross-document answer attempt with only visible sources."""
+
+    response_format = CrossAblationTrialDraft
+
+    def prompt(self, row: dict[str, Any]) -> str:
+        """Keep the prompt invariant across full and single-source trials."""
+        return f"""TASK
+Answer the immutable procurement question using only the VISIBLE SOURCES below. Do not use
+outside knowledge. If the visible sources cannot support a complete answer, set
+answerable=false, leave answer and claims empty, and briefly identify the missing information
+without guessing.
+
+For an answerable trial, return a concise complete answer and material claims with exact
+verbatim evidence. Every evidence source_id must come from a VISIBLE SOURCE below.
+Do not mention hidden, removed, missing, source-A/source-B, canonical, or ablation labels.
+Do not provide private chain-of-thought.
+
+QUESTION
+{row["question"]}
+
+VISIBLE SOURCES
+{_render_sources({"source_documents": row["visible_source_documents"]})}
+"""
+
+    def parse(self, row: dict[str, Any], response: CrossAblationTrialDraft) -> list[dict[str, Any]]:
+        """Persist the actual trial output and deterministic validity status."""
+        draft = response.model_dump()
+        issues = cross_ablation_trial_validation_issues(draft, row)
+        return [
+            {
+                **row,
+                "trial_output": draft,
+                "deterministic_checks": {
+                    "passed": not issues,
+                    "issues": issues,
+                },
+                "generation_model": self.model_name,
             }
         ]
 
