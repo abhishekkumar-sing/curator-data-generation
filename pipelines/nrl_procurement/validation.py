@@ -318,20 +318,110 @@ def _has_pattern(text: str, patterns: tuple[str, ...]) -> bool:
     return any(re.search(pattern, text, flags=re.IGNORECASE) for pattern in patterns)
 
 
+def _statement_modalities(text: str) -> set[str]:
+    """Return the deontic-modality categories a statement asserts.
+
+    Shared by `semantic_support_issues` (answer-vs-support) and
+    `cross_claim_contradiction_issues` (claim-vs-claim / step-vs-answer) so
+    both use one definition of what counts as an "obligation" vs. a
+    "prohibition", etc.
+    """
+    modalities = {category for category, patterns in DEONTIC_PATTERNS.items() if _has_pattern(text, patterns)}
+    # Prohibitions contain obligation/permission auxiliaries lexically but are
+    # semantically their own category.
+    if "prohibition" in modalities:
+        modalities -= {"obligation", "permission"}
+    return modalities
+
+
+_DEONTIC_MARKER = re.compile(
+    r"\b(?:shall|must|may)\s+not\b|\bis\s+prohibited\b|\bare\s+prohibited\b|"
+    r"\bprohibit(?:s|ed|ing)?\b|\bshall\b|\bmust\b|\bmay\b|\brequired\s+to\b|"
+    r"\bmandatory\b|\bshould\b|\brecommended\b|\badvisable\b|\bpermitted\b|"
+    r"\ballowed\b|\bentitled\b",
+    re.IGNORECASE,
+)
+
+
+def _core_subject_tokens(statement: str) -> str:
+    """Strip deontic markers, returning only the subject/action the statement is about.
+
+    Used to tell "same subject, opposite modality" (a real contradiction)
+    apart from "different subject, coincidentally opposite modality" (two
+    unrelated rules that happen to use `must` and `must not`).
+    """
+    stripped = _DEONTIC_MARKER.sub(" ", statement)
+    return " ".join(re.findall(r"[a-z0-9]+", stripped.casefold()))
+
+
+def _is_opposite_modality(left: set[str], right: set[str]) -> bool:
+    """Only prohibition-vs-obligation/permission is treated as a true opposite.
+
+    Other pairs (e.g. obligation vs. recommendation) are a *strength*
+    difference, not a contradiction, and are already covered separately by
+    `semantic_support_issues`'s weakened/strengthened-modality checks.
+    """
+    return ("prohibition" in left and bool({"obligation", "permission"} & right)) or (
+        "prohibition" in right and bool({"obligation", "permission"} & left)
+    )
+
+
+def cross_claim_contradiction_issues(
+    statements: list[tuple[str, str]],
+    *,
+    subject_overlap_threshold: float = 85.0,
+    minimum_subject_words: int = 3,
+) -> list[str]:
+    """Flag statement pairs asserting opposite modalities about the same subject.
+
+    `statements` is a list of `(label, text)` pairs (e.g. `("claim:0", ...)`,
+    `("step:1", ...)`, `("answer", ...)`); every distinct pair is compared.
+
+    Deliberately conservative (Finding V2 asks for this, but false positives
+    here reject good data): a pair is only flagged when (a) the modalities
+    are a true opposite per `_is_opposite_modality` (prohibition vs.
+    obligation/permission -- the one pairing the coarse auxiliary-verb-based
+    `DEONTIC_PATTERNS` categories can identify without conflating a strength
+    difference for a contradiction), and (b) the statements are near-
+    identical once their deontic markers are stripped out -- i.e. the same
+    core subject/action, not just two rules that happen to share a topic or
+    a few incidental words. `minimum_subject_words` additionally guards
+    against flagging near-empty core text (e.g. two one-word statements)
+    where a high fuzzy-overlap ratio is not a meaningful signal.
+    """
+    issues: list[str] = []
+    annotated = []
+    for label, text in statements:
+        statement = str(text or "").strip()
+        if not statement:
+            continue
+        modalities = _statement_modalities(statement)
+        if not modalities:
+            continue
+        subject = _core_subject_tokens(statement)
+        if len(subject.split()) < minimum_subject_words:
+            continue
+        annotated.append((label, modalities, subject))
+    for left in range(len(annotated)):
+        left_label, left_modalities, left_subject = annotated[left]
+        for right in range(left + 1, len(annotated)):
+            right_label, right_modalities, right_subject = annotated[right]
+            if not _is_opposite_modality(left_modalities, right_modalities):
+                continue
+            if token_set_ratio(left_subject, right_subject) < subject_overlap_threshold:
+                continue
+            issues.append(f"cross_claim_contradiction:{left_label}:{right_label}")
+    return sorted(set(issues))
+
+
 def semantic_support_issues(answer: str, support_text: str) -> list[str]:
     """Detect high-confidence absence and legal-modality support failures."""
     issues: list[str] = []
     if ABSENCE_CLAIM.search(answer) and not ABSENCE_CLAIM.search(support_text):
         issues.append("unsupported_absence_claim")
 
-    answer_modalities = {category for category, patterns in DEONTIC_PATTERNS.items() if _has_pattern(answer, patterns)}
-    support_modalities = {category for category, patterns in DEONTIC_PATTERNS.items() if _has_pattern(support_text, patterns)}
-    # Prohibitions contain obligation/permission auxiliaries lexically but are
-    # semantically their own category.
-    if "prohibition" in answer_modalities:
-        answer_modalities -= {"obligation", "permission"}
-    if "prohibition" in support_modalities:
-        support_modalities -= {"obligation", "permission"}
+    answer_modalities = _statement_modalities(answer)
+    support_modalities = _statement_modalities(support_text)
 
     if "obligation" in answer_modalities and "obligation" not in support_modalities:
         if "permission" in support_modalities:
@@ -400,6 +490,18 @@ def validate_record(record: dict[str, Any], passage: str) -> list[str]:
                 reasons.append("claim_uses_incomplete_evidence_fragment")
     if sorted(set(claim_quotes)) != sorted(set(quotes)):
         reasons.append("claim_evidence_mismatch")
+    # Claim-vs-claim only (Finding V2's other example, reasoning-step-vs-
+    # terminal-answer, was investigated and deliberately not wired in here:
+    # real-data validation found it produces real false positives on this
+    # pipeline's own accepted output, because CoT steps are *designed* to be
+    # near-restatements that combine into the final answer, and often use
+    # investigative "Identify X"/"Contrast X vs Y" framing rather than
+    # first-order factual assertions -- see T11's research notes).
+    reasons.extend(
+        cross_claim_contradiction_issues(
+            [(f"claim:{index}", str(claim.get("statement", ""))) for index, claim in enumerate(claims)]
+        )
+    )
     support = " ".join(quotes)
     reasons.extend(semantic_support_issues(record["answer"], support))
     for number in _unsupported_quantities(record["answer"], support):

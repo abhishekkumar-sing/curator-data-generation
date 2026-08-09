@@ -124,6 +124,7 @@ from validate_run import validate_run  # noqa: E402
 from validation import (  # noqa: E402
     answer_format_issues,
     canonical_reasoning_operation,
+    cross_claim_contradiction_issues,
     deduplicate,
     enforce_category_diversity,
     enforce_extractive_answer_diversity,
@@ -1490,6 +1491,132 @@ def test_semantic_support_rejects_absence_and_deontic_drift() -> None:
         )
         == []
     )
+
+
+def test_cross_claim_contradiction_flags_opposite_modality_same_subject() -> None:
+    """T11: two claims about the same core subject asserting opposite modalities."""
+    assert cross_claim_contradiction_issues(
+        [
+            ("claim:0", "The evaluation committee must include an external member."),
+            ("claim:1", "The evaluation committee must not include an external member."),
+        ]
+    ) == ["cross_claim_contradiction:claim:0:claim:1"]
+
+
+def test_cross_claim_contradiction_ignores_strength_differences() -> None:
+    """Obligation vs. permission/recommendation is a strength gap, not a
+    contradiction -- already covered by `semantic_support_issues` elsewhere.
+    """
+    assert (
+        cross_claim_contradiction_issues(
+            [
+                ("claim:0", "The vendor must submit the bank guarantee."),
+                ("claim:1", "The vendor may submit the bank guarantee."),
+            ]
+        )
+        == []
+    )
+
+
+def test_cross_claim_contradiction_ignores_different_subjects() -> None:
+    """Opposite modalities about genuinely different subjects must not fire."""
+    assert (
+        cross_claim_contradiction_issues(
+            [
+                ("claim:0", "The vendor must submit the bank guarantee."),
+                ("claim:1", "The buyer must not accept a late tender."),
+            ]
+        )
+        == []
+    )
+
+
+def test_cross_claim_contradiction_ignores_short_core_subjects() -> None:
+    """Near-empty core text after stripping deontic markers is not a
+    meaningful "same subject" signal (guarded by `minimum_subject_words`)."""
+    assert (
+        cross_claim_contradiction_issues(
+            [
+                ("claim:0", "This must apply."),
+                ("claim:1", "This must not apply."),
+            ]
+        )
+        == []
+    )
+
+
+def test_validate_record_rejects_contradictory_claims() -> None:
+    """End-to-end: `validate_record` rejects a record whose two claims
+    assert opposite modalities about the same subject (constructed per T11's
+    audit reference, Finding V2)."""
+    passage = (
+        "The evaluation committee must include an external member. "
+        "The evaluation committee must not include an external member "
+        "for procurements below the threshold."
+    )
+    record = {
+        "task_type": "qa",
+        "question": "Must the evaluation committee include an external member?",
+        "answer": "It depends on the procurement value.",
+        "answerable": True,
+        "evidence": [
+            {"quote": "The evaluation committee must include an external member."},
+        ],
+        "claims": [
+            {
+                "statement": "The evaluation committee must include an external member.",
+                "evidence": [{"quote": "The evaluation committee must include an external member."}],
+            },
+            {
+                "statement": ("The evaluation committee must not include an external member for procurements below the threshold."),
+                "evidence": [
+                    {
+                        "quote": (
+                            "The evaluation committee must not include an external member "
+                            "for procurements below the threshold."
+                        )
+                    }
+                ],
+            },
+        ],
+        "reasoning_steps": [],
+    }
+    reasons = validate_record(record, passage)
+    assert any(reason.startswith("cross_claim_contradiction:") for reason in reasons)
+
+
+def test_validate_record_does_not_flag_unrelated_multi_claim_records() -> None:
+    """Two claims that both use `must`/`must not` but describe genuinely
+    different subjects must not be rejected -- the required "same core
+    subject after stripping deontic markers" gate must hold end-to-end
+    through `validate_record`, not just in the unit-level helper."""
+    passage = (
+        "The evaluation committee must include a technical specialist. "
+        "Bids received after the deadline must not be considered."
+    )
+    record = {
+        "task_type": "qa",
+        "question": "What are the committee-composition and late-bid rules?",
+        "answer": ("The evaluation committee must include a technical specialist, and bids received after the deadline must not be considered."),
+        "answerable": True,
+        "evidence": [
+            {"quote": "The evaluation committee must include a technical specialist."},
+            {"quote": "Bids received after the deadline must not be considered."},
+        ],
+        "claims": [
+            {
+                "statement": "The evaluation committee must include a technical specialist.",
+                "evidence": [{"quote": "The evaluation committee must include a technical specialist."}],
+            },
+            {
+                "statement": "Bids received after the deadline must not be considered.",
+                "evidence": [{"quote": "Bids received after the deadline must not be considered."}],
+            },
+        ],
+        "reasoning_steps": [],
+    }
+    reasons = validate_record(record, passage)
+    assert not any(reason.startswith("cross_claim_contradiction:") for reason in reasons)
 
 
 def test_drafting_validation_applies_modality_support_gate() -> None:
