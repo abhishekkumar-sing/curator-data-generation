@@ -532,9 +532,15 @@ class DraftingJudgeDecision(AuditedListModel):
 
 
 CrossRelationship = Literal[
-    "same_authority_temporal",
-    "government_company_comparison",
-    "company_cross_domain",
+    "supersedes",
+    "amends",
+    "carries_forward",
+    "adds_requirement",
+    "removes_requirement",
+    "changes_threshold",
+    "changes_scope",
+    "organization_deviation",
+    "cross_reference_change",
     "complementary_procedure",
 ]
 

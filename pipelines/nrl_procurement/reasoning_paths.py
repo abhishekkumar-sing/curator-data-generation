@@ -9,12 +9,12 @@ from collections import defaultdict
 from typing import Any, Literal
 
 PathType = Literal[
-    "comparison",
+    "organization_deviation",
     "bridge",
-    "temporal_transition",
+    "supersedes",
+    "changes_threshold",
     "complementary_procedure",
     "exception_condition_interaction",
-    "cross_domain_comparison",
 ]
 
 PATH_SCHEMA_VERSION = "1"
@@ -154,16 +154,20 @@ def _path_type(
 ) -> PathType | None:
     if signature and (left.get("conditions") or right.get("conditions") or left.get("exceptions") or right.get("exceptions")):
         return "exception_condition_interaction"
-    if configured_relationship == "same_authority_temporal" and signature:
-        return "temporal_transition"
+    if configured_relationship == "supersedes" and signature:
+        # Same rule, but a numeric/approval-level/deadline value differs --
+        # a real, comparable signal, not a guess.
+        left_value = str(left.get("threshold", {}).get("value", "")).strip()
+        right_value = str(right.get("threshold", {}).get("value", "")).strip()
+        if left_value and right_value and left_value != right_value:
+            return "changes_threshold"
+        return "supersedes"
     if configured_relationship == "complementary_procedure" and bridges:
         return "complementary_procedure"
     if bridges and not signature:
         return "bridge"
-    if configured_relationship == "company_cross_domain" and signature:
-        return "cross_domain_comparison"
-    if configured_relationship == "government_company_comparison" and signature:
-        return "comparison"
+    if configured_relationship == "organization_deviation" and signature:
+        return "organization_deviation"
     return None
 
 
@@ -174,10 +178,8 @@ def _operations(path_type: PathType) -> list[str]:
         return ["lookup", "apply_prerequisite", "combine", "conclude"]
     if path_type == "exception_condition_interaction":
         return ["lookup", "apply_condition", "compare", "conclude"]
-    if path_type == "temporal_transition":
+    if path_type in ("supersedes", "changes_threshold"):
         return ["lookup", "resolve_time", "compare", "conclude"]
-    if path_type == "cross_domain_comparison":
-        return ["lookup", "resolve_domain", "compare", "conclude"]
     return ["lookup", "resolve_authority", "compare", "conclude"]
 
 
@@ -191,12 +193,12 @@ def _output_statement(
     left_label = f"{left_authority['manual_title']} " f"(as of {left.get('temporal_scope') or left_authority['as_of_date']})"
     right_label = f"{right_authority['manual_title']} " f"(as of {right.get('temporal_scope') or right_authority['as_of_date']})"
     relationship = {
-        "comparison": "The two attributed source states can be compared",
+        "organization_deviation": "NRL's policy can be compared against government guidance",
         "bridge": "The two attributed source propositions form a bridge",
-        "temporal_transition": "The two attributed dated states can be compared",
+        "supersedes": "The two attributed dated states can be compared",
+        "changes_threshold": "The two attributed dated states show a differing threshold value",
         "complementary_procedure": ("The two attributed source propositions describe complementary procedure"),
         "exception_condition_interaction": ("The attributed condition or exception modifies the compared rule"),
-        "cross_domain_comparison": ("The two attributed source states can be compared across procurement domains"),
     }[path_type]
     return f"{relationship}: under {left_label}, {_render_proposition(left)}; " f"under {right_label}, {_render_proposition(right)}."
 
@@ -283,12 +285,12 @@ def validate_reasoning_path(
 
     path_type = path.get("relationship_type")
     if path_type not in {
-        "comparison",
+        "organization_deviation",
         "bridge",
-        "temporal_transition",
+        "supersedes",
+        "changes_threshold",
         "complementary_procedure",
         "exception_condition_interaction",
-        "cross_domain_comparison",
     }:
         issues.append("invalid_relationship_type")
         return sorted(set(issues))
@@ -300,25 +302,25 @@ def validate_reasoning_path(
     if (
         path_type
         in {
-            "comparison",
-            "temporal_transition",
+            "organization_deviation",
+            "supersedes",
+            "changes_threshold",
             "exception_condition_interaction",
-            "cross_domain_comparison",
         }
         and not signature
     ):
         issues.append("incompatible_proposition_signatures")
     if path_type in {"bridge", "complementary_procedure"} and not bridges:
         issues.append("missing_explicit_bridge")
-    if path_type == "temporal_transition":
+    if path_type in ("supersedes", "changes_threshold"):
         if left["authority"]["issuing_organization"] != right["authority"]["issuing_organization"]:
             issues.append("temporal_authority_mismatch")
         if _family(left_manual) != _family(right_manual):
             issues.append("temporal_manual_family_mismatch")
         if left["authority"]["as_of_date"] == right["authority"]["as_of_date"]:
             issues.append("temporal_states_have_same_date")
-    if path_type == "cross_domain_comparison" and _family(left_manual) == _family(right_manual):
-        issues.append("cross_domain_path_uses_one_domain")
+    if path_type == "organization_deviation" and left["authority"]["issuing_organization"] == right["authority"]["issuing_organization"]:
+        issues.append("organization_deviation_uses_one_organization")
     if path_type == "exception_condition_interaction" and not any(
         proposition.get("conditions") or proposition.get("exceptions") for proposition in (left, right)
     ):

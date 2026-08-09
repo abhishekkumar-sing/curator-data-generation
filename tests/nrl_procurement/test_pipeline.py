@@ -1655,7 +1655,7 @@ def test_reasoning_paths_are_connected_stable_and_source_distinct() -> None:
                 "pair_id": "goods-temporal",
                 "left_manual": "goods_2017",
                 "right_manual": "goods_2024",
-                "relationship_type": "same_authority_temporal",
+                "relationship_type": "supersedes",
             }
         ]
     }
@@ -1676,6 +1676,26 @@ def test_reasoning_paths_are_connected_stable_and_source_distinct() -> None:
     assert path["operation_steps"][-1]["output_claim_id"] == path["output_claim_id"]
     assert path["deterministic_checks"]["passed"] is True
     assert all(result["complete"] is False for result in path["declared_requirement"].values())
+
+
+def test_supersedes_pair_with_differing_threshold_becomes_changes_threshold() -> None:
+    left = _path_proposition("prop-left", "goods_2017", "Goods 2017", "Government of India", "2017")
+    right = _path_proposition("prop-right", "goods_2024", "Goods 2024", "Government of India", "2024")
+    right["threshold"] = {"value": "50", "unit": "lakh"}
+    left["threshold"] = {"value": "25", "unit": "lakh"}
+    pair = {"pair_id": "goods-temporal", "left_manual": "goods_2017", "right_manual": "goods_2024", "relationship_type": "supersedes"}
+    accepted, rejected = build_reasoning_paths([left, right], {"pairs": [pair]}, 5)
+    assert rejected == []
+    assert accepted[0]["relationship_type"] == "changes_threshold"
+
+
+def test_organization_deviation_pair_rejects_same_organization() -> None:
+    left = _path_proposition("prop-left", "nrl_goods_rev1", "NRL Goods Rev1", "NRL", "2023")
+    right = _path_proposition("prop-right", "nrl_works_rev1", "NRL Works Rev1", "NRL", "2023")
+    pair = {"pair_id": "nrl-deviation", "left_manual": "nrl_goods_rev1", "right_manual": "nrl_works_rev1", "relationship_type": "organization_deviation"}
+    accepted, rejected = build_reasoning_paths([left, right], {"pairs": [pair]}, 5)
+    assert accepted == []
+    assert "organization_deviation_uses_one_organization" in rejected[0]["deterministic_checks"]["issues"]
 
 
 def test_reasoning_paths_reject_unrelated_and_unsafe_relationship_claims() -> None:
@@ -1700,7 +1720,7 @@ def test_reasoning_paths_reject_unrelated_and_unsafe_relationship_claims() -> No
         "pair_id": "goods-temporal",
         "left_manual": "goods_2017",
         "right_manual": "goods_2024",
-        "relationship_type": "same_authority_temporal",
+        "relationship_type": "supersedes",
     }
     accepted, rejected = build_reasoning_paths(
         [left, unrelated],
@@ -1791,7 +1811,7 @@ def _verified_path_question_row() -> dict:
         "pair_id": "goods-temporal",
         "left_manual": "goods_2017",
         "right_manual": "goods_2024",
-        "relationship_type": "same_authority_temporal",
+        "relationship_type": "supersedes",
     }
     paths, _ = build_reasoning_paths([left, right], {"pairs": [pair]}, 1)
     return {"path": paths[0], "propositions": [left, right]}
@@ -2880,7 +2900,7 @@ def test_deterministic_rejections_are_materialized_for_audit() -> None:
     cross_row = {
         "source_bundle_id": "bundle",
         "pair_id": "pair",
-        "relationship_type": "government_company_comparison",
+        "relationship_type": "organization_deviation",
         "source_documents": [
             {"source_id": "source_a", **_cross_row("a", "a-1", passage)},
             {"source_id": "source_b", **_cross_row("b", "b-1", passage)},
@@ -3544,7 +3564,8 @@ def test_cross_document_prompts_preserve_specification_contract() -> None:
         "private hidden chain-of-thought",
         "exact, correctly attributed source-specific evidence",
         "Not answerable from the provided sources.",
-        "same_authority_temporal",
+        "supersedes/changes_threshold",
+        "organization_deviation",
         "failure of the complete answer under either-source ablation",
         "---BEGIN UNTRUSTED SOURCES---",
         "---END UNTRUSTED SOURCES---",

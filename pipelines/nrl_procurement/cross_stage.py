@@ -79,8 +79,11 @@ SOURCE POLICY
 - Keep each source's issuer, policy scope, revision date, and as-of date distinct.
 - Similar wording does not establish adoption, equivalence, precedence, amendment, or
   supersession. Missing text does not prove absence, deletion, or inapplicability.
-- For same_authority_temporal, describe both dated source states without claiming which
+- For supersedes/changes_threshold, describe both dated states without claiming which
   rule is currently in force unless the sources explicitly establish it.
+- For organization_deviation, only proceed if the sources establish NRL adopting,
+  specializing, or authorizedly deviating from government guidance -- not mere topical
+  overlap between an NRL and a government manual.
 
 CONSTRAINTS
 - Select task from {json.dumps(TAXONOMY.get("tasks", []))}. It describes the

@@ -13,10 +13,20 @@ STOPWORDS = {
     "not", "shall", "that", "the", "their", "this", "under", "with", "will",
     "chapter", "section", "page", "procurement",
 }
+# How Indian procurement documents actually change: new editions supersede
+# old ones, OMs/corrigenda amend a specific provision, GFR changes ripple
+# into manuals, and NRL manuals separately adopt/specialize/deviate from
+# government guidance -- similarity alone never proves any of these.
 RELATIONSHIPS = {
-    "same_authority_temporal",
-    "government_company_comparison",
-    "company_cross_domain",
+    "supersedes",
+    "amends",
+    "carries_forward",
+    "adds_requirement",
+    "removes_requirement",
+    "changes_threshold",
+    "changes_scope",
+    "organization_deviation",
+    "cross_reference_change",
     "complementary_procedure",
 }
 

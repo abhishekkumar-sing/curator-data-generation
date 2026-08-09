@@ -535,43 +535,46 @@ cross_document:
   minimum_similarity: 12
   minimum_shared_terms: 5
   max_bundles_per_pair: 25
+  # NRL pairs use organization_deviation, not a generic "comparison" -- only
+  # useful when the record establishes adoption, specialization, or a real
+  # deviation, per the audit finding this taxonomy fixes.
   pairs:
     - pair_id: government_nrl_goods
       left_manual: goods_2022
       right_manual: nrl_goods_rev1
-      relationship_type: government_company_comparison
+      relationship_type: organization_deviation
     - pair_id: government_nrl_works
       left_manual: works_2022
       right_manual: nrl_works_rev1
-      relationship_type: government_company_comparison
+      relationship_type: organization_deviation
     - pair_id: government_nrl_services
       left_manual: services_2022
       right_manual: nrl_consultancy_other_services_rev1
-      relationship_type: government_company_comparison
+      relationship_type: organization_deviation
     - pair_id: government_goods_temporal
       left_manual: goods_2017
       right_manual: goods_2024
-      relationship_type: same_authority_temporal
+      relationship_type: supersedes
     - pair_id: government_works_temporal
       left_manual: works_2019
       right_manual: works_2025
-      relationship_type: same_authority_temporal
+      relationship_type: supersedes
     - pair_id: government_services_consultancy_temporal
       left_manual: services_2017
       right_manual: services_consultancy_2025
-      relationship_type: same_authority_temporal
+      relationship_type: supersedes
     - pair_id: nrl_goods_works
       left_manual: nrl_goods_rev1
       right_manual: nrl_works_rev1
-      relationship_type: company_cross_domain
+      relationship_type: complementary_procedure
     - pair_id: nrl_goods_services
       left_manual: nrl_goods_rev1
       right_manual: nrl_consultancy_other_services_rev1
-      relationship_type: company_cross_domain
+      relationship_type: complementary_procedure
     - pair_id: nrl_works_services
       left_manual: nrl_works_rev1
       right_manual: nrl_consultancy_other_services_rev1
-      relationship_type: company_cross_domain
+      relationship_type: complementary_procedure
 
 splits:
   train: 0.8
