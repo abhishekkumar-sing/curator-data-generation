@@ -169,15 +169,35 @@ def _document_family(manual_id: str) -> str:
     return "other"
 
 
+# Inclusive width (in pages) of the position-based front-matter detection
+# window starting at a manual's configured start_page.
+FRONT_MATTER_WINDOW_PAGES = 8
+
+
 def _content_class(row: dict[str, Any]) -> str:
     passage = row["generation_passage"]
     section = str(row.get("section") or "").casefold()
     page = int(row.get("page") or 1)
     start_page = int(row.get("start_page", 1))
+    manual_page_count = row.get("manual_page_count")
     # Introductory policy chapters later in a manual are substantive. Only
     # position-independent labels that are unambiguously apparatus belong here;
     # the early-page rule already covers a manual's opening introduction.
-    if page <= start_page + 7 or any(
+    #
+    # The position rule assumes a manual has real content beyond its opening
+    # window (cover/Foreword/Disclaimer/Table of Contents, tuned against
+    # goods_2017's ~270 pages). A manual whose entire loaded content fits
+    # inside that window -- e.g. a one- or two-page OM/amendment/corrigendum
+    # notice -- has no front matter to skip; applying the rule there would
+    # wrongly classify 100% of a substantive policy letter as front matter
+    # and leave the manual with zero eligible chunks. Only apply the position
+    # rule once we know the manual actually extends past the window (or when
+    # the caller hasn't supplied a page count, to preserve prior behavior).
+    positional_front_matter = page <= start_page + 7 and (
+        manual_page_count is None
+        or manual_page_count > FRONT_MATTER_WINDOW_PAGES
+    )
+    if positional_front_matter or any(
         label in section for label in ("foreword", "preface", "contents")
     ):
         return "front_matter"
@@ -430,9 +450,12 @@ def load_corpus(
         excluded = {int(page) for page in manual.get("exclude_pages", [])}
         heading_stack: list[str] = []
         document_order = 0
+        manual_row_start = len(rows)
+        manual_pages_seen: set[int | None] = set()
         for page, page_text in _pages(content_path.read_text(encoding="utf-8")):
             if page is not None and (page < start_page or page in excluded):
                 continue
+            manual_pages_seen.add(page)
             for index, passage in enumerate(_chunks(page_text, maximum_chars), 1):
                 if len(passage) < minimum_chars:
                     continue
@@ -457,6 +480,9 @@ def load_corpus(
                         "generation_passage": generation_text(passage),
                     }
                 )
+        manual_page_count = len(manual_pages_seen)
+        for row in rows[manual_row_start:]:
+            row["manual_page_count"] = manual_page_count
     if not rows:
         raise ValueError("The registered corpus produced no usable chunks")
     for row in rows:

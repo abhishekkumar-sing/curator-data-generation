@@ -46,6 +46,7 @@ from export import (
     assign_drafting_splits,
     assign_splits,
     export_records,
+    question_opener_diversity,
     write_manifest,
 )
 from evaluation import (
@@ -203,6 +204,28 @@ QUESTION_STYLE_GUIDANCE = {
     "responsibility_query": "Ask which actor performs the source-stated duty and what it is.",
     "comparison_request": "Ask for the exact source-supported contrast dimensions.",
 }
+
+# Zero-shot instructions alone did not reliably keep generation off the
+# "According to the manual..."/"As a <persona>..." openers (see audit
+# Repetition & Diversity Analysis, T8): a corpus-level cap can only remove the
+# overrepresented records after the fact, not change what the model reaches
+# for by default. These are illustrative openers only, not answerable content
+# to imitate for facts; they exist purely to widen the boundary of what
+# "asking naturally" can look like across ordinary interrogative forms.
+QUESTION_OPENER_EXAMPLES = (
+    "What is the minimum period a buyer must retain a rejected bid before "
+    "returning its earnest money?",
+    "Can the L1 bidder be disqualified after bid opening if its EMD "
+    "instrument has already expired?",
+    "Which committee must sign off before a proprietary purchase certificate "
+    "is issued for spares above a stated value?",
+    "When is the engineer-in-charge required to be notified of a suspected "
+    "latent defect?",
+    "Who decides whether a blacklisted vendor's ongoing contracts must also "
+    "be terminated?",
+    "Does a Class-I local supplier's price-match right survive if it "
+    "withdraws its original quote?",
+)
 
 # These axes are deliberately narrower than open-ended "reasoning skills".
 # Every non-lookup operation has an observable source signal in
@@ -1023,6 +1046,10 @@ CONSTRAINTS
   "As a/an <role>" preamble. Persona is a semantic information need, not wording
   decoration. Express this need naturally without naming the role unless the role
   itself is the fact being asked about.
+- Vary the opening construction; do not default to the same sentence shape every
+  time. These illustrate natural variety only — do not copy their facts, only
+  the spread of ordinary interrogative forms:
+  {chr(10).join(f'  - "{example}"' for example in QUESTION_OPENER_EXAMPLES)}
 - Break the answer into material claims. Every claim must contain one or more
   evidence quotes copied verbatim from
   the passage. The pipeline derives top-level evidence from the claims.
@@ -1786,6 +1813,8 @@ def _final_manifest(
     drafting_stats: dict[str, Any],
     duplicates: int,
     opener_overrepresented: int = 0,
+    single_generated_pre_cap_count: int = 0,
+    question_opener_diversity_pre_cap: dict[str, Any] | None = None,
     question_type_overrepresented: int = 0,
     question_style_overrepresented: int = 0,
     extractive_overrepresented: int = 0,
@@ -1829,6 +1858,11 @@ def _final_manifest(
         "judge_batch_integrity_rejections": judge_batch_integrity_rejections or {"single_document": 0, "cross_document": 0},
         "near_duplicates_removed": duplicates,
         "question_opener_overrepresented_removed": opener_overrepresented,
+        "question_opener_diversity_pre_cap": {
+            **(question_opener_diversity_pre_cap or {"unique_openers": 0, "top_opener": "", "top_opener_count": 0, "top_opener_share": 0.0}),
+            "pool_size": single_generated_pre_cap_count,
+            "cap_waste_ratio": (round(opener_overrepresented / single_generated_pre_cap_count, 4) if single_generated_pre_cap_count else 0.0),
+        },
         "question_type_overrepresented_removed": question_type_overrepresented,
         "question_style_overrepresented_removed": question_style_overrepresented,
         "extractive_answer_overrepresented_removed": extractive_overrepresented,
@@ -2173,6 +2207,18 @@ def main(argv: list[str] | None = None) -> None:
         files_dir / "source_quality_rejected.jsonl",
         source_quality_rejected,
     )
+    # NOTE: build_source_windows() groups adjacent same-section chunks into
+    # bounded, multi-chunk windows with resolved cross-references. It is
+    # currently audit-only: the accepted/rejected windows below are persisted
+    # for inspection and reported in the manifest, but no generation stage
+    # (planned_single, propositions, path_qa, cross_document, drafting) reads
+    # `source_windows`/`rejected_source_windows` as an input. Every stage
+    # still builds its inputs from single-chunk `rows`/`all_rows`. The
+    # `source_windows.*` config keys consumed elsewhere in this file
+    # (`safety_margin_tokens`, `conservative_chars_per_token`, etc.) are a
+    # separate, actively used prompt-budgeting namespace and are unaffected by
+    # this. See TASKS.md's "Use bounded multi-chunk source windows" section
+    # for the (still open) intended integration.
     source_window_stats: dict[str, Any] = {"enabled": False}
     source_window_config = CONFIG.get("source_windows", {})
     if source_window_config.get("enabled", False):
@@ -2190,6 +2236,10 @@ def main(argv: list[str] | None = None) -> None:
             "accepted": len(source_windows),
             "rejected": len(rejected_source_windows),
             "schema_version": (source_windows[0]["schema_version"] if source_windows else None),
+            # No generation/proposition/path_qa/cross_document/drafting stage
+            # currently consumes these windows; they are computed and audited
+            # only. Do not read this manifest section as an active QC gate.
+            "consumed_by": [],
         }
     seed = str(SPLITS.get("seed", "nrl-procurement-v1"))
     rows = representative_rows(all_rows, args.limit, seed)
@@ -2813,6 +2863,12 @@ def main(argv: list[str] | None = None) -> None:
     single_generation_coverage = request_coverage(planned_single, generated_audit)
     deterministic_rejected = [row for row in generated_audit if not row.get("deterministic_checks", {}).get("passed", False)]
     generated = [row for row in generated_audit if row.get("deterministic_checks", {}).get("passed", False)]
+    # Captured before dedup and any portfolio cap runs, so the manifest can
+    # report how concentrated generation actually is before enforcement
+    # discards the overrepresented records — the post-cap pool is healthy by
+    # construction and cannot show this on its own (audit T9).
+    question_opener_diversity_pre_cap = question_opener_diversity(generated)
+    single_generated_pre_cap_count = len(generated)
     generated, duplicates = deduplicate(
         generated,
         float(QUALITY.get("dedupe_threshold", 94)),
@@ -2920,6 +2976,8 @@ def main(argv: list[str] | None = None) -> None:
                 drafting_stats={},
                 duplicates=duplicates,
                 opener_overrepresented=opener_overrepresented,
+                single_generated_pre_cap_count=single_generated_pre_cap_count,
+                question_opener_diversity_pre_cap=question_opener_diversity_pre_cap,
                 question_type_overrepresented=question_type_overrepresented,
                 question_style_overrepresented=question_style_overrepresented,
                 extractive_overrepresented=extractive_overrepresented,
@@ -3338,6 +3396,8 @@ def main(argv: list[str] | None = None) -> None:
                 drafting_stats={},
                 duplicates=duplicates + cross_duplicates,
                 opener_overrepresented=opener_overrepresented,
+                single_generated_pre_cap_count=single_generated_pre_cap_count,
+                question_opener_diversity_pre_cap=question_opener_diversity_pre_cap,
                 extractive_overrepresented=extractive_overrepresented,
                 proposition_stats=proposition_stats,
                 reasoning_path_stats=reasoning_path_stats,
@@ -3620,6 +3680,8 @@ def main(argv: list[str] | None = None) -> None:
         drafting_stats=drafting_stats,
         duplicates=duplicates + cross_duplicates,
         opener_overrepresented=opener_overrepresented,
+        single_generated_pre_cap_count=single_generated_pre_cap_count,
+        question_opener_diversity_pre_cap=question_opener_diversity_pre_cap,
         question_type_overrepresented=question_type_overrepresented,
         question_style_overrepresented=question_style_overrepresented,
         extractive_overrepresented=extractive_overrepresented,

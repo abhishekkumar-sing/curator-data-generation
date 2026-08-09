@@ -164,15 +164,77 @@ def _quantities(text: str) -> list[tuple[str, str, str]]:
     return quantities
 
 
+def _quantity_is_supported(value: str, unit: str, support_text: str) -> bool:
+    supported = {(support_value, support_unit) for _, support_value, support_unit in _quantities(support_text)}
+    if (value, unit) in supported:
+        return True
+    return not unit and value.isdigit() and any(not support_unit and support_value.startswith(f"{value}.") for support_value, support_unit in supported)
+
+
 def _unsupported_quantities(answer: str, support_text: str) -> list[str]:
-    supported = {(value, unit) for _, value, unit in _quantities(support_text)}
-    unsupported = []
-    for display, value, unit in _quantities(answer):
-        exact = (value, unit) in supported
-        parent_section = (
-            not unit and value.isdigit() and any(not support_unit and support_value.startswith(f"{value}.") for support_value, support_unit in supported)
-        )
-        if not exact and not parent_section:
+    return [display for display, value, unit in _quantities(answer) if not _quantity_is_supported(value, unit, support_text)]
+
+
+def _claim_statement_wildcard_pattern(statement: str) -> str:
+    """Build a regex matching `statement` with every number wildcarded.
+
+    Tolerating a substituted numeric span lets a misattributed answer number
+    still resolve to the claim whose subject/entity wording it appears under,
+    instead of being matched by exact text (which a wrong number can never
+    satisfy) or left unscoped.
+    """
+    normalized = _normalized_text(statement).rstrip(".")
+    pieces: list[str] = []
+    last = 0
+    for match in NUMBER.finditer(normalized):
+        pieces.append(re.escape(normalized[last : match.start()]))
+        pieces.append(r"\S+(?:\s+\S+){0,2}")
+        last = match.end()
+    pieces.append(re.escape(normalized[last:]))
+    return "".join(pieces)
+
+
+def _claim_answer_spans(answer: str, claims: list[dict[str, Any]]) -> list[tuple[int, int, str]]:
+    """Locate each claim's own assertion inside the (normalized) answer text."""
+    spans: list[tuple[int, int, str]] = []
+    for claim in claims:
+        statement = str(claim.get("statement", "")).strip()
+        if not statement:
+            continue
+        pattern = _claim_statement_wildcard_pattern(statement)
+        if not pattern:
+            continue
+        match = re.search(pattern, answer, re.IGNORECASE)
+        if match:
+            evidence = " ".join(str(item.get("quote", "")) for item in claim.get("evidence", []))
+            spans.append((match.start(), match.end(), evidence))
+    return spans
+
+
+def _unsupported_answer_quantities(
+    answer: str,
+    claims: list[dict[str, Any]],
+    fallback_support: str,
+) -> list[str]:
+    """Scope each answer-level number to the claim whose wording contains it.
+
+    A blind join across every claim's evidence lets a number that is correct
+    for a *different* claim's subject pass unnoticed when the answer
+    misattributes it. Resolving a claim-specific span first closes that gap;
+    a number outside every span (or inside more than one, i.e. ambiguous)
+    falls back to the exact prior union-of-all-evidence behavior, so this is
+    never stricter than before on a case we cannot confidently attribute.
+    """
+    normalized_answer = _normalized_text(answer)
+    spans = _claim_answer_spans(normalized_answer, claims)
+    unsupported: list[str] = []
+    for match in NUMBER.finditer(normalized_answer):
+        display = match.group(0).strip()
+        value = match.group("value").replace(",", "").lower()
+        unit = _canonical_unit(match.group("unit") or "")
+        containing = [evidence for start, end, evidence in spans if start <= match.start() < end]
+        support = containing[0] if len(containing) == 1 else fallback_support
+        if not _quantity_is_supported(value, unit, support):
             unsupported.append(display)
     return unsupported
 
@@ -402,7 +464,7 @@ def validate_record(record: dict[str, Any], passage: str) -> list[str]:
         reasons.append("claim_evidence_mismatch")
     support = " ".join(quotes)
     reasons.extend(semantic_support_issues(record["answer"], support))
-    for number in _unsupported_quantities(record["answer"], support):
+    for number in _unsupported_answer_quantities(record["answer"], claims, support):
         reasons.append(f"unsupported_number:{number}")
     for acronym in _unsupported_acronyms(
         record["answer"],
@@ -744,7 +806,11 @@ def validate_cross_record(record: dict[str, Any], documents: list[dict[str, Any]
     reasons.extend(semantic_support_issues(record["answer"], claim_support))
     # Manual identity and version dates are valid support for attribution in the
     # answer even when they are not repeated inside the quoted policy sentence.
-    for number in _unsupported_quantities(record["answer"], f"{claim_support}\n{metadata_support}"):
+    for number in _unsupported_answer_quantities(
+        record["answer"],
+        record.get("claims", []),
+        f"{claim_support}\n{metadata_support}",
+    ):
         reasons.append(f"unsupported_number:{number}")
     for step in record.get("reasoning_steps", []):
         if step.get("operation") not in {
