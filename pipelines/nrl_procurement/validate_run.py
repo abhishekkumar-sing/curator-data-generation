@@ -82,6 +82,29 @@ def _failure_distribution(
     return dict(sorted(counts.items()))
 
 
+def _question_opener_diversity_summary(manifest: dict[str, Any]) -> dict[str, Any]:
+    """Report post-cap and pre-cap opener concentration side by side.
+
+    `manifest.statistics.question_opener_diversity` (post-cap) is computed on
+    the final exported pool and, by construction, always looks healthy once
+    `enforce_question_opener_diversity` has already removed the
+    overrepresented records — it cannot show how concentrated generation
+    actually was before that cap ran. `manifest.question_opener_diversity_pre_cap`
+    (added for audit task T9) is computed on the raw generated pool before
+    dedup or the cap, so a regression toward near-total template homogeneity
+    is visible here even though the post-cap pool would never show it.
+    Both default to an empty/zero shape when a manifest predates the field
+    that produces them (older runs, or this run failed before that stage)
+    rather than raising, since this is a descriptive report field, not a gate.
+    """
+    post_cap = manifest.get("statistics", {}).get("question_opener_diversity", {})
+    pre_cap = manifest.get("question_opener_diversity_pre_cap", {})
+    return {
+        "post_cap": post_cap,
+        "pre_cap": pre_cap,
+    }
+
+
 def validate_run(
     files_dir: Path,
     working_dir: Path | None = None,
@@ -179,6 +202,7 @@ def validate_run(
         "stage_quality_evidence": stage_quality_evidence,
         "leakage_audit_passed": leakage.get("passed", False),
         "post_retry_model_failure_distribution": failures,
+        "question_opener_diversity": _question_opener_diversity_summary(manifest),
         "human_review": {
             **review_counts,
             "minimum_accepted_required": 100,

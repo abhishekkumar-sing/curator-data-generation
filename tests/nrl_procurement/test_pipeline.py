@@ -4354,6 +4354,76 @@ def test_release_validation_requires_all_four_exports_and_human_review(
     assert "stage_quality_evidence_incomplete:drafting" in failed_stage["issues"]
 
 
+def test_release_validation_surfaces_pre_cap_and_post_cap_opener_diversity(
+    tmp_path: Path,
+) -> None:
+    files_dir = tmp_path / "files"
+    files_dir.mkdir()
+    (files_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "run_id": "run",
+                "status": "complete",
+                "terminal_request_completeness": {"complete": True},
+                "required_task_type_counts": {"qa": 1},
+                "quality_acceptance": {"portfolio_quality_complete": True},
+                "statistics": {
+                    "question_opener_diversity": {
+                        "unique_openers": 6,
+                        "top_opener": "what is",
+                        "top_opener_count": 12,
+                        "top_opener_share": 0.2,
+                    },
+                },
+                "question_opener_diversity_pre_cap": {
+                    "unique_openers": 2,
+                    "top_opener": "according to",
+                    "top_opener_count": 480,
+                    "top_opener_share": 0.8,
+                    "pool_size": 600,
+                    "cap_waste_ratio": 0.5,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    (files_dir / "leakage_audit.json").write_text(json.dumps({"passed": True}), encoding="utf-8")
+    row = json.dumps({"record_id": "r1", "split": "train"}) + "\n"
+    (files_dir / "qa_sft.jsonl").write_text(row, encoding="utf-8")
+    (files_dir / "eval.jsonl").write_text("", encoding="utf-8")
+    (files_dir / "canonical.jsonl").write_text("{}\n", encoding="utf-8")
+    report = validate_run(files_dir)
+    assert report["question_opener_diversity"]["post_cap"]["top_opener_share"] == 0.2
+    assert report["question_opener_diversity"]["pre_cap"]["top_opener_share"] == 0.8
+    assert report["question_opener_diversity"]["pre_cap"]["cap_waste_ratio"] == 0.5
+
+
+def test_release_validation_defaults_opener_diversity_when_manifest_predates_it(
+    tmp_path: Path,
+) -> None:
+    files_dir = tmp_path / "files"
+    files_dir.mkdir()
+    (files_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "run_id": "run",
+                "status": "complete",
+                "terminal_request_completeness": {"complete": True},
+                "required_task_type_counts": {"qa": 1},
+                "quality_acceptance": {"portfolio_quality_complete": True},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (files_dir / "leakage_audit.json").write_text(json.dumps({"passed": True}), encoding="utf-8")
+    row = json.dumps({"record_id": "r1", "split": "train"}) + "\n"
+    (files_dir / "qa_sft.jsonl").write_text(row, encoding="utf-8")
+    (files_dir / "eval.jsonl").write_text("", encoding="utf-8")
+    (files_dir / "canonical.jsonl").write_text("{}\n", encoding="utf-8")
+    report = validate_run(files_dir)
+    assert report["question_opener_diversity"] == {"post_cap": {}, "pre_cap": {}}
+
+
 def test_release_validation_detects_train_eval_overlap(tmp_path: Path) -> None:
     files_dir = tmp_path / "files"
     files_dir.mkdir()
