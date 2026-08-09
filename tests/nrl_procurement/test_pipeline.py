@@ -28,7 +28,9 @@ from cross_document import build_bundles  # noqa: E402
 from cross_stage import (  # noqa: E402
     CrossDocumentGenerator,
     CrossDocumentJudge,
+    CrossSourceAblationAnswerGenerator,
     SingularCrossDocumentJudge,
+    cross_ablation_trial_validation_issues,
 )
 from drafting import (  # noqa: E402
     TenderDraftingGenerator,
@@ -107,6 +109,7 @@ from reasoning_paths import build_reasoning_paths, validate_reasoning_path  # no
 from resume import ResumeManager  # noqa: E402
 from review import REVIEW_DIMENSIONS, prepare_review, validate_reviews  # noqa: E402
 from schemas import (  # noqa: E402
+    CrossAblationTrialDraft,
     CrossCandidateBatch,
     CrossJudgeBatch,
     CrossJudgedCandidate,
@@ -332,6 +335,62 @@ def test_ablation_trials_are_three_blind_context_variants() -> None:
     prompts = [SourceAblationAnswerGenerator.prompt(SimpleNamespace(), trial) for trial in trials]
     assert all("Canonical claim" not in prompt for prompt in prompts)
     assert all("source_a_only" not in prompt and "source_b_only" not in prompt for prompt in prompts)
+
+
+def _cross_source_document(source_id: str, passage: str) -> dict:
+    return {
+        "source_id": source_id,
+        "manual_id": f"manual-{source_id}",
+        "title": f"Title {source_id}",
+        "issuing_organization": "NRL",
+        "policy_scope": "goods",
+        "revision_date": "2022-01-01",
+        "as_of_date": "2022-01-01",
+        "page": "1",
+        "section": "Scope",
+        "chunk_id": f"chunk-{source_id}",
+        "passage": passage,
+    }
+
+
+def test_cross_ablation_answer_generator_renders_only_visible_source() -> None:
+    source_a = _cross_source_document("source_a", "Source A exact evidence text.")
+    source_b = _cross_source_document("source_b", "Source B exact evidence text.")
+    trial = {
+        "trial_id": "cross-ablation-1",
+        "variant": "source_a_only",
+        "record_id": "record-1",
+        "question": "How do source A and source B interact?",
+        "visible_source_documents": [source_a],
+        "visible_source_ids": ["source_a"],
+        "withheld_source_ids": ["source_b"],
+    }
+    prompt = CrossSourceAblationAnswerGenerator.prompt(SimpleNamespace(), trial)
+    assert source_a["passage"] in prompt
+    assert source_b["passage"] not in prompt
+    assert "source_a_only" not in prompt and "source_b_only" not in prompt
+
+    draft_citing_withheld_source = {
+        "answerable": True,
+        "answer": "A supported answer.",
+        "claims": [
+            {
+                "statement": "A supported material claim.",
+                "evidence": [{"source_id": "source_b", "quote": source_b["passage"]}],
+            }
+        ],
+        "limitation_reason": "",
+    }
+    issues = cross_ablation_trial_validation_issues(draft_citing_withheld_source, trial)
+    assert "trial_uses_non_visible_source" in issues
+
+    parsed = CrossSourceAblationAnswerGenerator.parse(
+        SimpleNamespace(model_name="test-model"),
+        trial,
+        CrossAblationTrialDraft.model_validate(draft_citing_withheld_source),
+    )
+    assert parsed[0]["deterministic_checks"]["passed"] is False
+    assert "trial_uses_non_visible_source" in parsed[0]["deterministic_checks"]["issues"]
 
 
 def test_ablation_trial_validation_rejects_withheld_or_inexact_evidence() -> None:

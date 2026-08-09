@@ -575,6 +575,16 @@ class CrossCandidateBatch(AuditedListModel):
     json_list_fields = ("examples",)
 
 
+class CrossAblationTrialDraft(AuditedListModel):
+    """One cross-document answer attempt under an explicitly bounded source context."""
+
+    answerable: bool
+    answer: str = ""
+    claims: list[CrossClaimDraft] = Field(default_factory=list)
+    limitation_reason: str = ""
+    json_list_fields = ("claims",)
+
+
 class CrossJudgeDecision(JudgeDecision):
     full_context_supported: bool
     unsupported_without_source_ids: list[str]
