@@ -17,12 +17,12 @@ import numpy as np
 import requests
 from jsonl_io import write_jsonl_rows
 from requests.adapters import HTTPAdapter
+from settings import is_private_host, validate_endpoint_url
 from urllib3.util.retry import Retry
 
 logger = logging.getLogger(__name__)
 
 CALIBRATION_LABELS = frozenset({"duplicate", "related", "distinct"})
-_LOCAL_EMBEDDING_HOSTS = {"localhost", "127.0.0.1", "::1"}
 
 
 @dataclass(frozen=True)
@@ -91,19 +91,15 @@ def load_embedding_settings(config: dict[str, Any]) -> EmbeddingSettings | None:
             "Embedding generation is enabled but required environment settings "
             f"are missing: {', '.join(missing)}"
         )
-    endpoint = os.environ[endpoint_env].strip()
-    parsed = urlparse(endpoint)
-    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-        raise RuntimeError(f"{endpoint_env} must be an absolute HTTP(S) URL")
-    if parsed.username or parsed.password:
-        raise RuntimeError(f"{endpoint_env} must not contain credentials")
-    if parsed.query or parsed.fragment:
-        raise RuntimeError(
-            f"{endpoint_env} must not contain query parameters or a fragment"
+    try:
+        endpoint = validate_endpoint_url(
+            os.environ[endpoint_env].strip(),
+            endpoint_env,
+            allow_public_https=True,
         )
-    is_local_host = parsed.hostname in _LOCAL_EMBEDDING_HOSTS
-    if parsed.scheme != "https" and not is_local_host:
-        raise RuntimeError("Public embedding endpoints must use HTTPS")
+    except ValueError as exc:
+        raise RuntimeError(str(exc)) from exc
+    is_local_host = is_private_host(urlparse(endpoint).hostname)
     threshold = section.get("similarity_threshold")
     if threshold is not None:
         threshold = float(threshold)
@@ -143,7 +139,7 @@ def load_embedding_settings(config: dict[str, Any]) -> EmbeddingSettings | None:
         logger.warning(
             "Embeddings endpoint %s is a public host — only generated "
             "question text is sent, never source/answer text.",
-            parsed.hostname,
+            urlparse(endpoint).hostname,
         )
     return EmbeddingSettings(
         endpoint=endpoint,
