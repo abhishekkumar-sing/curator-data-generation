@@ -657,8 +657,15 @@ class LiteLLMOnlineRequestProcessor(BaseOnlineRequestProcessor):
         except litellm.RateLimitError as e:
             status_tracker.time_of_last_rate_limit_error = time.time()
             status_tracker.num_rate_limit_errors += 1
-            # because handle_single_request_with_retries will double count otherwise
-            status_tracker.num_api_errors -= 1
+            # This branch never increments num_api_errors (unlike the openai/anthropic
+            # processors, which parse a generic {"error": ...} response body and bump
+            # num_api_errors before knowing it's specifically a rate limit). Decrementing
+            # num_api_errors here has nothing to offset and drives it negative. What still
+            # needs offsetting is num_other_errors: handle_single_request_with_retries's
+            # outer except block increments it unconditionally for every exception, so
+            # without this compensating decrement a rate-limit error double-counts into
+            # num_other_errors as well as num_rate_limit_errors.
+            status_tracker.num_other_errors -= 1
             raise e
 
         # Extract token usage

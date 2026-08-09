@@ -6,12 +6,13 @@ from bespokelabs.curator.request_processor.config import OnlineRequestProcessorC
 from bespokelabs.curator.request_processor.online import (
     litellm_online_request_processor,
 )
-from bespokelabs.curator.request_processor.online.base_online_request_processor import TokenLimitStrategy
+from bespokelabs.curator.request_processor.online.base_online_request_processor import APIRequest, TokenLimitStrategy
 from bespokelabs.curator.request_processor.online.litellm_online_request_processor import (
     LiteLLMOnlineRequestProcessor,
     dereference_json_schema,
     normalize_tool_arguments,
 )
+from bespokelabs.curator.status_tracker.online_status_tracker import OnlineStatusTracker
 from bespokelabs.curator.types.generic_request import GenericRequest
 from bespokelabs.curator.types.prompt import File, _MultiModalPrompt
 from bespokelabs.curator.types.token_usage import _TokenUsage
@@ -338,3 +339,57 @@ def test_estimate_total_tokens_falls_back_for_anthropic_document_prompts():
     )
 
     assert tokens.input >= 2048
+
+
+@pytest.mark.asyncio
+async def test_rate_limit_error_never_drives_num_api_errors_negative(monkeypatch):
+    """T23 regression test.
+
+    litellm_online_request_processor.py's RateLimitError branch never increments
+    num_api_errors (unlike the openai/anthropic siblings, which parse a generic
+    {"error": ...} body and bump it before learning it's specifically a rate limit),
+    so decrementing it had nothing to offset and drove it negative on every rate-limit
+    error. The fix redirects the compensating decrement to num_other_errors, which is
+    what handle_single_request_with_retries's outer except block actually double-counts.
+    """
+    processor = LiteLLMOnlineRequestProcessor(
+        OnlineRequestProcessorConfig(
+            model="hosted_vllm/test",
+            max_requests_per_minute=100,
+            max_tokens_per_minute=1000,
+        )
+    )
+
+    async def raise_rate_limit(**kwargs):
+        raise litellm.RateLimitError(message="rate limited", llm_provider="hosted_vllm", model="test")
+
+    monkeypatch.setattr(litellm, "acompletion", raise_rate_limit)
+
+    generic_request = GenericRequest(
+        model="hosted_vllm/test",
+        messages=[{"role": "user", "content": "hi"}],
+        original_row={},
+        original_row_idx=0,
+    )
+    api_request = APIRequest(
+        task_id=0,
+        generic_request=generic_request,
+        api_specific_request={"model": "hosted_vllm/test", "messages": [{"role": "user", "content": "hi"}]},
+        attempts_left=1,
+    )
+    status_tracker = OnlineStatusTracker()
+
+    with pytest.raises(litellm.RateLimitError):
+        await processor.call_single_request(api_request, session=None, status_tracker=status_tracker)
+
+    assert status_tracker.num_api_errors == 0
+    assert status_tracker.num_rate_limit_errors == 1
+    assert status_tracker.num_other_errors == -1
+
+    # Mirrors what handle_single_request_with_retries's outer except block does for
+    # every exception (including this re-raised RateLimitError), to prove the two
+    # nets out to zero double-counting instead of a phantom negative num_api_errors.
+    status_tracker.num_other_errors += 1
+    assert status_tracker.num_api_errors == 0
+    assert status_tracker.num_other_errors == 0
+    assert status_tracker.num_rate_limit_errors == 1
