@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import math
 import os
 import re
@@ -16,7 +17,10 @@ import numpy as np
 import requests
 from jsonl_io import write_jsonl_rows
 from requests.adapters import HTTPAdapter
+from settings import is_private_host, validate_endpoint_url
 from urllib3.util.retry import Retry
+
+logger = logging.getLogger(__name__)
 
 CALIBRATION_LABELS = frozenset({"duplicate", "related", "distinct"})
 
@@ -69,6 +73,10 @@ class EmbeddingSettings:
         }
 
 
+_CREDENTIAL_ROTATION_ENV = "EMBEDDING_CREDENTIAL_ROTATED"
+_ROTATION_TRUE_VALUES = {"1", "true", "t", "yes", "on"}
+
+
 def load_embedding_settings(config: dict[str, Any]) -> EmbeddingSettings | None:
     """Resolve an optional embedding profile from config and environment."""
     section = config.get("embeddings", {})
@@ -87,22 +95,30 @@ def load_embedding_settings(config: dict[str, Any]) -> EmbeddingSettings | None:
             "Embedding generation is enabled but required environment settings "
             f"are missing: {', '.join(missing)}"
         )
-    endpoint = os.environ[endpoint_env].strip()
-    parsed = urlparse(endpoint)
-    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-        raise RuntimeError(f"{endpoint_env} must be an absolute HTTP(S) URL")
-    if parsed.username or parsed.password:
-        raise RuntimeError(f"{endpoint_env} must not contain credentials")
-    if parsed.query or parsed.fragment:
+    rotation_confirmed = (
+        os.environ.get(_CREDENTIAL_ROTATION_ENV, "").strip().lower()
+        in _ROTATION_TRUE_VALUES
+    )
+    if not rotation_confirmed:
         raise RuntimeError(
-            f"{endpoint_env} must not contain query parameters or a fragment"
+            f"Refusing to use {api_key_env}: this embedding credential was "
+            "exposed in a prior session on 2026-08-08 and has not been "
+            "confirmed rotated (see pipelines/nrl_procurement/TASKS.md, "
+            "'Rotate this embedding credential before release'). Rotate the "
+            "key with the credential issuer, put the new value in .env, then "
+            f"set {_CREDENTIAL_ROTATION_ENV}=1 in .env to confirm rotation "
+            "before embeddings functionality (probe, calibration, or "
+            "selection) will run."
         )
-    if parsed.scheme != "https" and parsed.hostname not in {
-        "localhost",
-        "127.0.0.1",
-        "::1",
-    }:
-        raise RuntimeError("Public embedding endpoints must use HTTPS")
+    try:
+        endpoint = validate_endpoint_url(
+            os.environ[endpoint_env].strip(),
+            endpoint_env,
+            allow_public_https=True,
+        )
+    except ValueError as exc:
+        raise RuntimeError(str(exc)) from exc
+    is_local_host = is_private_host(urlparse(endpoint).hostname)
     threshold = section.get("similarity_threshold")
     if threshold is not None:
         threshold = float(threshold)
@@ -138,6 +154,12 @@ def load_embedding_settings(config: dict[str, Any]) -> EmbeddingSettings | None:
     timeout_seconds = float(section.get("timeout_seconds", 120))
     if timeout_seconds <= 0:
         raise RuntimeError("embeddings.timeout_seconds must be positive")
+    if not is_local_host:
+        logger.warning(
+            "Embeddings endpoint %s is a public host — only generated "
+            "question text is sent, never source/answer text.",
+            urlparse(endpoint).hostname,
+        )
     return EmbeddingSettings(
         endpoint=endpoint,
         model=os.environ[model_env].strip(),

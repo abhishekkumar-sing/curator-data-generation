@@ -394,20 +394,28 @@ def classify_change(
         same_structured = all(historical.get(field) == targets[0].get(field) for field in ("modality", "polarity", "conditions", "exceptions", "threshold"))
         if same_structured:
             return "identical_state", ["identical_states_are_not_transitions"]
+    # A historical proposition that resolves to more than one target state has
+    # been restructured. Detect this before any single-field diff branch below
+    # (all of which only ever compared historical against targets[0], the
+    # numeric check being the sole exception) so a one-to-many restructure is
+    # never shadowed by, e.g., the concatenated target evidence merely having a
+    # different number of matched quantities than the historical evidence —
+    # a near-certain outcome whenever there is more than one target, which
+    # previously made this classification almost unreachable.
+    if len(targets) > 1:
+        return "one_to_many_restructure", issues
     if historical["modality"] != targets[0]["modality"]:
         return "modality_change", issues
     if historical["polarity"] != targets[0]["polarity"]:
         return "polarity_change", issues
     historical_numbers = NUMBER.findall(historical["evidence"]["quote"])
-    target_numbers = [number for target in targets for number in NUMBER.findall(target["evidence"]["quote"])]
+    target_numbers = NUMBER.findall(targets[0]["evidence"]["quote"])
     if historical_numbers != target_numbers:
         return "numeric_or_threshold_change", issues
     if historical.get("conditions") != targets[0].get("conditions"):
         return "condition_change", issues
     if historical.get("exceptions") != targets[0].get("exceptions"):
         return "exception_change", issues
-    if len(targets) > 1:
-        return "one_to_many_restructure", issues
     return "wording_or_scope_change", issues
 
 
