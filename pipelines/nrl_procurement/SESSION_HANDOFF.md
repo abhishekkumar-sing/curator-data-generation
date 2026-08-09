@@ -1,30 +1,53 @@
 # NRL Procurement Pipeline — Session Handoff
 
-Last updated: 2026-08-02
+Last updated: 2026-08-08
 
 ## Current objective
 
-Scope is currently narrowed, deliberately, to **single-document QA and
-QA-CoT only**. In `config.yaml`, `path_qa.enabled`, `temporal.enabled`,
-`propositions.enabled`, and `reasoning_paths.enabled` are all `false`, and
-`quality.required_task_types` is `[qa, qa_cot]`. Generation runs should also
-pass `--skip-cross-document --skip-drafting` at the CLI. This is a scope
-decision to ship one clean two-task-type dataset first, not a regression:
-cross-document QA/QA-CoT, drafting, temporal, and path-derived
-cross-document records are all still implemented and can be brought back by
-flipping those config flags and dropping the CLI skip flags.
+Scope is **not** narrowed to single-document QA/QA-CoT any more. As of
+2026-08-08, `config.yaml` has `path_qa.enabled`, `temporal.enabled`,
+`propositions.enabled`, `reasoning_paths.enabled`, `drafting.enabled`, and
+`cross_document.enabled` all set to `true` (`TASKS.md`'s "Comprehensive smoke
+feature enablement" entry, same date) — every implemented task-type stage now
+runs unless explicitly skipped at the CLI. `quality.required_task_types` is
+still `[qa, qa_cot]`, so those two remain the only *release-gated* task types,
+but every other stage generates and exports records if it isn't skipped.
+`generate.py`'s argparse wiring currently only exposes `--skip-cross-document`
+and `--skip-drafting` — there is still no CLI flag to independently disable
+`path_qa`/`temporal`/`propositions`/`reasoning_paths` (open item; see
+`--skip-propositions`/`--skip-temporal`/`--skip-path-qa`/`--skip-reasoning-paths`
+in the audit remediation backlog). No full-corpus run has yet completed
+successfully under this broadened config — the latest full-corpus validated
+run (`qa-qacot-full-003`, see below) predates the 2026-08-08 re-broadening and
+was produced with `--skip-cross-document --skip-drafting` under the earlier
+narrower config. Read the live `config.yaml` `enabled:` flags before assuming
+either scope; do not trust this paragraph's flag values without re-checking
+`config.yaml`, since this is exactly the kind of claim that goes stale between
+sessions.
 
 ## Authoritative inputs
 
-- Dynamic registry: `/home/abhishek/curator/data/source/manuals.yaml` — 16
-  manuals registered as of this session (`goods_2017`, `goods_2022`,
-  `goods_2024`, `goods_om_2022_l1_withdrawal`, `nrl_goods_rev1`,
+- Dynamic registry: `/home/abhishek/curator/data/source/manuals.yaml` — 19
+  manuals registered as of this update (`goods_2017`, `goods_2022`,
+  `goods_2024`, `goods_om_2018_issuance`, `goods_om_2021_networth`,
+  `goods_om_2022_l1_withdrawal`, `nrl_goods_rev1`,
   `nrl_consultancy_other_services_rev1`, `nrl_works_rev1`, `services_2017`,
   `services_2022`, `services_consultancy_2025`,
   `services_non_consultancy_2025`, `services_om_2021_startup_definition`,
-  `works_2019`, `works_2022`, `works_2025`,
-  `works_om_2022_para763_certification`), spanning 3,006 total corpus
-  chunks.
+  `works_2019`, `works_2022`, `works_2025`, `works_om_2022_corrigendum_pqb`,
+  `works_om_2022_para763_certification`), spanning 3,006 total corpus chunks
+  (`corpus_quality.json`'s `manuals`/`chunks` fields; verified unchanged
+  across the two most recent runs). Six of these — the five one-to-two-page
+  Office Memorandum manuals plus `services_om_2021_startup_definition` —
+  currently produce **zero eligible generation chunks** each
+  (`corpus.py::source_quality_issues`, independently reproduced against the
+  live corpus this update: `goods_om_2018_issuance`, `goods_om_2021_networth`,
+  `goods_om_2022_l1_withdrawal`, `services_om_2021_startup_definition`,
+  `works_om_2022_corrigendum_pqb`, `works_om_2022_para763_certification` all
+  show 0/N eligible chunks). This is a live front-matter-heuristic bug, not a
+  stale doc claim — see the audit remediation backlog's data-corpus track for
+  the fix; until it lands these six manuals are registered but silently
+  contribute no records.
 - Original NRL PDFs:
   - `data/source/nrlManual_Procurement_of_Goods_Rev1.pdf`
   - `data/source/nrlManual_Procurement_of_Works_Rev1.pdf`
@@ -47,22 +70,33 @@ invalidate dependent artifacts.
 Read live values from `config.yaml` and `.env`; never copy API keys into logs,
 manifests, fingerprints, or this document.
 
-At this handoff:
+At this handoff (`GENERATION_PROFILE=glm`, `JUDGE_PROFILE=gemma_structured`
+in `.env`; both route through the shared LiteLLM gateway at
+`http://10.180.148.183:3005/v1` — Nemotron is **no longer** the active
+generation profile and `gemma_thinking` is **no longer** the active judge
+profile, both superseded on 2026-08-05/2026-08-07 per `TASKS.md`):
 
-- Generation: `hosted_vllm/nvidia/nemotron-3-super`, tool-call structured
-  output, deployment identity
-  `nemotron-3-super-fp8-vllm-0.25-strict-bypass-v1`.
-  `generation_params.max_tokens` was raised from 4096 to **8192** this
-  session after live path-answer generation hit `IncompleteOutputException`
-  at the prior ceiling — Nemotron's context window is 131,072, so there is
-  ample headroom. Path-answer generation itself is currently disabled by
-  the qa/qa_cot-only scope above, but the raised ceiling also benefits plain
-  `qa`/`qa_cot` generation.
-- Judge: the active `gemma` profile uses `google/gemma-4-31B` with JSON-schema
-  structured output, `temperature=1.0`, `top_k=64`, `top_p=0.95`, and
-  `max_tokens=1024`. That ceiling is deliberately tight — the endpoint has an
-  8,192-token *combined* prompt+completion limit — do not raise it without
-  first checking judge prompt sizes.
+- Generation: `glm` profile, model `GLM-5.2-NVFP4-FP8`, JSON-schema structured
+  output, deployment identity `glm-5.2-nvfp4-fp8-v1`.
+  `generation_params.max_tokens` is **5000** (reduced from an earlier 8192 on
+  2026-08-08 to avoid advertising a long tail to the shared scheduler); a
+  separately checkpointed output-rescue pass retries truncations at a larger
+  12,000-token ceiling. Thinking/reasoning is explicitly disabled
+  (`chat_template_kwargs.enable_thinking: false`).
+- Judge: the active `gemma_structured` profile uses `gemma-4-31b-it` with
+  JSON-schema structured output, `temperature=1.0`, `top_k=64`, `top_p=0.95`,
+  `max_tokens=2048`, thinking disabled, deployment identity
+  `gemma-4-31b-it-10.180.148.183-8010-v1`. A `gemma_thinking` profile (same
+  deployment, thinking enabled) also exists in `config.yaml` and was the prior
+  default; `TASKS.md`'s 2026-08-08 same-deployment A/B found `gemma_structured`
+  reproduces the same accept/reject decisions on a small sample far faster and
+  without needing rescue, but this has not been validated on a
+  human-labeled set (still open — see judge-calibration gate below). Judge
+  output rescue retries missing decisions once at 4,096 tokens after a
+  context-window preflight.
+- Both profiles' request/judge concurrency is set to 45 for the current
+  shared-gateway smoke; do not raise it without first reviewing measured
+  timeout/yield evidence in `TASKS.md`.
 - OCR: Chandra uses the private vLLM endpoint configured through ignored
   `OCR_MODEL`, `OCR_BASE_URL`, and `OCR_API_KEY` variables. The OCR command is
   `chandra`; source PDFs are written to `data/interim/ocr` and that OCR output,
@@ -188,39 +222,61 @@ The LiteLLM pricing warning and PyArrow `null_placement` warning are
 non-blocking. Structural validation errors, permanent request failures, missing
 lineage, or empty core exports are blocking.
 
-## Latest validated run: `qa-qacot-full-002`
+## Latest validated run: `qa-qacot-full-003`
 
-Full 3,006-chunk corpus, `--skip-cross-document --skip-drafting`,
-`path_qa`/`temporal`/`propositions`/`reasoning_paths` all disabled:
+`qa-qacot-full-002` (previously documented here) has been superseded.
+`qa-qacot-full-003` (2026-08-02) is the most recent *substantial,
+non-`failed`* run — full 3,006-chunk corpus, `--skip-cross-document
+--skip-drafting`, run under the pre-2026-08-08 config where `path_qa`/
+`temporal`/`propositions`/`reasoning_paths` were still disabled. Every
+`outputs/*` directory timestamped after it (`quality-smoke-001`,
+`quality-smoke-gemma-001`/`-002`, `saturation-500-001`,
+`run-20260808T122041-362263Z`, `smoke-fast-20260808T131737Z`) is either a
+`status: "failed"` run or a 2-to-30-record smoke fixture, not a full-corpus
+result — check `outputs/*/files/manifest.json`'s `status`/`statistics.records`
+directly before trusting any claim here about "the latest run," this changes
+often:
 
-- **2,493 accepted**: 2,163 `qa` + 330 `qa_cot` (~13% CoT rate).
-- Splits: 1,930 train / 305 validation / 258 test in canonical assignments.
-  The historical task exports are unsafe: all 2,493 record IDs overlap between
-  `qa_sft.jsonl`+`qa_cot_sft.jsonl` and `eval.jsonl` because this artifact
-  predates the split-safe exporter.
-- All 3,567 citation spans across accepted records reconstruct exactly
-  against the registered source chunks (re-verified independently, not just
-  via the pipeline's own audit).
-- `leakage_audit_passed: true`, all 16 manuals correctly represented.
-- `status: "partial"` only because of `missing_judge_responses: 27` — real
-  permanent Gemma judge failures (`IncompleteOutputException` truncations
-  that exhausted their one retry), honestly recorded in `qa_rejected.jsonl`.
-  Not a defect in the fixes above.
-- **Human review: 0/100** — the single largest remaining release blocker,
-  untouched by anything in this session. Generate the sampling template
-  with `review.py prepare <files_dir> <output.jsonl>`, then
+- **1,572 accepted**: 1,048 `qa` + 524 `qa_cot` (33.3% CoT share).
+- Splits (canonical): 1,159 train / 210 validation / 203 test.
+- `reasoning_graphs_valid: 1572`, `reasoning_graphs_rejected: 11`.
+- `leakage_audit_passed: true`; 15 of the 19 registered manuals are
+  represented in accepted records (`leakage_audit.json`'s
+  `unique_values.manual: 15`). The 4 unrepresented registered manuals are
+  `goods_om_2018_issuance`, `goods_om_2021_networth`,
+  `goods_om_2022_l1_withdrawal`, and `works_om_2022_corrigendum_pqb` — all
+  four currently produce 0 eligible chunks (see Authoritative inputs above).
+  Note: `services_om_2021_startup_definition` and
+  `works_om_2022_para763_certification` *did* each contribute 1 accepted
+  record in this run, but independently re-running today's corpus-eligibility
+  check against the unchanged underlying corpus shows 0 eligible chunks for
+  both as of this update — worth a closer look by whoever picks up the
+  front-matter-heuristic fix, since it suggests eligibility for those two may
+  have regressed since 2026-08-02 rather than being a static, unchanged bug.
+- `status: "partial"`: `terminal_request_completeness.missing_judge_responses: 10`,
+  and `quality_acceptance.portfolio_quality_complete: false` because
+  `question_opener_share_complete: false` (`top_opener_share: 0.1508`,
+  `top_opener: "according to the manual"` — above the now-configured 0.08
+  ceiling; `max_question_opener_share` was lowered from 0.15 to 0.08 the same
+  day, so this run may predate that specific tightening taking effect, the
+  same caveat pattern documented for `qa-qacot-full-002`'s opener fix below).
+- **Human review: 0/100 accepted, 0/25 rejected** — still the single largest
+  remaining release blocker, unchanged since `qa-qacot-full-002`. Generate the
+  sampling template with `review.py prepare <files_dir> <output.jsonl>`, then
   `review.py validate <reviewed.jsonl>` once real reviewer labels exist.
-- Fix #6 (opener diversity) and the raised `max_tokens=8192` were **not**
-  yet in effect for this specific run — both landed after it started. The
-  next full run will additionally reflect those two.
+- Generated under the `GLM`/`gemma_structured` model contract described above
+  is **not** accurate for this specific run — `qa-qacot-full-003` predates the
+  2026-08-05/08-07 migration off Nemotron/`gemma_thinking`; check
+  `outputs/qa-qacot-full-003/files/manifest.json`'s own `models` block for the
+  models actually used for that run's records, don't assume today's contract
+  applied retroactively.
 
-Earlier runs this session (`pilot-021` n=5, `pilot-022` n=50,
-`qa-qacot-full-001` n=5) were smaller smoke tests validating individual
-fixes as they landed; `qa-qacot-full-002` is the latest full-corpus result,
-but it predates the split-safe export, opener, answer-style, and QA/CoT
-portfolio fixes.
-Do not treat `outputs/qa-qacot-full-002`'s files as final without both a
-fresh full run and the pending human review.
+Earlier runs (`pilot-021` n=5, `pilot-022` n=50, `qa-qacot-full-001` n=5,
+`qa-qacot-full-002`) were smaller smoke tests or an earlier full-corpus
+iteration validating fixes as they landed. Do not treat
+`outputs/qa-qacot-full-003`'s files as final without both a fresh full run
+under the current (broadened, GLM/Gemma) config and the still-pending human
+review.
 
 ## Next commands
 
@@ -267,7 +323,11 @@ Do not refresh or delete old run directories merely to make metrics look
 clean. Checkpoint incompatibility should be handled by fingerprints and
 contract versions.
 
-## Release gates (current qa/qa_cot-only scope)
+## Release gates
+
+`qa` and `qa_cot` remain the only *required* task types
+(`quality.required_task_types`) — see "Current objective" above for why the
+other task-type stages are no longer disabled by default.
 
 - Manifest status `complete` requires zero `missing_judge_responses` in
   addition to the gates below. A real, if infrequent, judge-side failure
@@ -293,8 +353,13 @@ contract versions.
   addition to the structured review above.
 
 Cross-document/temporal/drafting-specific gates from the prior four-core-
-export objective still apply whenever those tracks are re-enabled; see
-`TASKS.md` for that fuller gate list.
+export objective apply now, not just "whenever re-enabled" — those tracks
+are currently `enabled: true` in `config.yaml` (see "Current objective"
+above). See `TASKS.md` for that fuller gate list. Note also that drafting
+records bypass the export-time leakage-audit/split-assignment gates entirely
+as of this update (`drafting_accepted` is written straight to
+`drafting.jsonl` without going through `assign_splits`/`leakage_audit`) —
+this is an open, tracked gap, not a documentation error.
 
 ## Files to inspect first in a new session
 
