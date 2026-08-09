@@ -81,26 +81,66 @@ def require_setting(name: str) -> str:
     return value
 
 
+def is_private_host(host: str | None) -> bool:
+    """Return whether `host` is localhost or a private/loopback/link-local IP."""
+    if not host:
+        return False
+    if host.rstrip(".").lower() == "localhost":
+        return True
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return bool(address.is_private or address.is_loopback or address.is_link_local)
+
+
+def validate_endpoint_url(
+    url: str,
+    name: str,
+    *,
+    allow_public_https: bool = False,
+) -> str:
+    """Enforce the pipeline's single outbound-endpoint privacy policy.
+
+    Always rejects a non-absolute http(s) URL, embedded credentials, and
+    query parameters/fragments (which could carry credentials). When
+    `allow_public_https` is False (the default — used by every generation,
+    judge, and OCR endpoint), the host must resolve to localhost or a
+    private/loopback/link-local IP address regardless of scheme. When
+    `allow_public_https` is True (used only by the optional
+    semantic-diversity embedding endpoint, which sends generated question
+    text only — never source or answer text), a public host is permitted but
+    only over HTTPS.
+
+    Raises `ValueError` naming `name` on any violation; callers translate
+    this into their own exception convention (e.g. `SystemExit` for CLI
+    startup checks, `RuntimeError` for config loading).
+    """
+    parsed = urlparse(url)
+    host = parsed.hostname
+    if parsed.scheme not in {"http", "https"} or not host:
+        raise ValueError(f"{name} must be an absolute http(s) URL")
+    if parsed.username or parsed.password:
+        raise ValueError(f"{name} must not contain embedded credentials")
+    if parsed.query or parsed.fragment:
+        raise ValueError(f"{name} must not contain query parameters or a fragment")
+    private = is_private_host(host)
+    if not allow_public_https:
+        if not private:
+            raise ValueError(f"{name} must be private; refusing to send data to {host}")
+        return url
+    if parsed.scheme != "https" and not private:
+        raise ValueError(f"Public {name} endpoints must use HTTPS")
+    return url
+
+
 def require_private_endpoint(name: str) -> str:
     """Return an endpoint only when it targets localhost or a private address."""
     value = require_setting(name)
-    parsed = urlparse(value)
-    host = parsed.hostname
-    if parsed.scheme not in {"http", "https"} or not host:
-        raise SystemExit(f"{name} must be an http(s) URL in {PROJECT_ROOT / '.env'}")
-    if parsed.username or parsed.password:
-        raise SystemExit(f"{name} must not contain embedded credentials")
-    if host.rstrip(".").lower() == "localhost":
-        return value
     try:
-        address = ipaddress.ip_address(host)
+        return validate_endpoint_url(value, name, allow_public_https=False)
     except ValueError as exc:
-        raise SystemExit(
-            f"{name} must use localhost or a private IP address; refusing endpoint {host!r}"
-        ) from exc
-    if not (address.is_private or address.is_loopback or address.is_link_local):
-        raise SystemExit(f"{name} must be private; refusing to send data to {host}")
-    return value
+        raise SystemExit(f"{exc} ({PROJECT_ROOT / '.env'})") from exc
 
 
 load_dotenv(PROJECT_ROOT / ".env")

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import sys
 from pathlib import Path
 
@@ -293,6 +294,27 @@ def test_embedding_credential_rotation_confirmation_accepts_various_true_values(
     monkeypatch.setenv("EMBEDDING_CREDENTIAL_ROTATED", "true")
     settings = load_embedding_settings({"embeddings": {"enabled": True, "dimensions": 2}})
     assert settings is not None
+
+
+def test_embedding_settings_warns_for_public_host_not_private(
+    monkeypatch, caplog
+) -> None:
+    monkeypatch.setenv("EMBEDDING_API_KEY", "secret")
+    monkeypatch.setenv("EMBEDDING_BASE_URL", "https://example.invalid/embeddings")
+    monkeypatch.setenv("EMBEDDING_MODEL", "model")
+    monkeypatch.setenv("EMBEDDING_CREDENTIAL_ROTATED", "1")
+    with caplog.at_level(logging.WARNING, logger="semantic_diversity"):
+        load_embedding_settings({"embeddings": {"enabled": True, "dimensions": 2}})
+    assert any(
+        "public host" in record.message and "example.invalid" in record.message
+        for record in caplog.records
+    )
+
+    caplog.clear()
+    monkeypatch.setenv("EMBEDDING_BASE_URL", "http://127.0.0.1:9000/embeddings")
+    with caplog.at_level(logging.WARNING, logger="semantic_diversity"):
+        load_embedding_settings({"embeddings": {"enabled": True, "dimensions": 2}})
+    assert not any("public host" in record.message for record in caplog.records)
 
 
 def test_calibration_report_requires_enough_both_class_labels() -> None:
