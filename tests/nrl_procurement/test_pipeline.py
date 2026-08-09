@@ -29,8 +29,10 @@ from cross_stage import (  # noqa: E402
     CrossDocumentGenerator,
     CrossDocumentJudge,
     CrossSourceAblationAnswerGenerator,
+    CrossSourceAblationJudge,
     SingularCrossDocumentJudge,
     adjudicate_cross_ablation_trials,
+    build_cross_ablation_judge_inputs,
     build_cross_ablation_trial_inputs,
     cross_ablation_trial_validation_issues,
 )
@@ -112,6 +114,7 @@ from reasoning_paths import build_reasoning_paths, validate_reasoning_path  # no
 from resume import ResumeManager  # noqa: E402
 from review import REVIEW_DIMENSIONS, prepare_review, validate_reviews  # noqa: E402
 from schemas import (  # noqa: E402
+    AblationJudgeDecision,
     CrossAblationTrialDraft,
     CrossCandidateBatch,
     CrossJudgeBatch,
@@ -472,6 +475,80 @@ def test_real_cross_ablation_adjudication_requires_full_claim_coverage() -> None
     result = adjudicate_cross_ablation_trials([candidate], same_source_leak)[0]
     assert result["passed"] is False
     assert "source_a_only_fully_covers_answer" in result["issues"]
+
+
+def test_cross_ablation_judge_reviews_only_complete_actual_trial_bundles() -> None:
+    candidate = {
+        "record_id": "record-a",
+        "question": "How do A and B apply?",
+        "answer": "A and B apply.",
+        "source_documents": [
+            {"source_id": "source_a"},
+            {"source_id": "source_b"},
+        ],
+        "claims": [
+            {
+                "statement": "A",
+                "evidence": [{"source_id": "source_a", "quote": "A policy text."}],
+            },
+            {
+                "statement": "B",
+                "evidence": [{"source_id": "source_b", "quote": "B policy text."}],
+            },
+        ],
+    }
+    trials = [
+        {
+            "record_id": "record-a",
+            "variant": variant,
+            "trial_output": {"answerable": variant == "full", "claims": []},
+        }
+        for variant in ("full", "source_a_only", "source_b_only")
+    ]
+    inputs = build_cross_ablation_judge_inputs(
+        [candidate],
+        trials,
+        [{"record_id": "record-a", "passed": True}],
+    )
+    assert len(inputs) == 1
+    assert set(inputs[0]["actual_trials"]) == {
+        "full",
+        "source_a_only",
+        "source_b_only",
+    }
+    prompt = object.__new__(CrossSourceAblationJudge).prompt(inputs[0])
+    assert "ACTUAL OUTPUTS" in prompt
+
+
+def test_cross_ablation_judge_rejects_when_source_a_alone_is_declared_complete() -> None:
+    row = {
+        "record_id": "record-a",
+        "candidate": {
+            "question": "How do A and B apply?",
+            "answer": "A and B apply.",
+            "claims": [],
+            "source_documents": [],
+        },
+        "actual_trials": {},
+    }
+    decision = AblationJudgeDecision(
+        record_id="record-a",
+        full_context_supported=True,
+        # source_a alone still fully answers the question: source_b was never
+        # actually necessary, so this must be rejected even though every
+        # other boolean below claims a valid, necessary experiment.
+        source_a_only_incomplete=False,
+        source_b_only_incomplete=True,
+        comparison_valid=True,
+        score=5,
+        issues=[],
+    )
+    parsed = CrossSourceAblationJudge.parse(
+        SimpleNamespace(model_name="judge-model"),
+        row,
+        decision,
+    )
+    assert parsed[0]["judge"]["accepted"] is False
 
 
 def test_ablation_trial_validation_rejects_withheld_or_inexact_evidence() -> None:
