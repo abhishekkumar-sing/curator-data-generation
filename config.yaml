@@ -515,14 +515,16 @@ cross_document:
   # Generate siblings, judge each independently, then retain the strongest one
   # with auditable loser reasons.
   best_of_n: 3
-  # T14e: off by default. When true (and --skip-cross-ablation is not passed),
-  # every cross-document candidate surviving semantic dedup/diversity filtering
+  # T14e: when true (and --skip-cross-ablation is not passed), every
+  # cross-document candidate surviving semantic dedup/diversity filtering
   # also has to pass a real 3-trial empirical source-ablation test (full context,
   # source_a-only, source_b-only, each independently judged) before export,
   # instead of relying solely on CrossDocumentJudge's single imagined ablation
   # judgment. Roughly doubles LLM call volume for surviving cross-document
-  # candidates — pilot with --limit before enabling for a full run.
-  empirical_ablation: false
+  # candidates. Enabled here for the 2026-08-09 full-scope smoke pilot
+  # (bounded via --limit/--cross-document-limit) — re-review before a large
+  # unbounded run given the call-volume cost.
+  empirical_ablation: true
   novelty_passes: 1
   minimum_similarity: 12
   minimum_shared_terms: 5
