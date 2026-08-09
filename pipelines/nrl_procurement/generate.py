@@ -84,6 +84,7 @@ from unanswerable import (
     AdversarialUnanswerableGenerator,
     IndependentAnswerabilityJudge,
     build_unanswerable_inputs,
+    unanswerable_fraction_gate,
 )
 from path_qa import (
     SourceAblationAnswerGenerator,
@@ -3502,6 +3503,11 @@ def main(argv: list[str] | None = None) -> None:
         manual_folds=manual_folds,
     )
     stats = export_records(accepted, manuals, files_dir, run_id)
+    unanswerable_stats["achieved"] = unanswerable_fraction_gate(
+        int(stats.get("records", 0)),
+        int(stats.get("answerable_false", 0)),
+        float(QUALITY.get("unanswerable_fraction", 0.0)),
+    )
 
     drafting_accepted: list[dict[str, Any]] = []
     drafting_generated: list[dict[str, Any]] = []
@@ -3681,6 +3687,7 @@ def main(argv: list[str] | None = None) -> None:
     )
     extractive_share = float(stats.get("answer_style_diversity", {}).get("extractive_answer_share", 0.0))
     extractive_share_complete = extractive_share <= float(QUALITY.get("max_extractive_answer_share", 0.35))
+    unanswerable_fraction_complete = bool(unanswerable_stats["achieved"]["within_tolerance"])
     portfolio_quality_complete = (
         qa_cot_share_complete
         and opener_share_complete
@@ -3688,6 +3695,7 @@ def main(argv: list[str] | None = None) -> None:
         and question_type_coverage_complete
         and question_style_share_complete
         and extractive_share_complete
+        and unanswerable_fraction_complete
     )
     status = (
         "complete"
@@ -3774,6 +3782,9 @@ def main(argv: list[str] | None = None) -> None:
         "question_type_coverage_complete": question_type_coverage_complete,
         "question_style_share_complete": question_style_share_complete,
         "extractive_answer_share_complete": extractive_share_complete,
+        "unanswerable_fraction": unanswerable_stats["achieved"]["achieved_fraction"],
+        "minimum_unanswerable_fraction_target": unanswerable_stats["achieved"]["target_fraction"],
+        "unanswerable_fraction_complete": unanswerable_fraction_complete,
         "portfolio_quality_complete": portfolio_quality_complete,
         "stage_quality_evidence_complete": stage_quality_evidence_complete,
     }
