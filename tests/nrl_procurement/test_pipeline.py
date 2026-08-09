@@ -4275,6 +4275,16 @@ def _minimal_final_manifest_kwargs() -> dict:
     }
 
 
+def test_release_ready_requires_both_status_complete_and_human_review() -> None:
+    incomplete_review = {"complete": False}
+    complete_review = {"complete": True}
+    assert generation_pipeline._release_ready("complete", complete_review) is True
+    assert generation_pipeline._release_ready("complete", incomplete_review) is False
+    assert generation_pipeline._release_ready("partial", complete_review) is False
+    assert generation_pipeline._release_ready("partial", incomplete_review) is False
+    assert generation_pipeline._release_ready("complete", {}) is False
+
+
 def test_final_manifest_human_review_defaults_to_honest_placeholder() -> None:
     manifest = generation_pipeline._final_manifest(**_minimal_final_manifest_kwargs())
     assert manifest["human_review"] == {
