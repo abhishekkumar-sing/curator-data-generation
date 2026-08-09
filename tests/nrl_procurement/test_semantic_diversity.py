@@ -391,6 +391,7 @@ def test_hybrid_equivalence_requires_similarity_floor(monkeypatch) -> None:
     monkeypatch.setenv("EMBEDDING_API_KEY", "secret")
     monkeypatch.setenv("EMBEDDING_BASE_URL", "https://example.invalid/embeddings")
     monkeypatch.setenv("EMBEDDING_MODEL", "model")
+    monkeypatch.setenv("EMBEDDING_CREDENTIAL_ROTATED", "1")
     config = {
         "embeddings": {
             "enabled": True,
@@ -411,6 +412,7 @@ def test_run_semantic_diversity_dispatches_hybrid_equivalence_mode(tmp_path: Pat
     monkeypatch.setenv("EMBEDDING_API_KEY", "secret")
     monkeypatch.setenv("EMBEDDING_BASE_URL", "https://example.invalid/embeddings")
     monkeypatch.setenv("EMBEDDING_MODEL", "model")
+    monkeypatch.setenv("EMBEDDING_CREDENTIAL_ROTATED", "1")
     base = {
         "task_type": "qa",
         "task": "compliance_and_audit",
