@@ -4144,6 +4144,41 @@ def _resume_profile(prefix: str, profile_name: str) -> dict:
     }
 
 
+class _PromptStageLLMV1:
+    """A stage LLM stub with a real, inspectable `prompt()`/`parse()` pair.
+
+    Unlike `_FakeStageLLM` (a bare callable with no `prompt`/`parse` at all,
+    used by the transport/model-identity resume tests), this fixture exists
+    specifically to exercise T22's prompt/parse source hashing.
+    """
+
+    def __init__(self, rows: list[dict], calls: list[str], fail: bool = False):
+        self.rows = rows
+        self.calls = calls
+        self.fail = fail
+
+    def prompt(self, row: dict) -> str:
+        return f"Answer using opener phrasing 'According to the manual': {row}"
+
+    def parse(self, row: dict, response) -> dict:
+        return {**row, "response": response}
+
+    def __call__(self, dataset, working_dir: str):
+        self.calls.append(working_dir)
+        if self.fail:
+            raise AssertionError("completed checkpoint should have been reused")
+        return SimpleNamespace(
+            dataset=SimpleNamespace(to_list=lambda: self.rows),
+        )
+
+
+class _PromptStageLLMV2(_PromptStageLLMV1):
+    """Same class shape as `_PromptStageLLMV1`, but with edited prompt wording."""
+
+    def prompt(self, row: dict) -> str:
+        return f"Ask this as a specific persona voice, not a generic opener: {row}"
+
+
 class _FakeStageLLM:
     def __init__(self, rows: list[dict], calls: list[str], fail: bool = False):
         self.rows = rows
@@ -4509,3 +4544,124 @@ def test_refresh_stage_preserves_checkpoint_history_and_redacts_secrets(
     serialized = "\n".join(path.read_text(encoding="utf-8") for path in (tmp_path / "outputs" / "same-run").rglob("*.json"))
     assert "secret-generation-key" not in serialized
     assert "secret-judge-key" not in serialized
+
+
+def test_contract_hash_changes_when_llm_prompt_source_changes(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Unit-level check: T22's prompt/parse source hashing actually differs."""
+    manager = _resume_manager(
+        tmp_path,
+        monkeypatch,
+        generation_model="model-a",
+        generation_url="http://10.0.0.1:8000/v1",
+        generation_deployment="deployment-a",
+    )
+    same_class_hash_a = manager._contract_hash("generation", _PromptStageLLMV1([], []))
+    same_class_hash_b = manager._contract_hash("generation", _PromptStageLLMV1([], []))
+    changed_prompt_hash = manager._contract_hash("generation", _PromptStageLLMV2([], []))
+    no_llm_hash = manager._contract_hash("generation")
+
+    assert same_class_hash_a == same_class_hash_b
+    assert same_class_hash_a != changed_prompt_hash
+    assert same_class_hash_a != no_llm_hash
+
+
+def test_prompt_source_change_invalidates_completed_checkpoint(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Reproduces Critical Issue #9: a prompt-wording-only edit must not
+    silently reuse a completed checkpoint produced under the old wording."""
+    first = _resume_manager(
+        tmp_path,
+        monkeypatch,
+        generation_model="model-a",
+        generation_url="http://10.0.0.1:8000/v1",
+        generation_deployment="deployment-a",
+    )
+    first.start()
+    calls: list[str] = []
+    v1_result = [{"record_id": "one", "wording": "v1"}]
+    assert (
+        first.execute_llm_stage(
+            stage="generation",
+            role="generation",
+            llm=_PromptStageLLMV1(v1_result, calls),
+            inputs=[{"planned_request_id": "one"}],
+        )
+        == v1_result
+    )
+    first.finish("partial")
+
+    # Same run, same config, same model identity, same STAGE_CONTRACT_VERSIONS
+    # entry — only the prompt() wording differs (the scenario a developer would
+    # forget to bump a manual version number for).
+    second = _resume_manager(
+        tmp_path,
+        monkeypatch,
+        generation_model="model-a",
+        generation_url="http://10.0.0.1:8000/v1",
+        generation_deployment="deployment-a",
+    )
+    second.start()
+    v2_result = [{"record_id": "one", "wording": "v2"}]
+    result = second.execute_llm_stage(
+        stage="generation",
+        role="generation",
+        llm=_PromptStageLLMV2(v2_result, calls),
+        inputs=[{"planned_request_id": "one"}],
+    )
+
+    assert result == v2_result
+    assert len(calls) == 2
+    assert second.summary()["stage_events"]["generation"]["status"] == "executed"
+
+
+def test_unchanged_prompt_source_still_reuses_completed_checkpoint(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Companion to the invalidation test: an unrelated rerun of the exact
+    same prompt()/parse() source must still hit the completed checkpoint."""
+    first = _resume_manager(
+        tmp_path,
+        monkeypatch,
+        generation_model="model-a",
+        generation_url="http://10.0.0.1:8000/v1",
+        generation_deployment="deployment-a",
+    )
+    first.start()
+    calls: list[str] = []
+    expected = [{"record_id": "one", "wording": "v1"}]
+    assert (
+        first.execute_llm_stage(
+            stage="generation",
+            role="generation",
+            llm=_PromptStageLLMV1(expected, calls),
+            inputs=[{"planned_request_id": "one"}],
+        )
+        == expected
+    )
+    first.finish("partial")
+
+    second = _resume_manager(
+        tmp_path,
+        monkeypatch,
+        generation_model="model-a",
+        generation_url="http://10.0.0.1:8000/v1",
+        generation_deployment="deployment-a",
+    )
+    second.start()
+    reused = second.execute_llm_stage(
+        stage="generation",
+        role="generation",
+        llm=_PromptStageLLMV1([], calls, fail=True),
+        inputs=[{"planned_request_id": "one"}],
+    )
+
+    assert reused == expected
+    assert len(calls) == 1
+    assert second.summary()["stage_events"]["generation"]["status"] == "reused_checkpoint"
+    assert second.summary()["stage_events"]["generation"]["compatibility"] == "current_contract"

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import os
 from datetime import datetime, timezone
@@ -97,6 +98,34 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
         for line in path.read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
+
+
+def _llm_contract_source_hash(llm: Any) -> str:
+    """Hash the concrete prompt()/parse() source bound to one stage's LLM class.
+
+    This is deliberately narrower than `pipeline_source_fingerprint` (which
+    hashes every `.py` file for partial-cache isolation): it only reads the
+    two methods that actually determine what gets sent to and parsed from the
+    model for this stage, so an unrelated edit elsewhere in the pipeline does
+    not needlessly invalidate this stage's already-completed checkpoint, while
+    a prompt-wording-only edit — previously only caught by remembering to bump
+    `STAGE_CONTRACT_VERSIONS` — now invalidates it automatically.
+    """
+    parts = []
+    for name in ("prompt", "parse"):
+        method = getattr(type(llm), name, None)
+        if method is None:
+            parts.append({"method": name, "source": None})
+            continue
+        try:
+            source = inspect.getsource(method)
+        except (OSError, TypeError):
+            # Dynamically defined or otherwise source-less callables (as used
+            # by some test doubles) fail closed to a stable placeholder tied
+            # to the class identity, rather than silently skipping the hash.
+            source = f"<no-source:{type(llm).__module__}.{type(llm).__qualname__}.{name}>"
+        parts.append({"method": name, "source": source})
+    return _canonical_hash(parts)
 
 
 def pipeline_source_fingerprint(pipeline_dir: Path) -> str:
@@ -229,16 +258,24 @@ class ResumeManager:
             },
         }
 
-    def _contract_hash(self, stage: str) -> str:
-        """Hash stable data/config semantics, independently of source revision."""
-        return _canonical_hash(
-            {
-                "schema_version": RESUME_SCHEMA_VERSION,
-                "stage": stage,
-                "config_sha256": self.config_hash,
-                "stage_contract_version": _stage_contract_version(stage),
-            }
-        )
+    def _contract_hash(self, stage: str, llm: Any = None) -> str:
+        """Hash stable data/config semantics, independently of source revision.
+
+        `llm` is optional so direct-call sites (tests, `_stage_fingerprint`)
+        that only need the pre-existing config/version identity keep working
+        unchanged; `execute_llm_stage` always passes the real stage LLM so a
+        `prompt()`/`parse()` edit is folded into the contract automatically,
+        rather than depending solely on a manual `STAGE_CONTRACT_VERSIONS` bump.
+        """
+        payload: dict[str, Any] = {
+            "schema_version": RESUME_SCHEMA_VERSION,
+            "stage": stage,
+            "config_sha256": self.config_hash,
+            "stage_contract_version": _stage_contract_version(stage),
+        }
+        if llm is not None:
+            payload["prompt_parse_source_sha256"] = _llm_contract_source_hash(llm)
+        return _canonical_hash(payload)
 
     def _stage_fingerprint(self, stage: str, role: str) -> str:
         return _canonical_hash(
@@ -262,6 +299,7 @@ class ResumeManager:
         role: str,
         logical_input_hash: str,
         preferred_dir: Path,
+        llm: Any = None,
         prefer_historical: bool = False,
     ) -> tuple[Path, dict[str, Any]] | None:
         """Find an immutable completed artifact, including replay history."""
@@ -290,7 +328,7 @@ class ResumeManager:
                 continue
             if (
                 not prefer_historical
-                and metadata.get("contract_sha256") == self._contract_hash(stage)
+                and metadata.get("contract_sha256") == self._contract_hash(stage, llm)
             ):
                 return checkpoint_dir, metadata
             producer = metadata.get("producer", {})
@@ -328,7 +366,7 @@ class ResumeManager:
     ) -> list[dict[str, Any]]:
         """Reuse a completed logical checkpoint or execute one fingerprinted stage."""
         logical_input_hash = _canonical_hash(_checkpoint_input(inputs))
-        contract_hash = self._contract_hash(stage)
+        contract_hash = self._contract_hash(stage, llm)
         checkpoint_key = _canonical_hash(
             {
                 "stage": stage,
@@ -345,6 +383,7 @@ class ResumeManager:
                 role=role,
                 logical_input_hash=logical_input_hash,
                 preferred_dir=checkpoint_dir,
+                llm=llm,
                 prefer_historical=prefer_historical_checkpoint,
             )
             if completed is not None:
