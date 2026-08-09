@@ -58,6 +58,7 @@ from export import (  # noqa: E402
     batch_efficiency_stats,
     categorical_diversity,
     export_records,
+    question_answer_relevance_diagnostics,
     question_opener_diversity,
 )
 from generate import (  # noqa: E402
@@ -134,11 +135,12 @@ from source_windows import (  # noqa: E402
     build_source_windows,
     resolve_component_references,
 )
-from validate_run import _failure_distribution, validate_run  # noqa: E402
+from validate_run import _failure_distribution, _schema_validity_rate, validate_run  # noqa: E402
 from validation import (  # noqa: E402
     SOURCE_FRAMING_PREFIX,
     answer_format_issues,
     canonical_reasoning_operation,
+    cross_claim_contradiction_issues,
     deduplicate,
     enforce_category_diversity,
     enforce_extractive_answer_diversity,
@@ -1926,6 +1928,132 @@ def test_semantic_support_rejects_absence_and_deontic_drift() -> None:
     )
 
 
+def test_cross_claim_contradiction_flags_opposite_modality_same_subject() -> None:
+    """T11: two claims about the same core subject asserting opposite modalities."""
+    assert cross_claim_contradiction_issues(
+        [
+            ("claim:0", "The evaluation committee must include an external member."),
+            ("claim:1", "The evaluation committee must not include an external member."),
+        ]
+    ) == ["cross_claim_contradiction:claim:0:claim:1"]
+
+
+def test_cross_claim_contradiction_ignores_strength_differences() -> None:
+    """Obligation vs. permission/recommendation is a strength gap, not a
+    contradiction -- already covered by `semantic_support_issues` elsewhere.
+    """
+    assert (
+        cross_claim_contradiction_issues(
+            [
+                ("claim:0", "The vendor must submit the bank guarantee."),
+                ("claim:1", "The vendor may submit the bank guarantee."),
+            ]
+        )
+        == []
+    )
+
+
+def test_cross_claim_contradiction_ignores_different_subjects() -> None:
+    """Opposite modalities about genuinely different subjects must not fire."""
+    assert (
+        cross_claim_contradiction_issues(
+            [
+                ("claim:0", "The vendor must submit the bank guarantee."),
+                ("claim:1", "The buyer must not accept a late tender."),
+            ]
+        )
+        == []
+    )
+
+
+def test_cross_claim_contradiction_ignores_short_core_subjects() -> None:
+    """Near-empty core text after stripping deontic markers is not a
+    meaningful "same subject" signal (guarded by `minimum_subject_words`)."""
+    assert (
+        cross_claim_contradiction_issues(
+            [
+                ("claim:0", "This must apply."),
+                ("claim:1", "This must not apply."),
+            ]
+        )
+        == []
+    )
+
+
+def test_validate_record_rejects_contradictory_claims() -> None:
+    """End-to-end: `validate_record` rejects a record whose two claims
+    assert opposite modalities about the same subject (constructed per T11's
+    audit reference, Finding V2)."""
+    passage = (
+        "The evaluation committee must include an external member. "
+        "The evaluation committee must not include an external member "
+        "for procurements below the threshold."
+    )
+    record = {
+        "task_type": "qa",
+        "question": "Must the evaluation committee include an external member?",
+        "answer": "It depends on the procurement value.",
+        "answerable": True,
+        "evidence": [
+            {"quote": "The evaluation committee must include an external member."},
+        ],
+        "claims": [
+            {
+                "statement": "The evaluation committee must include an external member.",
+                "evidence": [{"quote": "The evaluation committee must include an external member."}],
+            },
+            {
+                "statement": ("The evaluation committee must not include an external member for procurements below the threshold."),
+                "evidence": [
+                    {
+                        "quote": (
+                            "The evaluation committee must not include an external member "
+                            "for procurements below the threshold."
+                        )
+                    }
+                ],
+            },
+        ],
+        "reasoning_steps": [],
+    }
+    reasons = validate_record(record, passage)
+    assert any(reason.startswith("cross_claim_contradiction:") for reason in reasons)
+
+
+def test_validate_record_does_not_flag_unrelated_multi_claim_records() -> None:
+    """Two claims that both use `must`/`must not` but describe genuinely
+    different subjects must not be rejected -- the required "same core
+    subject after stripping deontic markers" gate must hold end-to-end
+    through `validate_record`, not just in the unit-level helper."""
+    passage = (
+        "The evaluation committee must include a technical specialist. "
+        "Bids received after the deadline must not be considered."
+    )
+    record = {
+        "task_type": "qa",
+        "question": "What are the committee-composition and late-bid rules?",
+        "answer": ("The evaluation committee must include a technical specialist, and bids received after the deadline must not be considered."),
+        "answerable": True,
+        "evidence": [
+            {"quote": "The evaluation committee must include a technical specialist."},
+            {"quote": "Bids received after the deadline must not be considered."},
+        ],
+        "claims": [
+            {
+                "statement": "The evaluation committee must include a technical specialist.",
+                "evidence": [{"quote": "The evaluation committee must include a technical specialist."}],
+            },
+            {
+                "statement": "Bids received after the deadline must not be considered.",
+                "evidence": [{"quote": "Bids received after the deadline must not be considered."}],
+            },
+        ],
+        "reasoning_steps": [],
+    }
+    reasons = validate_record(record, passage)
+    assert not any(reason.startswith("cross_claim_contradiction:") for reason in reasons)
+
+
 def test_drafting_validation_applies_modality_support_gate() -> None:
     source = "The buyer may recover liquidated damages."
     row = {
@@ -2418,6 +2546,57 @@ def test_extractive_answer_diversity_caps_final_pool_share() -> None:
     assert removed == 6
     assert report["extractive_answers"] == 2
     assert report["extractive_answer_share"] <= 0.35
+
+
+def test_question_answer_relevance_diagnostics_flags_off_topic_answer() -> None:
+    """T12: an answer with zero lexical/topical connection to its question
+    must be reported in `flagged_sample`, and reduce the aggregate stats."""
+    records = [
+        {
+            "record_id": "on-topic",
+            "task_type": "qa",
+            "answerable": True,
+            "question": "What is the tender validity period for goods procurement?",
+            "answer": "The tender validity period for goods procurement is 90 days.",
+            "evidence": [{"quote": "The tender validity period for goods procurement is 90 days."}],
+        },
+        {
+            "record_id": "off-topic",
+            "task_type": "qa",
+            "answerable": True,
+            "question": "What is the tender validity period for goods procurement?",
+            "answer": "Consortium members must jointly and severally execute the contract agreement.",
+            "evidence": [{"quote": "Consortium members must jointly and severally execute the contract agreement."}],
+        },
+    ]
+    report = question_answer_relevance_diagnostics(records, near_zero_overlap_ratio=0.05)
+    assert report["records_evaluated"] == 2
+    assert report["flagged_near_zero_overlap"] == 1
+    assert [item["record_id"] for item in report["flagged_sample"]] == ["off-topic"]
+
+
+def test_question_answer_relevance_diagnostics_ignores_unanswerable_and_empty_pool() -> None:
+    assert question_answer_relevance_diagnostics([]) == {
+        "records_evaluated": 0,
+        "near_zero_overlap_ratio_threshold": 0.05,
+        "flagged_near_zero_overlap": 0,
+        "flagged_share": 0.0,
+        "mean_overlap_ratio": 0.0,
+        "median_overlap_ratio": 0.0,
+        "flagged_sample": [],
+    }
+    unanswerable = [
+        {
+            "record_id": "unanswerable-1",
+            "task_type": "qa",
+            "answerable": False,
+            "question": "What is the tender validity period for goods procurement?",
+            "answer": "Not answerable from the provided sources.",
+            "evidence": [],
+        }
+    ]
+    report = question_answer_relevance_diagnostics(unanswerable)
+    assert report["records_evaluated"] == 0
 
 
 def test_short_precise_answers_are_not_classified_as_span_copying() -> None:
@@ -4909,6 +5088,76 @@ def test_release_validation_requires_all_four_exports_and_human_review(
     assert "stage_quality_evidence_incomplete:drafting" in failed_stage["issues"]
 
 
+def test_release_validation_surfaces_pre_cap_and_post_cap_opener_diversity(
+    tmp_path: Path,
+) -> None:
+    files_dir = tmp_path / "files"
+    files_dir.mkdir()
+    (files_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "run_id": "run",
+                "status": "complete",
+                "terminal_request_completeness": {"complete": True},
+                "required_task_type_counts": {"qa": 1},
+                "quality_acceptance": {"portfolio_quality_complete": True},
+                "statistics": {
+                    "question_opener_diversity": {
+                        "unique_openers": 6,
+                        "top_opener": "what is",
+                        "top_opener_count": 12,
+                        "top_opener_share": 0.2,
+                    },
+                },
+                "question_opener_diversity_pre_cap": {
+                    "unique_openers": 2,
+                    "top_opener": "according to",
+                    "top_opener_count": 480,
+                    "top_opener_share": 0.8,
+                    "pool_size": 600,
+                    "cap_waste_ratio": 0.5,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    (files_dir / "leakage_audit.json").write_text(json.dumps({"passed": True}), encoding="utf-8")
+    row = json.dumps({"record_id": "r1", "split": "train"}) + "\n"
+    (files_dir / "qa_sft.jsonl").write_text(row, encoding="utf-8")
+    (files_dir / "eval.jsonl").write_text("", encoding="utf-8")
+    (files_dir / "canonical.jsonl").write_text("{}\n", encoding="utf-8")
+    report = validate_run(files_dir)
+    assert report["question_opener_diversity"]["post_cap"]["top_opener_share"] == 0.2
+    assert report["question_opener_diversity"]["pre_cap"]["top_opener_share"] == 0.8
+    assert report["question_opener_diversity"]["pre_cap"]["cap_waste_ratio"] == 0.5
+
+
+def test_release_validation_defaults_opener_diversity_when_manifest_predates_it(
+    tmp_path: Path,
+) -> None:
+    files_dir = tmp_path / "files"
+    files_dir.mkdir()
+    (files_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "run_id": "run",
+                "status": "complete",
+                "terminal_request_completeness": {"complete": True},
+                "required_task_type_counts": {"qa": 1},
+                "quality_acceptance": {"portfolio_quality_complete": True},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (files_dir / "leakage_audit.json").write_text(json.dumps({"passed": True}), encoding="utf-8")
+    row = json.dumps({"record_id": "r1", "split": "train"}) + "\n"
+    (files_dir / "qa_sft.jsonl").write_text(row, encoding="utf-8")
+    (files_dir / "eval.jsonl").write_text("", encoding="utf-8")
+    (files_dir / "canonical.jsonl").write_text("{}\n", encoding="utf-8")
+    report = validate_run(files_dir)
+    assert report["question_opener_diversity"] == {"post_cap": {}, "pre_cap": {}}
+
+
 def test_release_validation_detects_train_eval_overlap(tmp_path: Path) -> None:
     files_dir = tmp_path / "files"
     files_dir.mkdir()
@@ -4957,6 +5206,177 @@ def test_failure_distribution_prefers_the_structured_error_category(
     distribution = _failure_distribution(tmp_path, manifest=None)
 
     assert distribution == {"other": 1, "timeout": 2, "truncation": 1}
+
+
+def _schema_validity_manifest() -> dict:
+    return {
+        "resume": {
+            "stage_events": {
+                "generation": {
+                    "status": "executed",
+                    "producer": {"stage_fingerprint": "fp-generation"},
+                },
+                "judge": {
+                    "status": "executed",
+                    "producer": {"stage_fingerprint": "fp-judge"},
+                },
+                # Not in SCHEMA_VALIDITY_STAGE_NAMES: its own schema failures
+                # must never leak into the scoped rate below, since the
+                # denominator does not include propositions' expected requests.
+                "propositions": {
+                    "status": "executed",
+                    "producer": {"stage_fingerprint": "fp-propositions"},
+                },
+            },
+        },
+        "request_coverage": {
+            "single_document": {
+                "blueprinted": {"expected_requests": 10},
+                "generated": {"expected_requests": 10},
+                "judged": {"expected_requests": 8},
+                "accepted": {"expected_requests": 10},
+            },
+            "cross_document": {
+                "generated": {"expected_requests": 0},
+                "judged": {"expected_requests": 0},
+                "accepted": {"expected_requests": 0},
+            },
+        },
+    }
+
+
+def test_schema_validity_rate_scopes_failures_to_covered_stages(
+    tmp_path: Path,
+) -> None:
+    manifest = _schema_validity_manifest()
+    generation_dir = tmp_path / "generation" / "fp-generation"
+    generation_dir.mkdir(parents=True)
+    (generation_dir / "failed_requests.jsonl").write_text(
+        "\n".join(
+            json.dumps({"model": "m", "messages": [], "error_category": category})
+            for category in ("schema_validation", "schema_validation", "timeout")
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    judge_dir = tmp_path / "judge" / "fp-judge"
+    judge_dir.mkdir(parents=True)
+    (judge_dir / "failed_requests.jsonl").write_text(
+        json.dumps({"model": "m", "messages": [], "error_category": "schema_validation"}) + "\n",
+        encoding="utf-8",
+    )
+    # This stage's schema-validation failures are real, but out of the
+    # scoped denominator's coverage and must not be counted.
+    propositions_dir = tmp_path / "propositions" / "fp-propositions"
+    propositions_dir.mkdir(parents=True)
+    (propositions_dir / "failed_requests.jsonl").write_text(
+        json.dumps({"model": "m", "messages": [], "error_category": "schema_validation"}) + "\n",
+        encoding="utf-8",
+    )
+
+    result = _schema_validity_rate(tmp_path, manifest)
+
+    assert result["computed"] is True
+    assert result["expected_requests_by_stage"] == {
+        "single_document_generation": 10,
+        "single_document_judge": 8,
+        "cross_document_generation": 0,
+        "cross_document_judge": 0,
+    }
+    assert result["expected_requests_total"] == 18
+    # 2 (generation) + 1 (judge) == 3; propositions' 1 is excluded.
+    assert result["schema_validation_failures"] == 3
+    assert result["schema_validity_rate"] == round(1 - 3 / 18, 4)
+
+
+def test_schema_validity_rate_not_computed_without_working_dir() -> None:
+    result = _schema_validity_rate(None, _schema_validity_manifest())
+    assert result["computed"] is False
+    assert result["schema_validity_rate"] is None
+    assert "working-dir" in result["reason"]
+
+
+def test_schema_validity_rate_not_computed_without_stage_events(
+    tmp_path: Path,
+) -> None:
+    manifest = _schema_validity_manifest()
+    manifest["resume"]["stage_events"] = {}
+    # Even if a failed_requests.jsonl happens to exist somewhere in
+    # working_dir, without stage_events there is no way to scope it to the
+    # covered stages, so the rate must not be fabricated from an unscoped scan.
+    stray_dir = tmp_path / "generation" / "fp-generation"
+    stray_dir.mkdir(parents=True)
+    (stray_dir / "failed_requests.jsonl").write_text(
+        json.dumps({"model": "m", "messages": [], "error_category": "schema_validation"}) + "\n",
+        encoding="utf-8",
+    )
+
+    result = _schema_validity_rate(tmp_path, manifest)
+
+    assert result["computed"] is False
+    assert result["schema_validity_rate"] is None
+    assert "stage_events" in result["reason"]
+
+
+def test_schema_validity_rate_surfaced_in_validate_run_report_without_working_dir(
+    tmp_path: Path,
+) -> None:
+    files_dir = tmp_path / "files"
+    files_dir.mkdir()
+    manifest = {
+        "run_id": "run",
+        "status": "complete",
+        "terminal_request_completeness": {"complete": True},
+        "required_task_type_counts": {"qa": 1},
+        "quality_acceptance": {"portfolio_quality_complete": True},
+        **_schema_validity_manifest(),
+    }
+    (files_dir / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    (files_dir / "leakage_audit.json").write_text(json.dumps({"passed": True}), encoding="utf-8")
+    row = json.dumps({"record_id": "r1", "split": "train"}) + "\n"
+    (files_dir / "qa_sft.jsonl").write_text(row, encoding="utf-8")
+    (files_dir / "eval.jsonl").write_text("", encoding="utf-8")
+    (files_dir / "canonical.jsonl").write_text("{}\n", encoding="utf-8")
+
+    report = validate_run(files_dir)
+
+    assert report["schema_validity"]["computed"] is False
+    assert report["schema_validity"]["reason"] == "no --working-dir supplied"
+
+
+def test_schema_validity_rate_surfaced_in_validate_run_report_with_working_dir(
+    tmp_path: Path,
+) -> None:
+    files_dir = tmp_path / "files"
+    files_dir.mkdir()
+    working_dir = tmp_path / "working"
+    manifest = {
+        "run_id": "run",
+        "status": "complete",
+        "terminal_request_completeness": {"complete": True},
+        "required_task_type_counts": {"qa": 1},
+        "quality_acceptance": {"portfolio_quality_complete": True},
+        **_schema_validity_manifest(),
+    }
+    (files_dir / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    (files_dir / "leakage_audit.json").write_text(json.dumps({"passed": True}), encoding="utf-8")
+    row = json.dumps({"record_id": "r1", "split": "train"}) + "\n"
+    (files_dir / "qa_sft.jsonl").write_text(row, encoding="utf-8")
+    (files_dir / "eval.jsonl").write_text("", encoding="utf-8")
+    (files_dir / "canonical.jsonl").write_text("{}\n", encoding="utf-8")
+    generation_dir = working_dir / "generation" / "fp-generation"
+    generation_dir.mkdir(parents=True)
+    (generation_dir / "failed_requests.jsonl").write_text(
+        json.dumps({"model": "m", "messages": [], "error_category": "schema_validation"}) + "\n",
+        encoding="utf-8",
+    )
+
+    report = validate_run(files_dir, working_dir)
+
+    assert report["schema_validity"]["computed"] is True
+    assert report["schema_validity"]["expected_requests_total"] == 18
+    assert report["schema_validity"]["schema_validation_failures"] == 1
+    assert report["schema_validity"]["schema_validity_rate"] == round(1 - 1 / 18, 4)
 
 
 def test_run_layout_and_curator_cache_are_project_local(tmp_path: Path, monkeypatch) -> None:

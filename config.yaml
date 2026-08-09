@@ -169,6 +169,13 @@ models:
     # Explicit private-provider limits avoid Curator's public-provider fallback.
     max_requests_per_minute: 10000
     max_tokens_per_minute: 100000000
+    # `saturation-500-001`'s cross-generation pass 1 dispatched 225 requests at
+    # concurrency 128 essentially back to back; 180 of them shared the same
+    # 600s request_timeout deadline and failed within the same ~1-second
+    # window (a self-synchronizing thundering herd, not an ordinary latency
+    # tail). Spread submission times out so a slow server window produces a
+    # smoothed retry tail instead of a synchronized failure wave.
+    submission_jitter_seconds: 2.0
     # Terminal omissions (including max_tokens truncation) are retried once in
     # a separate checkpoint at this larger ceiling. Ordinary requests retain
     # the smaller scheduling reserve below.
@@ -203,6 +210,8 @@ models:
     # Keep judge throttling independent when it uses a separate local endpoint.
     max_requests_per_minute: 10000
     max_tokens_per_minute: 100000000
+    # Same synchronized-timeout-wave mitigation as the generation role above.
+    submission_jitter_seconds: 2.0
     # The 500-record saturation pilot proved that 2,048 truncates a small
     # fraction of otherwise valid singular cross-document judgments. Retry only
     # those missing decisions once at 4,096 after a context-window preflight.
@@ -237,6 +246,8 @@ source_registry:
 quality:
   # CoT candidates have a lower validation/judge survival rate than direct QA.
   # Plan 40% so the accepted pool can meet the separate 20% release floor.
+  # Provisional: an explicit operational target (raised from 0.25 per
+  # TASKS.md), not a literature-derived or corpus-calibrated optimum.
   qa_cot_fraction: 0.40
   cross_qa_cot_fraction: 0.25
   # Direct facts remain one-shot. Only source-feasible multi-operation cells
@@ -253,6 +264,10 @@ quality:
   # Constructed only from accepted answerable seeds plus same-type distractors,
   # then promoted by an independent full-context answerability judge.
   unanswerable_fraction: 0.10
+  # Provisional: see the judge_calibration block below — human labels, not
+  # this hand-picked score, are meant to select the production threshold, and
+  # full runs remain blocked until a passing calibration artifact is
+  # SHA-pinned there.
   minimum_judge_score: 4
   # The configured Gemma judge server has an 8,192-token runtime context.
   judge_batch_size: 1
@@ -286,11 +301,17 @@ quality:
   # Corpus-level cap: no single normalized 4-word question opener may exceed
   # this share of the deterministic-pass, deduplicated pool. Grounded in
   # Self-Instruct's pool-similarity filtering (ACL 2023) generalized from
-  # near-duplicate full text to shared opening templates.
+  # near-duplicate full text to shared opening templates. Provisional: a
+  # reasoned project pilot target (lowered from 0.15 per TASKS.md), not yet
+  # empirically calibrated against this corpus.
   max_question_opener_share: 0.08
   # Preserve some exact-answer records, but prevent the SFT corpus from mostly
   # teaching source-span copying. Answers shorter than four words are exempt.
+  # Provisional: a conservative project policy, not a literature-derived
+  # optimum; must be calibrated with downstream and human evaluation.
   max_extractive_answer_share: 0.35
+  # Provisional, paired with qa_cot_fraction above: an explicit operational
+  # floor, not a claim of universal optimality.
   minimum_qa_cot_share: 0.20
   allow_unjudged_exports: false
   require_independent_judge: true
@@ -313,6 +334,21 @@ judge_calibration:
 # questions are removed only when their grounded target, evidence, sources, and
 # coverage contract are identical. A broader cosine-threshold mode still
 # requires reviewed development and holdout calibration.
+#
+# `verified_equivalence`'s answer-text-exact-match requirement means it will
+# almost never catch two independently-generated paraphrases of the same
+# fact (audit T10 / Finding S1). `hybrid_equivalence` (implemented, not yet
+# the default here) closes that gap: it drops the literal-answer-text
+# requirement from the structural signature and instead requires a cosine
+# floor (`similarity_threshold`) on top of the same strict structural match
+# before deleting anything. That floor is still an uncalibrated, defensible
+# default rather than a measured operating point — no human-labeled
+# duplicate/related/distinct calibration set exists yet for this deployment
+# (see the still-open "hand-label a calibration set" item in TASKS.md).
+# Switch `selection_mode` to `hybrid_equivalence` (with an explicit
+# `similarity_threshold` floor) once that calibration work lands, or after
+# deliberately reviewing a real batch of `semantic_calibration.jsonl`
+# nearest-neighbor pairs and choosing a floor with evidence behind it.
 embeddings:
   enabled: true
   api_key_env: EMBEDDING_API_KEY
@@ -329,14 +365,15 @@ embeddings:
   similarity_threshold: null
 
 propositions:
-  # Only path_qa and temporal consume propositions; both are disabled below
-  # for the current qa/qa_cot-only scope. Re-enable alongside them.
+  # Only path_qa and temporal consume propositions. quality.required_task_types
+  # still only requires qa/qa_cot, but path_qa and temporal are enabled below,
+  # so this stage is live, not dormant. Keep enabled together with them.
   enabled: true
   max_per_window: 8
 
 reasoning_paths:
-  # Only path_qa consumes reasoning paths; disabled below for the current
-  # qa/qa_cot-only scope. Re-enable alongside path_qa.
+  # Only path_qa consumes reasoning paths. path_qa is enabled below, so this
+  # stage is live, not dormant. Keep enabled together with path_qa.
   enabled: true
   max_per_pair: 25
 
@@ -368,8 +405,9 @@ temporal:
       target_context: 0.6
 
 path_qa:
-  # Disabled for the current qa/qa_cot-only scope: promoted path answers
-  # export as cross_document_qa/cross_document_qa_cot, outside that scope.
+  # Enabled: promoted path answers export as cross_document_qa/
+  # cross_document_qa_cot, which are outside quality.required_task_types
+  # (still only [qa, qa_cot]) but generate and export like any other stage.
   enabled: true
   qa_cot_fraction: 0.5
 

@@ -128,10 +128,14 @@ def load_embedding_settings(config: dict[str, Any]) -> EmbeddingSettings | None:
     selection_mode = str(
         section.get("selection_mode", "calibrated_threshold")
     ).strip()
-    if selection_mode not in {"calibrated_threshold", "verified_equivalence"}:
+    if selection_mode not in {
+        "calibrated_threshold",
+        "verified_equivalence",
+        "hybrid_equivalence",
+    }:
         raise RuntimeError(
-            "embeddings.selection_mode must be calibrated_threshold or "
-            "verified_equivalence"
+            "embeddings.selection_mode must be calibrated_threshold, "
+            "verified_equivalence, or hybrid_equivalence"
         )
     if (
         selection_enabled
@@ -141,6 +145,21 @@ def load_embedding_settings(config: dict[str, Any]) -> EmbeddingSettings | None:
         raise RuntimeError(
             "Semantic selection requires a human-calibrated "
             "embeddings.similarity_threshold"
+        )
+    if (
+        selection_enabled
+        and selection_mode == "hybrid_equivalence"
+        and threshold is None
+    ):
+        # hybrid_equivalence still requires an explicit operator-supplied
+        # cosine floor via the same `similarity_threshold` field, even though
+        # it is a secondary gate on top of the structural signature (not the
+        # sole decision boundary calibrated_threshold uses it for) — see
+        # `hybrid_equivalence_select`'s docstring. No silent default is
+        # chosen in code, matching calibrated_threshold's existing policy.
+        raise RuntimeError(
+            "hybrid_equivalence selection requires an explicit "
+            "embeddings.similarity_threshold cosine floor"
         )
     input_type = str(section.get("input_type", "query")).lower()
     if input_type not in {"query", "passage"}:
@@ -590,8 +609,25 @@ def _normalized_semantic_text(value: Any) -> str:
     return " ".join(re.findall(r"[a-z0-9]+", str(value).casefold()))
 
 
-def _grounded_equivalence_signature(record: dict[str, Any]) -> tuple[Any, ...]:
-    """Identify the same grounded training target without using question wording."""
+def _grounded_equivalence_signature(
+    record: dict[str, Any],
+    *,
+    require_answer_match: bool = True,
+) -> tuple[Any, ...]:
+    """Identify the same grounded training target without using question wording.
+
+    `require_answer_match=True` (the `verified_equivalence` mode) additionally
+    requires byte-identical normalized answer text, which is the exact
+    boundary the audit found too narrow to catch realistic paraphrase
+    duplicates: two independent generations of the same fact almost never
+    produce identical answer wording, even when every structural field below
+    already matches. `require_answer_match=False` (the `hybrid_equivalence`
+    mode) drops that one field from the signature so structurally-identical
+    records (same task/persona/intent/coverage) can still group together;
+    callers of that mode must additionally clear a cosine-similarity floor
+    before deleting anything (see `hybrid_equivalence_select`), so dropping
+    the answer-text field alone never authorizes deletion by itself.
+    """
     evidence = tuple(
         sorted(
             (
@@ -626,10 +662,23 @@ def _grounded_equivalence_signature(record: dict[str, Any]) -> tuple[Any, ...]:
         str(record.get("reasoning_operation", "")),
         str(record.get("difficulty", "")),
         str(record.get("material_focus", "")),
-        _normalized_semantic_text(record.get("answer", "")),
+        _normalized_semantic_text(record.get("answer", "")) if require_answer_match else None,
         evidence,
         sources,
     )
+
+
+def _cosine_similarity(
+    vectors: dict[str, list[float]],
+    left_record_id: str,
+    right_record_id: str,
+) -> float:
+    left = np.asarray(vectors[left_record_id], dtype=float)
+    right = np.asarray(vectors[right_record_id], dtype=float)
+    denominator = float(np.linalg.norm(left)) * float(np.linalg.norm(right))
+    if not denominator:
+        return 0.0
+    return float(np.dot(left, right) / denominator)
 
 
 def verified_equivalence_select(
@@ -663,18 +712,9 @@ def verified_equivalence_select(
         )
         winner = ranked[0]
         kept_indexes.add(winner)
-        winner_vector = np.asarray(vectors[str(records[winner]["record_id"])], dtype=float)
-        winner_norm = float(np.linalg.norm(winner_vector))
+        winner_id = str(records[winner]["record_id"])
         for index in ranked[1:]:
-            candidate_vector = np.asarray(
-                vectors[str(records[index]["record_id"])], dtype=float
-            )
-            denominator = winner_norm * float(np.linalg.norm(candidate_vector))
-            similarity = (
-                float(np.dot(winner_vector, candidate_vector) / denominator)
-                if denominator
-                else 0.0
-            )
+            similarity = _cosine_similarity(vectors, winner_id, str(records[index]["record_id"]))
             removed.append(
                 {
                     **records[index],
@@ -696,6 +736,103 @@ def verified_equivalence_select(
         "equivalence_groups": len(grouped),
         "multi_record_groups": multi_record_groups,
         "records_removed": len(removed),
+    }
+
+
+def hybrid_equivalence_select(
+    records: list[dict[str, Any]],
+    vectors: dict[str, list[float]],
+    similarity_floor: float,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
+    """Delete grounded-equivalent paraphrases without requiring verbatim answer text.
+
+    This closes the realistic gap `verified_equivalence` cannot: two
+    independent generations of the same fact almost never share byte-identical
+    answer wording, so `verified_equivalence`'s all-fields-including-answer
+    signature essentially never fires on real paraphrase duplicates (see
+    audit T10 / Finding S1).
+
+    The structural fields below (task/persona/intent/coverage — everything
+    `verified_equivalence` requires *except* the literal answer text) must
+    still match exactly; that boundary is unchanged and unconditionally safe.
+    A record is only deleted when it *also* clears an uncalibrated-but-
+    conservative cosine-similarity floor on its question embedding against
+    the retained representative — so a structural match alone (e.g. two
+    genuinely distinct sub-questions that happen to cite the same evidence
+    passage) is never sufficient by itself to authorize deletion. This
+    mirrors the standard "cosine-threshold semantic dedup" pattern used by
+    e.g. MinishLab/semhash and the SemDeDup paper (Abbas et al.), except more
+    conservatively: here the cosine floor is a secondary gate on top of an
+    already-strict structural match, not the sole decision boundary, because
+    no human-labeled calibration set exists yet for this deployment (see
+    `TASKS.md`'s open "hand-label a calibration set" item) and the floor
+    value is therefore a defensible-but-uncalibrated default, not a measured
+    operating point.
+
+    Structural matches that fall short of the floor are kept, not deleted —
+    they remain visible to human review through the existing nearest-
+    neighbor `semantic_calibration.jsonl` pairs (`calibration_candidates`),
+    the same "route uncertain cases to review, never auto-delete on an
+    uncalibrated signal alone" pattern this module already uses elsewhere.
+    """
+    if not 0.0 < similarity_floor <= 1.0:
+        raise ValueError("similarity_floor must be in (0, 1]")
+    grouped: dict[tuple[Any, ...], list[int]] = {}
+    for index, record in enumerate(records):
+        grouped.setdefault(
+            _grounded_equivalence_signature(record, require_answer_match=False),
+            [],
+        ).append(index)
+    kept_indexes: set[int] = set(range(len(records)))
+    removed: list[dict[str, Any]] = []
+    multi_record_groups = 0
+    below_floor_pairs = 0
+    for component in grouped.values():
+        if len(component) > 1:
+            multi_record_groups += 1
+        ranked = sorted(
+            component,
+            key=lambda index: (
+                -_quality_key(records[index])[0],
+                -_quality_key(records[index])[1],
+                -_quality_key(records[index])[2],
+                -_quality_key(records[index])[3],
+                _quality_key(records[index])[4],
+            ),
+        )
+        winner = ranked[0]
+        winner_id = str(records[winner]["record_id"])
+        for index in ranked[1:]:
+            similarity = _cosine_similarity(vectors, winner_id, str(records[index]["record_id"]))
+            if similarity < similarity_floor:
+                below_floor_pairs += 1
+                continue
+            kept_indexes.discard(index)
+            removed.append(
+                {
+                    **records[index],
+                    "semantic_selection": {
+                        "accepted": False,
+                        "reason": "hybrid_grounded_equivalence",
+                        "representative_record_id": records[winner]["record_id"],
+                        "cosine_similarity": round(similarity, 6),
+                        "similarity_floor": similarity_floor,
+                        "verification": (
+                            "same_task_persona_intent_evidence_operation_"
+                            "difficulty_material_focus_and_sources"
+                            "_plus_question_similarity_floor"
+                        ),
+                    },
+                }
+            )
+    kept = [record for index, record in enumerate(records) if index in kept_indexes]
+    return kept, removed, {
+        "selection_mode": "hybrid_equivalence",
+        "equivalence_groups": len(grouped),
+        "multi_record_groups": multi_record_groups,
+        "records_removed": len(removed),
+        "structural_matches_below_similarity_floor": below_floor_pairs,
+        "similarity_floor": similarity_floor,
     }
 
 
@@ -729,6 +866,13 @@ def run_semantic_diversity(
         if settings.selection_mode == "verified_equivalence":
             kept, removed, selection_stats = verified_equivalence_select(
                 records, vectors
+            )
+        elif settings.selection_mode == "hybrid_equivalence":
+            assert settings.similarity_threshold is not None
+            kept, removed, selection_stats = hybrid_equivalence_select(
+                records,
+                vectors,
+                settings.similarity_threshold,
             )
         else:
             assert settings.similarity_threshold is not None

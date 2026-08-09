@@ -92,6 +92,92 @@ def answer_style_diversity(records: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+_RELEVANCE_STOPWORDS = frozenset(
+    {
+        "a", "an", "and", "are", "as", "at", "be", "by", "can", "do", "does",
+        "for", "from", "has", "have", "how", "if", "in", "into", "is", "it",
+        "its", "may", "must", "not", "of", "on", "or", "shall", "should",
+        "that", "the", "their", "there", "this", "to", "under", "was", "were",
+        "what", "when", "where", "which", "who", "whom", "why", "will",
+        "with", "would",
+        # Source-citation boilerplate that dominates question wording (see
+        # T8's opener-collapse finding) without being the fact actually
+        # being asked about; without stripping these, term overlap is
+        # systematically diluted regardless of true relevance.
+        "according", "accordance", "per", "manual", "manuals", "procurement",
+        "goods", "works", "services", "consultancy", "issued", "government",
+        "india", "updated", "gazette", "notification", "order", "circular",
+        "ministry", "department",
+    }
+)
+_RELEVANCE_WORD = re.compile(r"[a-z][a-z0-9_-]{2,}")
+
+
+def _relevance_terms(text: str) -> set[str]:
+    return {word for word in _RELEVANCE_WORD.findall(str(text).casefold()) if word not in _RELEVANCE_STOPWORDS}
+
+
+def question_answer_relevance_diagnostics(
+    records: list[dict[str, Any]],
+    *,
+    near_zero_overlap_ratio: float = 0.05,
+    sample_size: int = 20,
+) -> dict[str, Any]:
+    """Report how much question-vs-answer key-term overlap accepted records have.
+
+    Finding V3: nothing deterministic checks that an answer is actually
+    about what the question asked; that is entirely delegated to the judge's
+    self-reported `relevant` boolean. This is a **non-blocking, aggregate**
+    diagnostic, not a per-record hard-reject gate and not a new
+    `validate_record` reason code -- real-data validation against both
+    `qa-qacot-full-002` and `qa-qacot-full-003` found that per-record token
+    overlap between a question and its answer+evidence is not precise enough
+    to safely reject on individually: even at the strictest possible cutoff
+    (zero shared key terms), the large majority of "flagged" records in this
+    corpus were genuinely correct, judge-accepted answers -- terse
+    direct-fact/tabular extractions (e.g. question "what is the validity
+    period of a Proprietary Article Certificate?" / answer "Valid for the
+    Current Financial Year") legitimately do not restate the question's
+    vocabulary at all. Duplicating the judge's `relevant` boolean with an
+    unreliable lexical proxy would create false rejections, which the task
+    explicitly warns against; reporting the aggregate distribution instead
+    gives real visibility (a corpus-level regression to a lot of near-zero-
+    overlap records would be visible here) without trusting any single
+    record's flag. `flagged_sample` is included for optional human spot-
+    checking, not as a reliable per-record verdict.
+    """
+    eligible = [row for row in records if row.get("task_type") in {"qa", "qa_cot"} and row.get("answerable", True)]
+    ratios: list[float] = []
+    flagged: list[dict[str, Any]] = []
+    for row in eligible:
+        question_terms = _relevance_terms(row.get("question", ""))
+        if not question_terms:
+            continue
+        support_text = " ".join(
+            [str(row.get("answer", ""))] + [str(item.get("quote", "")) for item in row.get("evidence", [])]
+        )
+        support_terms = _relevance_terms(support_text)
+        overlap_ratio = len(question_terms & support_terms) / len(question_terms)
+        ratios.append(overlap_ratio)
+        if overlap_ratio <= near_zero_overlap_ratio:
+            flagged.append(
+                {
+                    "record_id": row.get("record_id", ""),
+                    "overlap_ratio": round(overlap_ratio, 4),
+                }
+            )
+    ratios.sort()
+    return {
+        "records_evaluated": len(ratios),
+        "near_zero_overlap_ratio_threshold": near_zero_overlap_ratio,
+        "flagged_near_zero_overlap": len(flagged),
+        "flagged_share": round(len(flagged) / len(ratios), 4) if ratios else 0.0,
+        "mean_overlap_ratio": (round(sum(ratios) / len(ratios), 4) if ratios else 0.0),
+        "median_overlap_ratio": (round(ratios[len(ratios) // 2], 4) if ratios else 0.0),
+        "flagged_sample": sorted(flagged, key=lambda item: item["overlap_ratio"])[:sample_size],
+    }
+
+
 def categorical_diversity(
     records: list[dict[str, Any]],
     field: str,
@@ -517,6 +603,7 @@ def export_records(
     stats["eval_records"] = len(evaluation)
     stats["question_opener_diversity"] = question_opener_diversity(records)
     stats["answer_style_diversity"] = answer_style_diversity(records)
+    stats["question_answer_relevance_diagnostics"] = question_answer_relevance_diagnostics(records)
     single_document_qa = [
         row for row in records if row.get("task_type") in {"qa", "qa_cot"}
     ]
