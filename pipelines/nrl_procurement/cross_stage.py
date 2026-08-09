@@ -297,6 +297,45 @@ preserved authority and qualifications, and task_type-consistent rationale struc
         ]
 
 
+def build_cross_ablation_trial_inputs(
+    candidates: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Create full, source_a-only, and source_b-only trials with identical non-context inputs.
+
+    Source-id-keyed analog of ``path_qa.build_ablation_trial_inputs``. Cross-document
+    candidates always declare exactly two required sources (``source_a``/``source_b``),
+    unlike path_qa's variable proposition pairs, so candidates missing either source are
+    skipped rather than compared against a length check.
+    """
+    trials = []
+    for row in candidates:
+        documents = {document["source_id"]: document for document in row.get("source_documents", [])}
+        if sorted(row.get("required_source_ids", [])) != ["source_a", "source_b"] or not {"source_a", "source_b"}.issubset(documents):
+            continue
+        source_a, source_b = documents["source_a"], documents["source_b"]
+        variants = (
+            ("full", [source_a, source_b], []),
+            ("source_a_only", [source_a], ["source_b"]),
+            ("source_b_only", [source_b], ["source_a"]),
+        )
+        for variant, visible, withheld in variants:
+            identity = f"{row['record_id']}:{variant}"
+            trials.append(
+                {
+                    "trial_id": "cross-ablation-" + hashlib.sha256(identity.encode()).hexdigest()[:24],
+                    "variant": variant,
+                    "record_id": row["record_id"],
+                    "question": row["question"],
+                    "visible_source_documents": visible,
+                    "visible_source_ids": [document["source_id"] for document in visible],
+                    "withheld_source_ids": withheld,
+                    "canonical_claims": row["claims"],
+                    "generation_task_type": row["task_type"],
+                }
+            )
+    return trials
+
+
 def cross_ablation_trial_validation_issues(
     draft: dict[str, Any],
     row: dict[str, Any],
@@ -374,6 +413,65 @@ VISIBLE SOURCES
                 "generation_model": self.model_name,
             }
         ]
+
+
+def adjudicate_cross_ablation_trials(
+    candidates: list[dict[str, Any]],
+    trials: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Require full claim coverage and loss of completeness for both single sources.
+
+    Source-id-keyed analog of ``path_qa.adjudicate_ablation_trials``.
+    """
+    trials_by_record: dict[str, dict[str, dict[str, Any]]] = {}
+    for trial in trials:
+        trials_by_record.setdefault(str(trial.get("record_id", "")), {})[
+            str(trial.get("variant", ""))
+        ] = trial
+    results = []
+    for candidate in candidates:
+        record_id = str(candidate["record_id"])
+        variants = trials_by_record.get(record_id, {})
+        issues = []
+        if set(variants) != {"full", "source_a_only", "source_b_only"}:
+            issues.append("incomplete_ablation_variant_set")
+        required_ids = {
+            evidence["source_id"]
+            for claim in candidate.get("claims", [])
+            for evidence in claim.get("evidence", [])
+        }
+        coverage: dict[str, list[str]] = {}
+        for variant in ("full", "source_a_only", "source_b_only"):
+            trial = variants.get(variant)
+            if trial is None:
+                coverage[variant] = []
+                continue
+            if not trial.get("deterministic_checks", {}).get("passed", False):
+                issues.append(f"{variant}_trial_invalid")
+            output = trial.get("trial_output", {})
+            covered = {
+                evidence["source_id"]
+                for claim in output.get("claims", [])
+                for evidence in claim.get("evidence", [])
+            }
+            coverage[variant] = sorted(covered)
+            if variant == "full":
+                if not output.get("answerable", False):
+                    issues.append("full_context_not_answerable")
+                if not required_ids.issubset(covered):
+                    issues.append("full_context_missing_required_claim_coverage")
+            elif output.get("answerable", False) and required_ids.issubset(covered):
+                issues.append(f"{variant}_fully_covers_answer")
+        results.append(
+            {
+                "record_id": record_id,
+                "required_source_ids": sorted(required_ids),
+                "covered_source_ids": coverage,
+                "passed": not issues,
+                "issues": sorted(set(issues)),
+            }
+        )
+    return results
 
 
 def cross_binding_issues(record: dict[str, Any]) -> list[str]:
