@@ -12,6 +12,7 @@ from typing import Any
 
 from cross_document import evidence_location
 from schemas import (
+    AblationJudgeDecision,
     CrossAblationTrialDraft,
     CrossCandidateBatch,
     CrossJudgeBatch,
@@ -472,6 +473,112 @@ def adjudicate_cross_ablation_trials(
             }
         )
     return results
+
+
+def build_cross_ablation_judge_inputs(
+    candidates: list[dict[str, Any]],
+    trials: list[dict[str, Any]],
+    adjudications: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Bundle only deterministically complete trials for independent review.
+
+    Source-id-keyed analog of ``path_qa.build_ablation_judge_inputs``.
+    """
+    candidates_by_id = {str(row["record_id"]): row for row in candidates}
+    trials_by_id: dict[str, dict[str, dict[str, Any]]] = {}
+    for row in trials:
+        trials_by_id.setdefault(str(row["record_id"]), {})[str(row["variant"])] = row
+    inputs = []
+    for adjudication in adjudications:
+        record_id = str(adjudication["record_id"])
+        if not adjudication.get("passed", False) or record_id not in candidates_by_id:
+            continue
+        variants = trials_by_id.get(record_id, {})
+        if set(variants) != {"full", "source_a_only", "source_b_only"}:
+            continue
+        inputs.append(
+            {
+                "record_id": record_id,
+                "candidate": candidates_by_id[record_id],
+                "deterministic_adjudication": adjudication,
+                "actual_trials": {
+                    variant: variants[variant]["trial_output"]
+                    for variant in ("full", "source_a_only", "source_b_only")
+                },
+            }
+        )
+    return inputs
+
+
+class CrossSourceAblationJudge(curator.LLM):
+    """Independently judge actual three-context cross-document outputs.
+
+    Source-based adaptation of ``path_qa.SourceAblationJudge`` — reviews only
+    the ACTUAL persisted trial outputs from ``CrossSourceAblationAnswerGenerator``,
+    never a predicted removal, and reuses ``AblationJudgeDecision`` unchanged
+    since it is already fully generic (no proposition-specific fields).
+    """
+
+    response_format = AblationJudgeDecision
+
+    def prompt(self, row: dict[str, Any]) -> str:
+        """Render the immutable actual-output review bundle."""
+        candidate = row["candidate"]
+        review = {
+            "record_id": row["record_id"],
+            "question": candidate["question"],
+            "canonical_answer": candidate["answer"],
+            "canonical_claims": candidate["claims"],
+            "grounded_sources": candidate["source_documents"],
+            "actual_outputs": row["actual_trials"],
+        }
+        return f"""TASK
+Review one completed source-ablation experiment. Judge only the immutable canonical
+answer, grounded sources, and the three ACTUAL OUTPUTS. Do not predict what a
+model might have answered and do not use outside knowledge.
+
+Set full_context_supported=true only if the full output completely supports the
+canonical material claims. Set each source-only incomplete flag true only if that
+actual output fails to provide the complete canonical answer because the other
+source is unavailable. A refusal, malformed output, or generic limitation is
+not evidence of source necessity. Set comparison_valid=false for inconsistent
+standards, invalid trials, leaked withheld evidence, or any other confound.
+Score 4-5 only for a valid experiment satisfying all four booleans.
+
+Return record_id exactly as supplied.
+
+---BEGIN UNTRUSTED ABLATION BUNDLE---
+{json.dumps(review, ensure_ascii=False)}
+---END UNTRUSTED ABLATION BUNDLE---
+"""
+
+    def parse(
+        self,
+        row: dict[str, Any],
+        response: AblationJudgeDecision,
+    ) -> list[dict[str, Any]]:
+        """Attach an identity-checked, thresholded independent decision."""
+        decision = response.model_dump()
+        identity_ok = decision["record_id"] == row["record_id"]
+        accepted = (
+            identity_ok
+            and decision["full_context_supported"]
+            and decision["source_a_only_incomplete"]
+            and decision["source_b_only_incomplete"]
+            and decision["comparison_valid"]
+            and decision["score"] >= int(CONFIG.get("quality", {}).get("minimum_judge_score", 4))
+        )
+        return [
+            {
+                **row,
+                "judge": {
+                    **decision,
+                    "identity_preserved": identity_ok,
+                    "accepted": accepted,
+                    "model": self.model_name,
+                },
+            }
+        ]
 
 
 def cross_binding_issues(record: dict[str, Any]) -> list[str]:
