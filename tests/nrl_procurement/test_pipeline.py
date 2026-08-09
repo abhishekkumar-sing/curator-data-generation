@@ -11,11 +11,13 @@ from pydantic import BaseModel, ValidationError
 
 PIPELINE = Path(__file__).resolve().parents[2] / "pipelines" / "nrl_procurement"
 sys.path.insert(0, str(PIPELINE))
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 import generate as generation_pipeline  # noqa: E402
 import resume as resume_module  # noqa: E402
 from corpus import (  # noqa: E402
     _content_class,
+    _document_family,
     corpus_quality_report,
     generation_text,
     load_corpus,
@@ -44,12 +46,14 @@ from export import (  # noqa: E402
     answer_length_statistics,
     answer_style_diversity,
     assert_unique_record_ids,
+    assign_drafting_splits,
     assign_splits,
     categorical_diversity,
     export_records,
     question_opener_diversity,
 )
 from generate import (  # noqa: E402
+    QUESTION_OPENER_EXAMPLES,
     ProcurementBlueprintGenerator,
     ProcurementGenerator,
     ProcurementJudge,
@@ -122,6 +126,7 @@ from source_windows import (  # noqa: E402
 )
 from validate_run import validate_run  # noqa: E402
 from validation import (  # noqa: E402
+    SOURCE_FRAMING_PREFIX,
     answer_format_issues,
     canonical_reasoning_operation,
     deduplicate,
@@ -865,6 +870,45 @@ def test_model_context_window_is_explicit_and_profile_local() -> None:
             raise AssertionError("missing or invalid model context must fail closed")
 
 
+def test_manifest_marks_source_windows_as_currently_unconsumed() -> None:
+    """Regression test for the dead source_windows stage (audit Track B, T6).
+
+    build_source_windows() computes bounded multi-chunk windows, but no
+    generation stage currently reads them -- the manifest must say so
+    explicitly rather than silently looking like an active QC gate.
+    """
+
+    def manifest(source_window_stats: dict | None) -> dict:
+        return generation_pipeline._final_manifest(
+            run_id="pilot-t6",
+            status="complete",
+            stats={},
+            manuals=[],
+            corpus_report={},
+            selected_rows=[],
+            single_coverage={},
+            cross_coverage={},
+            drafting_stats={"enabled": False},
+            duplicates=0,
+            source_window_stats=source_window_stats,
+        )
+
+    disabled = manifest(None)
+    assert disabled["source_windows"] == {"enabled": False}
+
+    enabled = manifest(
+        {
+            "enabled": True,
+            "accepted": 3,
+            "rejected": 1,
+            "schema_version": "1",
+            "consumed_by": [],
+        }
+    )
+    assert enabled["source_windows"]["enabled"] is True
+    assert enabled["source_windows"]["consumed_by"] == []
+
+
 def test_judge_prompt_budget_reserves_output_and_quarantines_overflow() -> None:
     class Response:
         @classmethod
@@ -954,6 +998,72 @@ def test_validation_rejects_unsupported_number() -> None:
         "reasoning_steps": [],
     }
     assert "unsupported_number:10 years" in validate_record(record, "The buyer shall retain it for 5 years.")
+
+
+def test_validation_rejects_number_misattributed_to_the_wrong_claim() -> None:
+    """A number correct for one entity but misattributed to another must not pass.
+
+    Joining every claim's evidence before checking the answer would let this
+    slip through, because "5 days" genuinely appears in Entity B's evidence —
+    just not in Entity A's, which is the claim the answer actually attaches it
+    to. See audit T7 / Finding V1.
+    """
+    passage = "Entity A shall respond within 3 days. Entity B shall decide within 5 days."
+    record = {
+        "task_type": "qa",
+        "question": "How long do Entity A and Entity B have?",
+        "answer": "Entity A requires 5 days to respond, and Entity B requires 5 days to decide.",
+        "answerable": True,
+        "evidence": [
+            {"quote": "Entity A shall respond within 3 days."},
+            {"quote": "Entity B shall decide within 5 days."},
+        ],
+        "claims": [
+            {
+                "statement": "Entity A requires 3 days to respond.",
+                "evidence": [{"quote": "Entity A shall respond within 3 days."}],
+            },
+            {
+                "statement": "Entity B requires 5 days to decide.",
+                "evidence": [{"quote": "Entity B shall decide within 5 days."}],
+            },
+        ],
+        "reasoning_steps": [],
+    }
+    reasons = validate_record(record, passage)
+    assert "unsupported_number:5 days" in reasons
+
+
+def test_validation_still_accepts_correctly_attributed_multi_claim_numbers() -> None:
+    """Same shape as the misattribution test, but every number is correct.
+
+    Guards against the scoped check becoming stricter than the prior
+    union-of-all-evidence behavior on legitimate multi-claim answers.
+    """
+    passage = "Entity A shall respond within 3 days. Entity B shall decide within 5 days."
+    record = {
+        "task_type": "qa",
+        "question": "How long do Entity A and Entity B have?",
+        "answer": "Entity A requires 3 days to respond, and Entity B requires 5 days to decide.",
+        "answerable": True,
+        "evidence": [
+            {"quote": "Entity A shall respond within 3 days."},
+            {"quote": "Entity B shall decide within 5 days."},
+        ],
+        "claims": [
+            {
+                "statement": "Entity A requires 3 days to respond.",
+                "evidence": [{"quote": "Entity A shall respond within 3 days."}],
+            },
+            {
+                "statement": "Entity B requires 5 days to decide.",
+                "evidence": [{"quote": "Entity B shall decide within 5 days."}],
+            },
+        ],
+        "reasoning_steps": [],
+    }
+    reasons = validate_record(record, passage)
+    assert not any(reason.startswith("unsupported_number") for reason in reasons)
 
 
 def _proposition_source_row() -> dict:
@@ -1235,7 +1345,7 @@ def test_reasoning_paths_are_connected_stable_and_source_distinct() -> None:
     assert path["operation_steps"][1]["output_claim_id"] == "prop-right"
     assert path["operation_steps"][-1]["output_claim_id"] == path["output_claim_id"]
     assert path["deterministic_checks"]["passed"] is True
-    assert all(result["complete"] is False for result in path["structural_ablation"].values())
+    assert all(result["complete"] is False for result in path["declared_requirement"].values())
 
 
 def test_reasoning_paths_reject_unrelated_and_unsafe_relationship_claims() -> None:
@@ -1625,6 +1735,50 @@ def test_cross_validation_accepts_typed_quantities_and_metadata_dates() -> None:
     assert validate_cross_record(record, documents) == []
 
 
+def test_cross_validation_rejects_number_misattributed_to_the_wrong_claim() -> None:
+    """The same right-value/wrong-entity gap as T7, in the cross-document validator."""
+    documents = [
+        {
+            "source_id": "source_a",
+            "manual_id": "goods_2019",
+            "title": "Manual for Procurement of Goods, 2019",
+            "revision_date": "2019",
+            "as_of_date": "2019",
+            "page": 1,
+            "section": "Response",
+            "passage": "Entity A shall respond within 3 days.",
+        },
+        {
+            "source_id": "source_b",
+            "manual_id": "goods_2025",
+            "title": "Manual for Procurement of Goods, 2025",
+            "revision_date": "2025",
+            "as_of_date": "2025",
+            "page": 2,
+            "section": "Decision",
+            "passage": "Entity B shall decide within 5 days.",
+        },
+    ]
+    record = {
+        "task_type": "cross_document_qa",
+        "question": "How long do Entity A and Entity B have?",
+        "answer": "Entity A requires 5 days to respond, and Entity B requires 5 days to decide.",
+        "answerable": True,
+        "claims": [
+            {
+                "statement": "Entity A requires 3 days to respond.",
+                "evidence": [{"source_id": "source_a", "quote": documents[0]["passage"]}],
+            },
+            {
+                "statement": "Entity B requires 5 days to decide.",
+                "evidence": [{"source_id": "source_b", "quote": documents[1]["passage"]}],
+            },
+        ],
+        "reasoning_steps": [],
+    }
+    assert "unsupported_number:5 days" in validate_cross_record(record, documents)
+
+
 def test_quantity_validation_does_not_swallow_following_prose() -> None:
     record = {
         "task_type": "qa",
@@ -1843,6 +1997,53 @@ def test_question_opener_diversity_reports_top_share() -> None:
     }
 
 
+def _manifest_kwargs(**overrides) -> dict:
+    base = {
+        "run_id": "run-1",
+        "status": "complete",
+        "stats": {"records": 0},
+        "manuals": [],
+        "corpus_report": {},
+        "selected_rows": [],
+        "single_coverage": {},
+        "cross_coverage": {},
+        "drafting_stats": {},
+        "duplicates": 0,
+    }
+    base.update(overrides)
+    return base
+
+
+def test_manifest_reports_pre_cap_opener_concentration_and_waste_ratio() -> None:
+    """T9: the post-cap `question_opener_diversity` stat is healthy by
+    construction, so the manifest must separately show how concentrated the
+    raw generated pool was before the cap ran, and how much it discarded.
+    """
+    pre_cap_report = question_opener_diversity(
+        [{"question": "According to the manual, what applies?"} for _ in range(9)] + [{"question": "Who approves this exception?"}]
+    )
+    manifest = generation_pipeline._final_manifest(
+        **_manifest_kwargs(
+            opener_overrepresented=6,
+            single_generated_pre_cap_count=10,
+            question_opener_diversity_pre_cap=pre_cap_report,
+        )
+    )
+    reported = manifest["question_opener_diversity_pre_cap"]
+    assert reported["top_opener"] == "according to the manual"
+    assert reported["top_opener_share"] == 0.9
+    assert reported["pool_size"] == 10
+    assert reported["cap_waste_ratio"] == 0.6
+
+
+def test_manifest_pre_cap_opener_field_defaults_safely_when_unset() -> None:
+    manifest = generation_pipeline._final_manifest(**_manifest_kwargs())
+    reported = manifest["question_opener_diversity_pre_cap"]
+    assert reported["pool_size"] == 0
+    assert reported["cap_waste_ratio"] == 0.0
+    assert reported["unique_openers"] == 0
+
+
 def test_extractive_answer_diversity_caps_final_pool_share() -> None:
     copied = [
         {
@@ -1904,6 +2105,79 @@ def test_connected_split_targets_records_without_leaking_components() -> None:
     assert all(counts[split] > 0 for split in counts)
     assert counts["train"] >= counts["validation"]
     assert counts["train"] >= counts["test"]
+
+
+def test_assign_drafting_splits_matches_the_manual_fold_qa_records_use() -> None:
+    manuals = [{"manual_id": "m-train"}, {"manual_id": "m-test"}]
+    manual_folds = {"m-train": "train", "m-test": "test"}
+    chunk_manuals = {
+        "chunk-train-1": {"manual_id": "m-train", "source_sha256": "sha-train", "section": "s1"},
+        "chunk-test-1": {"manual_id": "m-test", "source_sha256": "sha-test", "section": "s2"},
+    }
+    drafting_records = [
+        {"id": "draft-train", "instruction": "Draft A", "manual_chunk_ids": ["chunk-train-1"]},
+        {"id": "draft-test", "instruction": "Draft B", "manual_chunk_ids": ["chunk-test-1"]},
+    ]
+    assign_drafting_splits(
+        drafting_records,
+        manuals,
+        chunk_manuals,
+        0.8,
+        0.1,
+        "seed",
+        manual_folds=manual_folds,
+    )
+    by_id = {row["id"]: row["split"] for row in drafting_records}
+    assert by_id["draft-train"] == "train"
+    assert by_id["draft-test"] == "test"
+
+    # A QA record citing the same eval-fold manual must land in the identical split
+    # a drafting record referencing it does — the T13a invariant.
+    qa_record = {"record_id": "qa-1", "manual_id": "m-test"}
+    assign_splits([qa_record], manuals, 0.8, 0.1, "seed", manual_folds=manual_folds)
+    assert qa_record["split"] == by_id["draft-test"]
+
+
+def test_drafting_records_are_now_covered_by_leakage_audit_against_qa_records() -> None:
+    # Regression for the T13/T13b bypass: before this fix, drafting_accepted was
+    # written straight to drafting.jsonl and never entered leakage_audit at all, so
+    # a drafting record built from an eval-fold chunk that collides with a train-fold
+    # QA record's source would have gone undetected. It must now be caught.
+    manuals = [{"manual_id": "m-a"}, {"manual_id": "m-b"}]
+    manual_folds = {"m-a": "train", "m-b": "test"}
+    qa_record = {
+        "record_id": "qa-1",
+        "split": "train",
+        "question": "What is the threshold?",
+        "manual_id": "m-a",
+        "source_sha256": "shared-sha",
+        "source_chunk_ids": ["shared-chunk"],
+        "citations": [{"section": "s"}],
+    }
+    # A corpus/config inconsistency (the exact class of bug this gate exists to
+    # catch) puts the same source hash under a chunk resolved to the test-fold
+    # manual for the drafting seed.
+    chunk_manuals = {
+        "shared-chunk": {"manual_id": "m-b", "source_sha256": "shared-sha", "section": "s"},
+    }
+    drafting_records = [
+        {"id": "draft-leak", "instruction": "Draft something", "manual_chunk_ids": ["shared-chunk"]},
+    ]
+    assign_drafting_splits(
+        drafting_records,
+        manuals,
+        chunk_manuals,
+        0.8,
+        0.1,
+        "seed",
+        manual_folds=manual_folds,
+    )
+    assert drafting_records[0]["split"] == "test"
+    audit = leakage_audit([qa_record, *drafting_records])
+    assert not audit["passed"]
+    assert audit["collisions"]["source_hash"] == [
+        {"value": "shared-sha", "splits": ["test", "train"]}
+    ]
 
 
 def _cross_row(manual_id: str, chunk_id: str, passage: str) -> dict:
@@ -2490,6 +2764,43 @@ def test_drafting_rejects_unknown_chunks_and_unsupported_values(tmp_path: Path) 
     assert "unsupported_email:invented@example.com" in issues
 
 
+def test_registered_drafting_seeds_cover_multiple_categories_and_document_types() -> None:
+    """Regression test for the single-instance drafting seed pool.
+
+    The registered seed file must resolve against the real corpus and span
+    more than one procurement category (goods/works/services) and more than
+    one tender instance, so `drafting.minimum_accepted_records: 1` cannot be
+    satisfied entirely from one narrow scenario.
+    """
+    seed_path = REPO_ROOT / "data" / "seeds" / "drafting_requests.jsonl"
+    seeds = read_drafting_seeds(seed_path)
+    assert len(seeds) >= 5
+
+    rows, _manuals = load_corpus(
+        REPO_ROOT / "data" / "source", REPO_ROOT / "data" / "interim" / "ocr"
+    )
+    # build_drafting_inputs raises if any seed references an unknown/stale chunk.
+    inputs = build_drafting_inputs(seeds, rows)
+    chunks_by_id = {str(row["chunk_id"]): row for row in rows}
+
+    categories: set[str] = set()
+    for seed in seeds:
+        manual_ids = {
+            str(chunks_by_id[chunk_id]["manual_id"]) for chunk_id in seed.manual_chunk_ids
+        }
+        categories.update(_document_family(manual_id) for manual_id in manual_ids)
+    assert categories >= {"goods", "works", "services"}, categories
+
+    tender_ids = {seed.tender_id for seed in seeds}
+    assert len(tender_ids) >= 3, "seeds should not all reference one tender instance"
+
+    # Document-type diversity: distinct id prefixes stand in for distinct
+    # drafted-document types (NIT header vs. clause vs. applicability note).
+    id_prefixes = {seed.id.split("-", 2)[1] for seed in seeds}
+    assert len(id_prefixes) >= 3, id_prefixes
+    assert len(inputs) == len(seeds)
+
+
 def test_drafting_citation_integrity_is_bidirectional_and_allows_repeated_details() -> None:
     details = [
         {
@@ -2572,6 +2883,14 @@ def test_single_document_prompts_preserve_specification_contract() -> None:
         "---END UNTRUSTED SOURCE PASSAGE---",
     ):
         assert required in prompt
+    # T8: zero-shot instructions alone did not reliably keep generation off
+    # the "According to.../As a <persona>..." openers (audit Repetition &
+    # Diversity Analysis); varied few-shot opener examples must be present so
+    # the boundary is established by demonstration, not just prohibition.
+    assert "Vary the opening construction" in prompt
+    for example in QUESTION_OPENER_EXAMPLES:
+        assert example in prompt
+        assert not SOURCE_FRAMING_PREFIX.search(example)
 
     blueprint_prompt = ProcurementBlueprintGenerator.prompt(None, row)
     assert "Do not write the final question or answer" in blueprint_prompt
@@ -2802,6 +3121,46 @@ def test_late_introduction_is_policy_not_front_matter() -> None:
         "start_page": 1,
     }
     assert _content_class(row) == "policy"
+
+
+def test_short_manual_is_not_treated_as_all_front_matter() -> None:
+    # A one-page Office Memorandum whose entire loaded content fits inside
+    # the position-based front-matter window (start_page..start_page+7) has
+    # no front matter to skip -- unlike a 260+ page manual, applying the
+    # position rule here would zero out the whole manual.
+    row = {
+        "generation_passage": "It has been decided to partially amend para 5.6.8 as under.",
+        "section": None,
+        "page": 1,
+        "start_page": 1,
+        "manual_page_count": 1,
+    }
+    assert _content_class(row) == "policy"
+
+
+def test_position_rule_still_applies_when_manual_extends_past_the_window() -> None:
+    # A manual long enough that page 1 really is inside real front matter
+    # (e.g. a cover page) keeps the existing behavior.
+    row = {
+        "generation_passage": "MANUAL FOR PROCUREMENT OF GOODS 2017",
+        "section": None,
+        "page": 1,
+        "start_page": 1,
+        "manual_page_count": 262,
+    }
+    assert _content_class(row) == "front_matter"
+
+
+def test_position_rule_applies_when_manual_page_count_is_unknown() -> None:
+    # Callers that don't supply manual_page_count (e.g. ad hoc row
+    # construction) keep the pre-fix position-only behavior.
+    row = {
+        "generation_passage": "Some early-page text.",
+        "section": None,
+        "page": 2,
+        "start_page": 1,
+    }
+    assert _content_class(row) == "front_matter"
 
 
 def test_short_exact_evidence_is_schema_valid() -> None:
