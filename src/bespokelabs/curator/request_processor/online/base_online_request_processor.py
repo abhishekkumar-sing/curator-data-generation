@@ -8,6 +8,7 @@ import asyncio
 import datetime
 import json
 import os
+import random
 import time
 import typing as t
 from abc import ABC, abstractmethod
@@ -30,6 +31,41 @@ from bespokelabs.curator.types.prompt import _MultiModalPrompt
 from bespokelabs.curator.types.token_usage import _TokenUsage
 
 _MAX_OUTPUT_MVA_WINDOW = 50
+
+# Coarse, best-effort terminal-failure categories. Order matters below: checks
+# run top to bottom and the first match wins, so more specific categories are
+# checked before "other". This intentionally stays a small, fixed vocabulary
+# rather than echoing raw exception class names, so downstream tooling (e.g.
+# failure-distribution reports) can rely on a stable set of values.
+_RATE_LIMIT_MARKERS = ("ratelimit", "rate limit", "429", "too many requests")
+_TIMEOUT_MARKERS = ("timeout", "timed out")
+_TRUNCATION_MARKERS = (
+    "incompleteoutput",
+    "max_tokens",
+    "finish_reason was",
+    "truncat",
+)
+_SCHEMA_MARKERS = ("validationerror", "validation error", "schema", "instructorretryexception")
+
+
+def classify_terminal_error(exc: BaseException) -> str:
+    """Coarsely categorize a terminal request exception for failure triage.
+
+    Best-effort and string/class-name based (the same information an operator
+    would otherwise grep out of ``curator.log`` by hand) so it works uniformly
+    across the many exception types raised by different providers/transports.
+    Never raises; unrecognized exceptions fall back to ``"other"``.
+    """
+    haystack = f"{exc.__class__.__name__} {exc}".casefold()
+    if any(marker in haystack for marker in _RATE_LIMIT_MARKERS):
+        return "rate_limit"
+    if any(marker in haystack for marker in _TIMEOUT_MARKERS):
+        return "timeout"
+    if any(marker in haystack for marker in _TRUNCATION_MARKERS):
+        return "truncation"
+    if any(marker in haystack for marker in _SCHEMA_MARKERS):
+        return "schema_validation"
+    return "other"
 
 
 @dataclass
@@ -324,6 +360,31 @@ class BaseOnlineRequestProcessor(BaseRequestProcessor, ABC):
         # which it otherwise ignores unlike requests/httpx (see issue #699).
         return aiohttp.ClientSession(connector=connector, trust_env=True)
 
+    async def _apply_submission_jitter(self) -> float:
+        """Sleep a small random delay before dispatching the next request.
+
+        Concurrently-dispatched requests that share the same ``request_timeout``
+        also share a near-identical deadline: if the server degrades mid-batch,
+        every in-flight request can time out within the same ~1-second window
+        (a self-synchronizing thundering herd; see the audit's `saturation-500-001`
+        evidence of 180/225 requests failing simultaneously at their shared
+        600-second deadline). Desynchronizing submission times spreads those
+        deadlines out so a transient slowdown produces a smoothed tail of
+        retries instead of a synchronized wave. Disabled by default (returns
+        0.0 immediately) unless ``submission_jitter_seconds`` is configured.
+
+        Returns:
+            The delay actually applied, in seconds (0.0 when jitter is disabled).
+            Returning this (rather than nothing) keeps the method easy to assert
+            on directly in tests without patching global state.
+        """
+        jitter_seconds = getattr(self.config, "submission_jitter_seconds", 0.0) or 0.0
+        if jitter_seconds <= 0:
+            return 0.0
+        delay = random.uniform(0.0, jitter_seconds)
+        await asyncio.sleep(delay)
+        return delay
+
     async def process_requests_from_file(
         self,
         generic_request_filepath: str,
@@ -393,6 +454,11 @@ class BaseOnlineRequestProcessor(BaseRequestProcessor, ABC):
 
                     # Consume capacity before making request
                     status_tracker.consume_capacity(token_estimate)
+
+                    # Desynchronize submission timing so concurrently-started
+                    # requests don't share a near-identical timeout deadline.
+                    await self._apply_submission_jitter()
+
                     task = asyncio.create_task(
                         self.handle_single_request_with_retries(
                             request=request,
@@ -507,6 +573,10 @@ class BaseOnlineRequestProcessor(BaseRequestProcessor, ABC):
                             generic_request=request.generic_request,
                             created_at=request.created_at,
                             finished_at=datetime.datetime.now(),
+                            # Classify the most recent (terminal) exception. Earlier
+                            # attempts may have failed for different reasons; the
+                            # last one is what actually exhausted the retry budget.
+                            error_category=classify_terminal_error(exc),
                         )
                         await self.append_generic_response(status_tracker, failure_response, response_file)
                         status_tracker.num_tasks_in_progress -= 1
