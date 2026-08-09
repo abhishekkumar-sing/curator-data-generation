@@ -51,6 +51,7 @@ from export import (  # noqa: E402
     batch_efficiency_stats,
     categorical_diversity,
     export_records,
+    question_answer_relevance_diagnostics,
     question_opener_diversity,
 )
 from generate import (  # noqa: E402
@@ -130,6 +131,7 @@ from validation import (  # noqa: E402
     SOURCE_FRAMING_PREFIX,
     answer_format_issues,
     canonical_reasoning_operation,
+    cross_claim_contradiction_issues,
     deduplicate,
     enforce_category_diversity,
     enforce_extractive_answer_diversity,
@@ -1603,6 +1605,132 @@ def test_semantic_support_rejects_absence_and_deontic_drift() -> None:
     )
 
 
+def test_cross_claim_contradiction_flags_opposite_modality_same_subject() -> None:
+    """T11: two claims about the same core subject asserting opposite modalities."""
+    assert cross_claim_contradiction_issues(
+        [
+            ("claim:0", "The evaluation committee must include an external member."),
+            ("claim:1", "The evaluation committee must not include an external member."),
+        ]
+    ) == ["cross_claim_contradiction:claim:0:claim:1"]
+
+
+def test_cross_claim_contradiction_ignores_strength_differences() -> None:
+    """Obligation vs. permission/recommendation is a strength gap, not a
+    contradiction -- already covered by `semantic_support_issues` elsewhere.
+    """
+    assert (
+        cross_claim_contradiction_issues(
+            [
+                ("claim:0", "The vendor must submit the bank guarantee."),
+                ("claim:1", "The vendor may submit the bank guarantee."),
+            ]
+        )
+        == []
+    )
+
+
+def test_cross_claim_contradiction_ignores_different_subjects() -> None:
+    """Opposite modalities about genuinely different subjects must not fire."""
+    assert (
+        cross_claim_contradiction_issues(
+            [
+                ("claim:0", "The vendor must submit the bank guarantee."),
+                ("claim:1", "The buyer must not accept a late tender."),
+            ]
+        )
+        == []
+    )
+
+
+def test_cross_claim_contradiction_ignores_short_core_subjects() -> None:
+    """Near-empty core text after stripping deontic markers is not a
+    meaningful "same subject" signal (guarded by `minimum_subject_words`)."""
+    assert (
+        cross_claim_contradiction_issues(
+            [
+                ("claim:0", "This must apply."),
+                ("claim:1", "This must not apply."),
+            ]
+        )
+        == []
+    )
+
+
+def test_validate_record_rejects_contradictory_claims() -> None:
+    """End-to-end: `validate_record` rejects a record whose two claims
+    assert opposite modalities about the same subject (constructed per T11's
+    audit reference, Finding V2)."""
+    passage = (
+        "The evaluation committee must include an external member. "
+        "The evaluation committee must not include an external member "
+        "for procurements below the threshold."
+    )
+    record = {
+        "task_type": "qa",
+        "question": "Must the evaluation committee include an external member?",
+        "answer": "It depends on the procurement value.",
+        "answerable": True,
+        "evidence": [
+            {"quote": "The evaluation committee must include an external member."},
+        ],
+        "claims": [
+            {
+                "statement": "The evaluation committee must include an external member.",
+                "evidence": [{"quote": "The evaluation committee must include an external member."}],
+            },
+            {
+                "statement": ("The evaluation committee must not include an external member for procurements below the threshold."),
+                "evidence": [
+                    {
+                        "quote": (
+                            "The evaluation committee must not include an external member "
+                            "for procurements below the threshold."
+                        )
+                    }
+                ],
+            },
+        ],
+        "reasoning_steps": [],
+    }
+    reasons = validate_record(record, passage)
+    assert any(reason.startswith("cross_claim_contradiction:") for reason in reasons)
+
+
+def test_validate_record_does_not_flag_unrelated_multi_claim_records() -> None:
+    """Two claims that both use `must`/`must not` but describe genuinely
+    different subjects must not be rejected -- the required "same core
+    subject after stripping deontic markers" gate must hold end-to-end
+    through `validate_record`, not just in the unit-level helper."""
+    passage = (
+        "The evaluation committee must include a technical specialist. "
+        "Bids received after the deadline must not be considered."
+    )
+    record = {
+        "task_type": "qa",
+        "question": "What are the committee-composition and late-bid rules?",
+        "answer": ("The evaluation committee must include a technical specialist, and bids received after the deadline must not be considered."),
+        "answerable": True,
+        "evidence": [
+            {"quote": "The evaluation committee must include a technical specialist."},
+            {"quote": "Bids received after the deadline must not be considered."},
+        ],
+        "claims": [
+            {
+                "statement": "The evaluation committee must include a technical specialist.",
+                "evidence": [{"quote": "The evaluation committee must include a technical specialist."}],
+            },
+            {
+                "statement": "Bids received after the deadline must not be considered.",
+                "evidence": [{"quote": "Bids received after the deadline must not be considered."}],
+            },
+        ],
+        "reasoning_steps": [],
+    }
+    reasons = validate_record(record, passage)
+    assert not any(reason.startswith("cross_claim_contradiction:") for reason in reasons)
+
+
 def test_drafting_validation_applies_modality_support_gate() -> None:
     source = "The buyer may recover liquidated damages."
     row = {
@@ -2095,6 +2223,57 @@ def test_extractive_answer_diversity_caps_final_pool_share() -> None:
     assert removed == 6
     assert report["extractive_answers"] == 2
     assert report["extractive_answer_share"] <= 0.35
+
+
+def test_question_answer_relevance_diagnostics_flags_off_topic_answer() -> None:
+    """T12: an answer with zero lexical/topical connection to its question
+    must be reported in `flagged_sample`, and reduce the aggregate stats."""
+    records = [
+        {
+            "record_id": "on-topic",
+            "task_type": "qa",
+            "answerable": True,
+            "question": "What is the tender validity period for goods procurement?",
+            "answer": "The tender validity period for goods procurement is 90 days.",
+            "evidence": [{"quote": "The tender validity period for goods procurement is 90 days."}],
+        },
+        {
+            "record_id": "off-topic",
+            "task_type": "qa",
+            "answerable": True,
+            "question": "What is the tender validity period for goods procurement?",
+            "answer": "Consortium members must jointly and severally execute the contract agreement.",
+            "evidence": [{"quote": "Consortium members must jointly and severally execute the contract agreement."}],
+        },
+    ]
+    report = question_answer_relevance_diagnostics(records, near_zero_overlap_ratio=0.05)
+    assert report["records_evaluated"] == 2
+    assert report["flagged_near_zero_overlap"] == 1
+    assert [item["record_id"] for item in report["flagged_sample"]] == ["off-topic"]
+
+
+def test_question_answer_relevance_diagnostics_ignores_unanswerable_and_empty_pool() -> None:
+    assert question_answer_relevance_diagnostics([]) == {
+        "records_evaluated": 0,
+        "near_zero_overlap_ratio_threshold": 0.05,
+        "flagged_near_zero_overlap": 0,
+        "flagged_share": 0.0,
+        "mean_overlap_ratio": 0.0,
+        "median_overlap_ratio": 0.0,
+        "flagged_sample": [],
+    }
+    unanswerable = [
+        {
+            "record_id": "unanswerable-1",
+            "task_type": "qa",
+            "answerable": False,
+            "question": "What is the tender validity period for goods procurement?",
+            "answer": "Not answerable from the provided sources.",
+            "evidence": [],
+        }
+    ]
+    report = question_answer_relevance_diagnostics(unanswerable)
+    assert report["records_evaluated"] == 0
 
 
 def test_short_precise_answers_are_not_classified_as_span_copying() -> None:

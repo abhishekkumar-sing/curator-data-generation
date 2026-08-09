@@ -15,6 +15,7 @@ from semantic_diversity import (  # noqa: E402
     calibration_candidates,
     calibration_report,
     embed_records,
+    hybrid_equivalence_select,
     load_embedding_settings,
     run_semantic_diversity,
     semantic_select,
@@ -251,6 +252,218 @@ def test_verified_equivalence_removes_only_same_grounded_target(
     assert {row["record_id"] for row in run_kept} == {"strong", "distinct"}
     assert [row["record_id"] for row in run_removed] == ["weak"]
     assert run_stats["selection"]["selection_mode"] == "verified_equivalence"
+
+
+def test_hybrid_equivalence_removes_paraphrased_duplicate_verified_equivalence_misses() -> None:
+    """T10: reproduce the realistic gap the audit found in `verified_equivalence`.
+
+    Two independent generations of the same fact rarely produce
+    byte-identical answer wording, so `verified_equivalence_select` (which
+    requires exact answer text) does not merge this pair even though every
+    other structural field and the evidence/source coverage are identical.
+    `hybrid_equivalence_select` drops the literal-answer-text requirement and
+    instead gates on a cosine-similarity floor, so it *does* catch this case.
+    """
+    base = {
+        "task_type": "qa",
+        "task": "compliance_and_audit",
+        "persona": "auditor",
+        "question_type": "compliance_check",
+        "answer_format": "audit_check",
+        "answerable": True,
+        "reasoning_operation": "lookup",
+        "difficulty": "basic",
+        "material_focus": "evidence_requirement",
+        "evidence": [{"chunk_id": "chunk-1", "quote": "Retain the approved procurement record."}],
+        "source_chunk_ids": ["chunk-1"],
+        "claims": [{"evidence": [{"quote": "Retain the approved procurement record."}]}],
+    }
+    records = [
+        {
+            **base,
+            "record_id": "weak",
+            "question": "Which approved procurement record must be retained?",
+            "answer": "Retain the approved procurement record.",
+            "judge": {"score": 4, "preserves_qualifications": True},
+        },
+        {
+            **base,
+            "record_id": "strong",
+            "question": "What approved procurement record must the buyer keep?",
+            "answer": "The approved procurement record must be kept on file.",
+            "judge": {"score": 5, "preserves_qualifications": True},
+        },
+    ]
+    vectors = {"weak": [1.0, 0.0], "strong": [0.999, 0.001]}
+    # verified_equivalence cannot merge these: the answer text differs.
+    kept, removed, _stats = verified_equivalence_select(records, vectors)
+    assert {row["record_id"] for row in kept} == {"weak", "strong"}
+    assert removed == []
+    # hybrid_equivalence, gated on a high cosine floor, does merge them.
+    kept, removed, stats = hybrid_equivalence_select(records, vectors, similarity_floor=0.97)
+    assert {row["record_id"] for row in kept} == {"strong"}
+    assert [row["record_id"] for row in removed] == ["weak"]
+    assert removed[0]["semantic_selection"]["reason"] == "hybrid_grounded_equivalence"
+    assert stats["records_removed"] == 1
+    assert stats["structural_matches_below_similarity_floor"] == 0
+
+
+def test_hybrid_equivalence_keeps_structural_match_below_similarity_floor() -> None:
+    """A structural match alone must never authorize deletion.
+
+    Same coverage/task/persona/intent, but question phrasing (and thus its
+    embedding) diverges enough to fall under the floor — this must stay a
+    conservative no-op, not a deletion, so a false positive here (e.g. two
+    genuinely distinct sub-questions that happen to cite the same passage)
+    can never silently drop good data.
+    """
+    base = {
+        "task_type": "qa",
+        "task": "compliance_and_audit",
+        "persona": "auditor",
+        "question_type": "compliance_check",
+        "answer_format": "audit_check",
+        "answerable": True,
+        "reasoning_operation": "lookup",
+        "difficulty": "basic",
+        "material_focus": "evidence_requirement",
+        "evidence": [{"chunk_id": "chunk-1", "quote": "Retain the approved procurement record."}],
+        "source_chunk_ids": ["chunk-1"],
+        "claims": [{"evidence": [{"quote": "Retain the approved procurement record."}]}],
+    }
+    records = [
+        {
+            **base,
+            "record_id": "weak",
+            "question": "Which approved procurement record must be retained?",
+            "answer": "Retain the approved procurement record.",
+            "judge": {"score": 4, "preserves_qualifications": True},
+        },
+        {
+            **base,
+            "record_id": "strong",
+            "question": "What approved procurement record must the buyer keep?",
+            "answer": "The approved procurement record must be kept on file.",
+            "judge": {"score": 5, "preserves_qualifications": True},
+        },
+    ]
+    vectors = {"weak": [1.0, 0.0], "strong": [0.6, 0.8]}
+    kept, removed, stats = hybrid_equivalence_select(records, vectors, similarity_floor=0.97)
+    assert {row["record_id"] for row in kept} == {"weak", "strong"}
+    assert removed == []
+    assert stats["structural_matches_below_similarity_floor"] == 1
+
+
+def test_hybrid_equivalence_never_merges_structurally_distinct_records() -> None:
+    """High question-embedding similarity alone must never authorize deletion.
+
+    Two genuinely distinct records (different `material_focus`) with a
+    near-identical question embedding must not be merged just because the
+    cosine floor is cleared — the structural signature is the primary safety
+    boundary, the similarity floor only narrows within it.
+    """
+    base = {
+        "task_type": "qa",
+        "task": "compliance_and_audit",
+        "persona": "auditor",
+        "question_type": "compliance_check",
+        "answer_format": "audit_check",
+        "answerable": True,
+        "reasoning_operation": "lookup",
+        "difficulty": "basic",
+        "evidence": [{"chunk_id": "chunk-1", "quote": "Retain the approved procurement record."}],
+        "source_chunk_ids": ["chunk-1"],
+        "claims": [{"evidence": [{"quote": "Retain the approved procurement record."}]}],
+        "answer": "Retain the approved procurement record.",
+    }
+    records = [
+        {**base, "record_id": "one", "material_focus": "evidence_requirement", "question": "q1"},
+        {**base, "record_id": "two", "material_focus": "exception", "question": "q2"},
+    ]
+    vectors = {"one": [1.0, 0.0], "two": [1.0, 0.0]}
+    kept, removed, stats = hybrid_equivalence_select(records, vectors, similarity_floor=0.5)
+    assert {row["record_id"] for row in kept} == {"one", "two"}
+    assert removed == []
+    assert stats["multi_record_groups"] == 0
+
+
+def test_hybrid_equivalence_requires_similarity_floor(monkeypatch) -> None:
+    monkeypatch.setenv("EMBEDDING_API_KEY", "secret")
+    monkeypatch.setenv("EMBEDDING_BASE_URL", "https://example.invalid/embeddings")
+    monkeypatch.setenv("EMBEDDING_MODEL", "model")
+    config = {
+        "embeddings": {
+            "enabled": True,
+            "selection_enabled": True,
+            "selection_mode": "hybrid_equivalence",
+            "dimensions": 2,
+        }
+    }
+    try:
+        load_embedding_settings(config)
+    except RuntimeError as exc:
+        assert "similarity_threshold cosine floor" in str(exc)
+    else:
+        raise AssertionError("hybrid_equivalence unexpectedly accepted a missing floor")
+
+
+def test_run_semantic_diversity_dispatches_hybrid_equivalence_mode(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("EMBEDDING_API_KEY", "secret")
+    monkeypatch.setenv("EMBEDDING_BASE_URL", "https://example.invalid/embeddings")
+    monkeypatch.setenv("EMBEDDING_MODEL", "model")
+    base = {
+        "task_type": "qa",
+        "task": "compliance_and_audit",
+        "persona": "auditor",
+        "question_type": "compliance_check",
+        "answer_format": "audit_check",
+        "answerable": True,
+        "reasoning_operation": "lookup",
+        "difficulty": "basic",
+        "material_focus": "evidence_requirement",
+        "evidence": [{"chunk_id": "chunk-1", "quote": "Retain the approved procurement record."}],
+        "source_chunk_ids": ["chunk-1"],
+        "claims": [{"evidence": [{"quote": "Retain the approved procurement record."}]}],
+    }
+    records = [
+        {
+            **base,
+            "record_id": "weak",
+            "question": "Same question",
+            "answer": "Retain the approved procurement record.",
+            "judge": {"score": 4, "preserves_qualifications": True},
+        },
+        {
+            **base,
+            "record_id": "strong",
+            "question": "Same question",
+            "answer": "The approved procurement record must be kept on file.",
+            "judge": {"score": 5, "preserves_qualifications": True},
+        },
+    ]
+    run_kept, run_removed, _candidates, run_stats = run_semantic_diversity(
+        records,
+        {
+            "embeddings": {
+                "enabled": True,
+                "selection_enabled": True,
+                "selection_mode": "hybrid_equivalence",
+                "similarity_threshold": 0.9,
+                "dimensions": 2,
+                "batch_size": 2,
+                "calibration_neighbors_per_record": 1,
+            }
+        },
+        tmp_path,
+        _FakeClient(),
+    )
+    # Identical question wording embeds identically under `_FakeClient`, so
+    # the cosine floor is trivially cleared and the weaker paraphrase is
+    # removed in favor of the higher-scoring record — end-to-end proof the
+    # new mode is actually wired into `run_semantic_diversity`'s dispatch.
+    assert {row["record_id"] for row in run_kept} == {"strong"}
+    assert [row["record_id"] for row in run_removed] == ["weak"]
+    assert run_stats["selection"]["selection_mode"] == "hybrid_equivalence"
 
 
 def test_embedding_endpoint_rejects_url_credentials(monkeypatch) -> None:
