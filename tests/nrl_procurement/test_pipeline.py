@@ -85,8 +85,11 @@ from generate import (  # noqa: E402
 )
 from judge_calibration import calibrate_judge, load_judge_calibration  # noqa: E402
 from path_qa import (  # noqa: E402
+    PATH_QUESTION_DIFFICULTIES,
+    PATH_QUESTION_TYPES,
     SourceAblationAnswerGenerator,
     SourceAblationJudge,
+    VerifiedPathQuestionGenerator,
     ablation_trial_validation_issues,
     adjudicate_ablation_trials,
     answer_validation_issues,
@@ -1823,6 +1826,20 @@ def test_path_question_requires_standalone_dates_and_rejects_answer_leakage() ->
         leaked,
         row,
     )
+
+
+def test_path_question_prompt_lists_the_permitted_question_type_and_difficulty() -> None:
+    """The model can't hit the exact labels `question_validation_issues` checks
+    for if the prompt never tells it what they are -- confirmed live: a smoke
+    run had 15/16 path questions rejected for unsupported_question_type and
+    14/16 for unsupported_difficulty, entirely because the prompt only listed
+    the allowed task/persona values, never question_type/difficulty."""
+    row = _verified_path_question_row()
+    prompt = VerifiedPathQuestionGenerator.prompt(None, row)
+    for question_type in PATH_QUESTION_TYPES:
+        assert question_type in prompt
+    for difficulty in PATH_QUESTION_DIFFICULTIES:
+        assert difficulty in prompt
 
 
 def test_path_answer_requires_exact_evidence_from_every_input() -> None:

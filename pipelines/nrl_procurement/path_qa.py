@@ -21,6 +21,22 @@ from bespokelabs import curator
 TAXONOMY = CONFIG.get("taxonomy", {})
 WORD = re.compile(r"[a-z0-9]+", re.IGNORECASE)
 
+# Single source of truth for both the generator prompt and
+# `question_validation_issues` below -- `PathQuestionDraft.question_type`/
+# `.difficulty` are deliberately bare `str` fields, not a schema-level enum
+# (see schemas.py), so an invalid label is a diagnosable rejection rather
+# than a hard parse failure. That only works if the model is actually told
+# what the valid labels are; previously the prompt never listed them at all.
+PATH_QUESTION_TYPES = (
+    "comparison",
+    "bridge",
+    "temporal",
+    "complementary",
+    "condition_exception",
+    "cross_domain",
+)
+PATH_QUESTION_DIFFICULTIES = ("moderate", "advanced")
+
 
 def question_validation_issues(
     draft: dict[str, Any],
@@ -37,16 +53,9 @@ def question_validation_issues(
         issues.append("unsupported_task")
     if draft.get("persona") not in TAXONOMY.get("personas", []):
         issues.append("unsupported_persona")
-    if draft.get("question_type") not in {
-        "comparison",
-        "bridge",
-        "temporal",
-        "complementary",
-        "condition_exception",
-        "cross_domain",
-    }:
+    if draft.get("question_type") not in PATH_QUESTION_TYPES:
         issues.append("unsupported_question_type")
-    if draft.get("difficulty") not in {"moderate", "advanced"}:
+    if draft.get("difficulty") not in PATH_QUESTION_DIFFICULTIES:
         issues.append("unsupported_difficulty")
     expected_ids = path.get("input_claim_ids", [])
     if [item["proposition_id"] for item in propositions] != expected_ids:
@@ -604,6 +613,10 @@ SOURCE POLICY
 
 Select task from {json.dumps(TAXONOMY.get("tasks", []))}.
 Select persona from {json.dumps(TAXONOMY.get("personas", []))}.
+Select question_type from {json.dumps(list(PATH_QUESTION_TYPES))} -- describing how the
+two propositions relate (e.g. "bridge" if one supplies a fact the other's claim depends
+on, "comparison" if contrasting them, "temporal" if the relationship is time-based).
+Select difficulty from {json.dumps(list(PATH_QUESTION_DIFFICULTIES))}.
 
 VERIFIED PATH
 {json.dumps(row["path"], ensure_ascii=False)}
