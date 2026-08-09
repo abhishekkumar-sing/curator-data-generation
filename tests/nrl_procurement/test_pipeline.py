@@ -1237,7 +1237,7 @@ def test_reasoning_paths_are_connected_stable_and_source_distinct() -> None:
     assert path["operation_steps"][1]["output_claim_id"] == "prop-right"
     assert path["operation_steps"][-1]["output_claim_id"] == path["output_claim_id"]
     assert path["deterministic_checks"]["passed"] is True
-    assert all(result["complete"] is False for result in path["structural_ablation"].values())
+    assert all(result["complete"] is False for result in path["declared_requirement"].values())
 
 
 def test_reasoning_paths_reject_unrelated_and_unsafe_relationship_claims() -> None:

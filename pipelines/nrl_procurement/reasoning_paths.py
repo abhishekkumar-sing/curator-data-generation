@@ -346,11 +346,22 @@ def validate_reasoning_path(
     if path.get("operation_steps") != expected_steps:
         issues.append("invalid_operation_graph")
 
-    ablations = path.get("structural_ablation", {})
+    # `declared_requirement` states, by construction, that this 2-input path is
+    # incomplete without either input — a structural fact about the path's
+    # shape, not an empirically tested ablation. It is intentionally checked
+    # against the exact rule `build_reasoning_paths` used to construct it, so
+    # this only ever catches a malformed/tampered path, never establishes
+    # necessity on its own. The real empirical ablation test lives entirely
+    # outside this module: `path_qa.py`'s `SourceAblationAnswerGenerator` +
+    # `adjudicate_ablation_trials` + `SourceAblationJudge` actually remove each
+    # source and re-answer, and their result is later attached to the promoted
+    # record under the unrelated `"ablation"` key (see `generate.py`'s
+    # `promote_path_answer` call site) — never confuse the two.
+    declared_requirement = path.get("declared_requirement", {})
     for proposition_id in input_ids:
-        result = ablations.get(f"without:{proposition_id}", {})
+        result = declared_requirement.get(f"without:{proposition_id}", {})
         if result.get("complete") is not False or result.get("missing_inputs") != [proposition_id]:
-            issues.append("invalid_structural_ablation")
+            issues.append("invalid_declared_requirement")
     return sorted(set(issues))
 
 
@@ -436,7 +447,10 @@ def build_reasoning_paths(
                     "statement": _output_statement(path_type, left, right),
                     "derived_from": input_ids,
                 },
-                "structural_ablation": {
+                # Declared, not tested: a 2-input path is incomplete without
+                # either input by construction. This is not the empirical
+                # ablation test — see the comment on `validate_reasoning_path`.
+                "declared_requirement": {
                     f"without:{proposition_id}": {
                         "complete": False,
                         "missing_inputs": [proposition_id],
