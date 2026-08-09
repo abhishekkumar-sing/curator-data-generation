@@ -47,6 +47,7 @@ from export import (  # noqa: E402
     assign_splits,
     categorical_diversity,
     export_records,
+    question_answer_relevance_diagnostics,
     question_opener_diversity,
 )
 from generate import (  # noqa: E402
@@ -2044,6 +2045,57 @@ def test_extractive_answer_diversity_caps_final_pool_share() -> None:
     assert removed == 6
     assert report["extractive_answers"] == 2
     assert report["extractive_answer_share"] <= 0.35
+
+
+def test_question_answer_relevance_diagnostics_flags_off_topic_answer() -> None:
+    """T12: an answer with zero lexical/topical connection to its question
+    must be reported in `flagged_sample`, and reduce the aggregate stats."""
+    records = [
+        {
+            "record_id": "on-topic",
+            "task_type": "qa",
+            "answerable": True,
+            "question": "What is the tender validity period for goods procurement?",
+            "answer": "The tender validity period for goods procurement is 90 days.",
+            "evidence": [{"quote": "The tender validity period for goods procurement is 90 days."}],
+        },
+        {
+            "record_id": "off-topic",
+            "task_type": "qa",
+            "answerable": True,
+            "question": "What is the tender validity period for goods procurement?",
+            "answer": "Consortium members must jointly and severally execute the contract agreement.",
+            "evidence": [{"quote": "Consortium members must jointly and severally execute the contract agreement."}],
+        },
+    ]
+    report = question_answer_relevance_diagnostics(records, near_zero_overlap_ratio=0.05)
+    assert report["records_evaluated"] == 2
+    assert report["flagged_near_zero_overlap"] == 1
+    assert [item["record_id"] for item in report["flagged_sample"]] == ["off-topic"]
+
+
+def test_question_answer_relevance_diagnostics_ignores_unanswerable_and_empty_pool() -> None:
+    assert question_answer_relevance_diagnostics([]) == {
+        "records_evaluated": 0,
+        "near_zero_overlap_ratio_threshold": 0.05,
+        "flagged_near_zero_overlap": 0,
+        "flagged_share": 0.0,
+        "mean_overlap_ratio": 0.0,
+        "median_overlap_ratio": 0.0,
+        "flagged_sample": [],
+    }
+    unanswerable = [
+        {
+            "record_id": "unanswerable-1",
+            "task_type": "qa",
+            "answerable": False,
+            "question": "What is the tender validity period for goods procurement?",
+            "answer": "Not answerable from the provided sources.",
+            "evidence": [],
+        }
+    ]
+    report = question_answer_relevance_diagnostics(unanswerable)
+    assert report["records_evaluated"] == 0
 
 
 def test_short_precise_answers_are_not_classified_as_span_copying() -> None:
