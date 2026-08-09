@@ -123,7 +123,7 @@ from source_windows import (  # noqa: E402
     build_source_windows,
     resolve_component_references,
 )
-from validate_run import _failure_distribution, validate_run  # noqa: E402
+from validate_run import _failure_distribution, _schema_validity_rate, validate_run  # noqa: E402
 from validation import (  # noqa: E402
     SOURCE_FRAMING_PREFIX,
     answer_format_issues,
@@ -4355,6 +4355,177 @@ def test_failure_distribution_prefers_the_structured_error_category(
     distribution = _failure_distribution(tmp_path, manifest=None)
 
     assert distribution == {"other": 1, "timeout": 2, "truncation": 1}
+
+
+def _schema_validity_manifest() -> dict:
+    return {
+        "resume": {
+            "stage_events": {
+                "generation": {
+                    "status": "executed",
+                    "producer": {"stage_fingerprint": "fp-generation"},
+                },
+                "judge": {
+                    "status": "executed",
+                    "producer": {"stage_fingerprint": "fp-judge"},
+                },
+                # Not in SCHEMA_VALIDITY_STAGE_NAMES: its own schema failures
+                # must never leak into the scoped rate below, since the
+                # denominator does not include propositions' expected requests.
+                "propositions": {
+                    "status": "executed",
+                    "producer": {"stage_fingerprint": "fp-propositions"},
+                },
+            },
+        },
+        "request_coverage": {
+            "single_document": {
+                "blueprinted": {"expected_requests": 10},
+                "generated": {"expected_requests": 10},
+                "judged": {"expected_requests": 8},
+                "accepted": {"expected_requests": 10},
+            },
+            "cross_document": {
+                "generated": {"expected_requests": 0},
+                "judged": {"expected_requests": 0},
+                "accepted": {"expected_requests": 0},
+            },
+        },
+    }
+
+
+def test_schema_validity_rate_scopes_failures_to_covered_stages(
+    tmp_path: Path,
+) -> None:
+    manifest = _schema_validity_manifest()
+    generation_dir = tmp_path / "generation" / "fp-generation"
+    generation_dir.mkdir(parents=True)
+    (generation_dir / "failed_requests.jsonl").write_text(
+        "\n".join(
+            json.dumps({"model": "m", "messages": [], "error_category": category})
+            for category in ("schema_validation", "schema_validation", "timeout")
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    judge_dir = tmp_path / "judge" / "fp-judge"
+    judge_dir.mkdir(parents=True)
+    (judge_dir / "failed_requests.jsonl").write_text(
+        json.dumps({"model": "m", "messages": [], "error_category": "schema_validation"}) + "\n",
+        encoding="utf-8",
+    )
+    # This stage's schema-validation failures are real, but out of the
+    # scoped denominator's coverage and must not be counted.
+    propositions_dir = tmp_path / "propositions" / "fp-propositions"
+    propositions_dir.mkdir(parents=True)
+    (propositions_dir / "failed_requests.jsonl").write_text(
+        json.dumps({"model": "m", "messages": [], "error_category": "schema_validation"}) + "\n",
+        encoding="utf-8",
+    )
+
+    result = _schema_validity_rate(tmp_path, manifest)
+
+    assert result["computed"] is True
+    assert result["expected_requests_by_stage"] == {
+        "single_document_generation": 10,
+        "single_document_judge": 8,
+        "cross_document_generation": 0,
+        "cross_document_judge": 0,
+    }
+    assert result["expected_requests_total"] == 18
+    # 2 (generation) + 1 (judge) == 3; propositions' 1 is excluded.
+    assert result["schema_validation_failures"] == 3
+    assert result["schema_validity_rate"] == round(1 - 3 / 18, 4)
+
+
+def test_schema_validity_rate_not_computed_without_working_dir() -> None:
+    result = _schema_validity_rate(None, _schema_validity_manifest())
+    assert result["computed"] is False
+    assert result["schema_validity_rate"] is None
+    assert "working-dir" in result["reason"]
+
+
+def test_schema_validity_rate_not_computed_without_stage_events(
+    tmp_path: Path,
+) -> None:
+    manifest = _schema_validity_manifest()
+    manifest["resume"]["stage_events"] = {}
+    # Even if a failed_requests.jsonl happens to exist somewhere in
+    # working_dir, without stage_events there is no way to scope it to the
+    # covered stages, so the rate must not be fabricated from an unscoped scan.
+    stray_dir = tmp_path / "generation" / "fp-generation"
+    stray_dir.mkdir(parents=True)
+    (stray_dir / "failed_requests.jsonl").write_text(
+        json.dumps({"model": "m", "messages": [], "error_category": "schema_validation"}) + "\n",
+        encoding="utf-8",
+    )
+
+    result = _schema_validity_rate(tmp_path, manifest)
+
+    assert result["computed"] is False
+    assert result["schema_validity_rate"] is None
+    assert "stage_events" in result["reason"]
+
+
+def test_schema_validity_rate_surfaced_in_validate_run_report_without_working_dir(
+    tmp_path: Path,
+) -> None:
+    files_dir = tmp_path / "files"
+    files_dir.mkdir()
+    manifest = {
+        "run_id": "run",
+        "status": "complete",
+        "terminal_request_completeness": {"complete": True},
+        "required_task_type_counts": {"qa": 1},
+        "quality_acceptance": {"portfolio_quality_complete": True},
+        **_schema_validity_manifest(),
+    }
+    (files_dir / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    (files_dir / "leakage_audit.json").write_text(json.dumps({"passed": True}), encoding="utf-8")
+    row = json.dumps({"record_id": "r1", "split": "train"}) + "\n"
+    (files_dir / "qa_sft.jsonl").write_text(row, encoding="utf-8")
+    (files_dir / "eval.jsonl").write_text("", encoding="utf-8")
+    (files_dir / "canonical.jsonl").write_text("{}\n", encoding="utf-8")
+
+    report = validate_run(files_dir)
+
+    assert report["schema_validity"]["computed"] is False
+    assert report["schema_validity"]["reason"] == "no --working-dir supplied"
+
+
+def test_schema_validity_rate_surfaced_in_validate_run_report_with_working_dir(
+    tmp_path: Path,
+) -> None:
+    files_dir = tmp_path / "files"
+    files_dir.mkdir()
+    working_dir = tmp_path / "working"
+    manifest = {
+        "run_id": "run",
+        "status": "complete",
+        "terminal_request_completeness": {"complete": True},
+        "required_task_type_counts": {"qa": 1},
+        "quality_acceptance": {"portfolio_quality_complete": True},
+        **_schema_validity_manifest(),
+    }
+    (files_dir / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    (files_dir / "leakage_audit.json").write_text(json.dumps({"passed": True}), encoding="utf-8")
+    row = json.dumps({"record_id": "r1", "split": "train"}) + "\n"
+    (files_dir / "qa_sft.jsonl").write_text(row, encoding="utf-8")
+    (files_dir / "eval.jsonl").write_text("", encoding="utf-8")
+    (files_dir / "canonical.jsonl").write_text("{}\n", encoding="utf-8")
+    generation_dir = working_dir / "generation" / "fp-generation"
+    generation_dir.mkdir(parents=True)
+    (generation_dir / "failed_requests.jsonl").write_text(
+        json.dumps({"model": "m", "messages": [], "error_category": "schema_validation"}) + "\n",
+        encoding="utf-8",
+    )
+
+    report = validate_run(files_dir, working_dir)
+
+    assert report["schema_validity"]["computed"] is True
+    assert report["schema_validity"]["expected_requests_total"] == 18
+    assert report["schema_validity"]["schema_validation_failures"] == 1
+    assert report["schema_validity"]["schema_validity_rate"] == round(1 - 1 / 18, 4)
 
 
 def test_run_layout_and_curator_cache_are_project_local(tmp_path: Path, monkeypatch) -> None:

@@ -69,14 +69,29 @@ def _classify_failed_request_line(line: str) -> str:
 def _failure_distribution(
     working_dir: Path,
     manifest: dict[str, Any] | None = None,
+    *,
+    stage_names: set[str] | None = None,
 ) -> dict[str, int]:
-    """Count failures for the latest manifest attempt, not historical caches."""
+    """Count failures for the latest manifest attempt, not historical caches.
+
+    `stage_names`, when given, restricts counting to stages in that set
+    (matched against `manifest.resume.stage_events` keys) instead of every
+    `failed_requests.jsonl` under `working_dir`. Callers that need a failure
+    count scoped to exactly the stages a particular denominator covers (e.g.
+    `_schema_validity_rate`) pass this so the numerator and denominator stay
+    stage-consistent; the unscoped, whole-run distribution used elsewhere in
+    this report is unaffected (default `stage_names=None` preserves the
+    original full-`working_dir` behavior, including its full-rglob fallback
+    when no `stage_events` are recorded at all).
+    """
     counts: Counter[str] = Counter()
     if not working_dir.is_dir():
         return {}
     roots: list[Path] = []
     stage_events = (manifest or {}).get("resume", {}).get("stage_events", {})
     for stage, event in stage_events.items():
+        if stage_names is not None and stage not in stage_names:
+            continue
         if event.get("status") not in {"executed", "resumed_partial_cache"}:
             continue
         fingerprint = event.get("producer", {}).get("stage_fingerprint")
@@ -84,11 +99,17 @@ def _failure_distribution(
             root = working_dir / stage / fingerprint
             if root.is_dir():
                 roots.append(root)
-    paths = (
-        [path for root in roots for path in root.rglob("failed_requests.jsonl")]
-        if roots
-        else list(working_dir.rglob("failed_requests.jsonl"))
-    )
+    if roots:
+        paths = [path for root in roots for path in root.rglob("failed_requests.jsonl")]
+    elif stage_names is None:
+        paths = list(working_dir.rglob("failed_requests.jsonl"))
+    else:
+        # A stage-scoped caller must never silently widen to every stage in
+        # `working_dir` just because none of its requested stages produced a
+        # locatable root (e.g. those stages were skipped, or `stage_events`
+        # is missing/stale) -- that would mix in failures from stages the
+        # matching denominator does not cover.
+        paths = []
     for path in paths:
         for line in path.read_text(
             encoding="utf-8", errors="replace"
@@ -97,6 +118,109 @@ def _failure_distribution(
                 continue
             counts[_classify_failed_request_line(line)] += 1
     return dict(sorted(counts.items()))
+
+
+# LLM stages that already expose an unambiguous, non-duplicated
+# `request_coverage()` denominator in today's manifest (see
+# `_schema_validity_denominator`'s docstring for why the others don't).
+# Keep in sync with the stage names `generate.py` passes as the first
+# argument to `_execute_llm_stage` for these specific stages.
+SCHEMA_VALIDITY_STAGE_NAMES = {
+    "qa_blueprints",
+    "generation",
+    "judge",
+    "cross_generation",
+    "cross_judge",
+}
+_SCHEMA_VALIDITY_SCOPE_NOTE = (
+    "Covers only qa_blueprints/generation/judge/cross_generation/cross_judge "
+    "(the stages that already report a request_coverage() expected-request "
+    "denominator in the manifest today; qa_blueprints shares generation's "
+    "denominator, same planned cohort, and is not double-counted). "
+    "propositions, temporal_alignment_judge, path_questions/path_answers/"
+    "path_ablation_trials/path_ablation_judge, drafting_generation/"
+    "drafting_judge, and unanswerable_generation/answerability_judge are not "
+    "yet covered -- see audit-remediation.md task T31b-ii."
+)
+
+
+def _schema_validity_denominator(manifest: dict[str, Any]) -> dict[str, int]:
+    """Non-overlapping expected-request denominators for schema-validity scope.
+
+    `request_coverage()` tracks one planned-request cohort's survival through
+    several checkpoints of the same stage family: within
+    `request_coverage.single_document`, `blueprinted`, `generated`, and
+    `accepted` are all computed from the exact same planned-request list and
+    therefore always report an identical `expected_requests` (only
+    `materialized_requests`/`missing_request_ids` differ across them) -- the
+    same is true of `generated`/`accepted` within `request_coverage.cross_document`.
+    Summing those checkpoints as though they were independent per-call
+    denominators would multiply-count the same requests. `judged` coverage is
+    genuinely distinct (a smaller, judge-eligible subset). This returns the
+    four denominators that are non-overlapping in today's manifest;
+    `qa_blueprints` is represented by (not added on top of) the generation
+    cohort it shares a denominator with.
+    """
+    coverage = manifest.get("request_coverage", {})
+    single = coverage.get("single_document", {})
+    cross = coverage.get("cross_document", {})
+    return {
+        "single_document_generation": int(single.get("generated", {}).get("expected_requests", 0)),
+        "single_document_judge": int(single.get("judged", {}).get("expected_requests", 0)),
+        "cross_document_generation": int(cross.get("generated", {}).get("expected_requests", 0)),
+        "cross_document_judge": int(cross.get("judged", {}).get("expected_requests", 0)),
+    }
+
+
+def _schema_validity_rate(
+    working_dir: Path | None,
+    manifest: dict[str, Any],
+) -> dict[str, Any]:
+    """Report the share of scoped expected requests that did not fail schema validation.
+
+    Deliberately scoped, not pipeline-wide -- see `_SCHEMA_VALIDITY_SCOPE_NOTE`.
+    `computed` is `False` (rate left as `None`, not fabricated as 1.0) when
+    either no `--working-dir` was supplied or the manifest has no
+    `resume.stage_events` lineage to scope failure counts against, since a
+    silently-full or silently-empty stage-events lookup would make the rate
+    meaningless rather than merely incomplete.
+    """
+    denominators = _schema_validity_denominator(manifest)
+    expected_total = sum(denominators.values())
+    stage_events = manifest.get("resume", {}).get("stage_events", {})
+    if working_dir is None:
+        return {
+            "computed": False,
+            "reason": "no --working-dir supplied",
+            "expected_requests_by_stage": denominators,
+            "expected_requests_total": expected_total,
+            "schema_validation_failures": None,
+            "schema_validity_rate": None,
+            "scope": _SCHEMA_VALIDITY_SCOPE_NOTE,
+        }
+    if not stage_events:
+        return {
+            "computed": False,
+            "reason": "manifest has no resume.stage_events lineage to scope failures by stage",
+            "expected_requests_by_stage": denominators,
+            "expected_requests_total": expected_total,
+            "schema_validation_failures": None,
+            "schema_validity_rate": None,
+            "scope": _SCHEMA_VALIDITY_SCOPE_NOTE,
+        }
+    schema_failures = _failure_distribution(
+        working_dir, manifest, stage_names=SCHEMA_VALIDITY_STAGE_NAMES
+    ).get("schema_validation", 0)
+    return {
+        "computed": True,
+        "expected_requests_by_stage": denominators,
+        "expected_requests_total": expected_total,
+        "schema_validation_failures": schema_failures,
+        "schema_validity_rate": (
+            round(1 - (schema_failures / expected_total), 4) if expected_total else None
+        ),
+        "scope": _SCHEMA_VALIDITY_SCOPE_NOTE,
+    }
 
 
 def validate_run(
@@ -196,6 +320,7 @@ def validate_run(
         "stage_quality_evidence": stage_quality_evidence,
         "leakage_audit_passed": leakage.get("passed", False),
         "post_retry_model_failure_distribution": failures,
+        "schema_validity": _schema_validity_rate(working_dir, manifest),
         "human_review": {
             **review_counts,
             "minimum_accepted_required": 100,
