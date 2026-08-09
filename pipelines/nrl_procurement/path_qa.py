@@ -469,10 +469,18 @@ def promote_path_answer(row: dict[str, Any]) -> dict[str, Any]:
                 if item["proposition_id"] == evidence["proposition_id"]
             )
             source_id = source_ids[evidence["proposition_id"]]
+            # `answer_validation_issues` already requires this quote to be
+            # byte-identical to `proposition["evidence"]["quote"]` before a
+            # record can reach promotion (non_exact_answer_evidence otherwise),
+            # so the offsets `materialize_proposition` resolved at extraction
+            # time are guaranteed valid here too -- no need to re-search the
+            # source text a second time.
             located = {
                 "source_id": source_id,
                 "proposition_id": evidence["proposition_id"],
                 "quote": evidence["quote"],
+                "start_char": proposition["evidence"]["start_char"],
+                "end_char": proposition["evidence"]["end_char"],
             }
             claim_evidence.append(located)
             if located not in evidence_rows:
@@ -485,6 +493,8 @@ def promote_path_answer(row: dict[str, Any]) -> dict[str, Any]:
                     "section": proposition["evidence"].get("section", ""),
                     "chunk_id": proposition["evidence"]["chunk_id"],
                     "quote": evidence["quote"],
+                    "start_char": proposition["evidence"]["start_char"],
+                    "end_char": proposition["evidence"]["end_char"],
                 }
             )
         claims.append({"statement": claim["statement"], "evidence": claim_evidence})
@@ -505,6 +515,8 @@ def promote_path_answer(row: dict[str, Any]) -> dict[str, Any]:
                             "source_id": source_ids[proposition["proposition_id"]],
                             "proposition_id": proposition["proposition_id"],
                             "quote": proposition["evidence"]["quote"],
+                            "start_char": proposition["evidence"]["start_char"],
+                            "end_char": proposition["evidence"]["end_char"],
                         }
                     ],
                 }

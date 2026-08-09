@@ -97,6 +97,7 @@ from path_qa import (  # noqa: E402
     build_ablation_trial_inputs,
     build_missing_hop_contrasts,
     false_premise_quarantine,
+    promote_path_answer,
     question_validation_issues,
 )
 from prompt_budget import (  # noqa: E402
@@ -1873,6 +1874,47 @@ def test_path_answer_requires_exact_evidence_from_every_input() -> None:
     issues = answer_validation_issues(draft, row)
     assert "non_exact_answer_evidence" in issues
     assert "answer_does_not_use_every_path_input" in issues
+
+
+def test_promoted_path_answer_carries_citation_offsets() -> None:
+    """A promoted record's evidence/citations must include the same
+    start_char/end_char single-doc and cross-document evidence carries --
+    confirmed live: 6/73 canonical citations (all path-promoted) were
+    missing offsets entirely, because `promote_path_answer` never copied
+    them from the proposition it already has in hand, even though
+    `answer_validation_issues` guarantees the quote is byte-identical."""
+    row = _verified_path_question_row()
+    judged = {
+        **row,
+        "record_id": "nrlpath-test",
+        "path_id": row["path"]["path_id"],
+        "ablation": {},
+        "task_type": "cross_document_qa",
+        "task": "currentness",
+        "persona": "procurement_officer",
+        "question_type": "temporal",
+        "question": "How does the rule differ between the two dated states?",
+        "answer": "The two dated source states describe the evaluation rule.",
+        "claims": [
+            {
+                "statement": "The 2017 state contains the first rule.",
+                "evidence": [{"proposition_id": "prop-left", "quote": "Source evidence."}],
+            },
+            {
+                "statement": "The 2024 state contains the second rule.",
+                "evidence": [{"proposition_id": "prop-right", "quote": "Source evidence."}],
+            },
+        ],
+    }
+    promoted = promote_path_answer(judged)
+    assert promoted["evidence"], "expected at least one evidence row"
+    for item in promoted["evidence"]:
+        assert item["start_char"] == 0
+        assert item["end_char"] == 16
+    assert promoted["citations"], "expected at least one citation"
+    for citation in promoted["citations"]:
+        assert citation["start_char"] == 0
+        assert citation["end_char"] == 16
 
 
 def test_missing_hop_and_false_premise_lineage_are_separate() -> None:
