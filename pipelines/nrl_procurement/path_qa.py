@@ -65,11 +65,11 @@ def question_validation_issues(
     manuals = {item["authority"]["manual_title"].casefold() for item in propositions}
     if len(authorities) > 1 and not all(authority in lowered for authority in authorities):
         issues.append("missing_standalone_authority")
-    if path["relationship_type"] == "temporal_transition":
+    if path["relationship_type"] in ("supersedes", "changes_threshold"):
         dates = {item["authority"]["as_of_date"].casefold() for item in propositions}
         if not all(date in lowered for date in dates):
             issues.append("missing_standalone_date")
-    if path["relationship_type"] == "cross_domain_comparison" and not all(any(token in lowered for token in WORD.findall(manual)) for manual in manuals):
+    if path["relationship_type"] == "organization_deviation" and not all(any(token in lowered for token in WORD.findall(manual)) for manual in manuals):
         issues.append("missing_standalone_domain")
     output_statement = path["output_claim"]["statement"].casefold()
     if output_statement and output_statement in lowered:
@@ -521,14 +521,12 @@ def promote_path_answer(row: dict[str, Any]) -> dict[str, Any]:
                     ],
                 }
             )
+    # PathType and RELATIONSHIPS share vocabulary now; only bridge/
+    # exception_condition_interaction still collapse to complementary_procedure.
     relationship = {
-        "temporal_transition": "same_authority_temporal",
-        "comparison": "government_company_comparison",
-        "cross_domain_comparison": "company_cross_domain",
         "bridge": "complementary_procedure",
-        "complementary_procedure": "complementary_procedure",
         "exception_condition_interaction": "complementary_procedure",
-    }.get(row["path"]["relationship_type"], "complementary_procedure")
+    }.get(row["path"]["relationship_type"], row["path"]["relationship_type"])
     promoted = {
         "record_id": row["record_id"],
         "task_type": row["task_type"],
