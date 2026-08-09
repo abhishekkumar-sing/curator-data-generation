@@ -44,6 +44,28 @@ def _jsonl_rows(path: Path) -> list[dict[str, Any]]:
     ]
 
 
+def _classify_failed_request_line(line: str) -> str:
+    """Classify one `failed_requests.jsonl` row.
+
+    Curator now tags every failed row with a structured ``error_category``
+    (timeout/truncation/schema_validation/rate_limit/other/unknown) derived
+    from the actual terminal exception, and that is always preferred. The
+    regex heuristic below only remains as a fallback for `failed_requests.jsonl`
+    files captured before that field existed: those older rows are the raw
+    outgoing request payload (prompt text) with no error information in them
+    at all, so the regex match was frequently just matching prompt wording and
+    should not be trusted over a real structured category when one exists.
+    """
+    try:
+        row = json.loads(line)
+    except json.JSONDecodeError:
+        row = None
+    if isinstance(row, dict) and row.get("error_category"):
+        return str(row["error_category"])
+    matched = [name for name, pattern in FAILURE_PATTERNS.items() if pattern.search(line)]
+    return matched[0] if matched else "other"
+
+
 def _failure_distribution(
     working_dir: Path,
     manifest: dict[str, Any] | None = None,
@@ -73,12 +95,7 @@ def _failure_distribution(
         ).splitlines():
             if not line.strip():
                 continue
-            matched = [
-                name
-                for name, pattern in FAILURE_PATTERNS.items()
-                if pattern.search(line)
-            ]
-            counts[matched[0] if matched else "other"] += 1
+            counts[_classify_failed_request_line(line)] += 1
     return dict(sorted(counts.items()))
 
 
