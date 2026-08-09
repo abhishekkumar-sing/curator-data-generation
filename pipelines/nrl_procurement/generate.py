@@ -2065,6 +2065,12 @@ def _execute_cross_pass(
     judge_rescued = 0
     judge_prompt_rejected: list[dict[str, Any]] = []
     best_of_rejected: list[dict[str, Any]] = []
+    # A pass whose generated candidates all fail deterministic checks or dedupe
+    # away leaves `generated` empty; judging is then correctly skipped below
+    # (nothing to judge), but without this default `accepted` was never
+    # assigned on that path -- crashed live on cross_generation_pass_005 with
+    # UnboundLocalError while building this function's return dict.
+    accepted: list[dict[str, Any]] = []
     if args.skip_judge:
         accepted = generated
     elif generated:
