@@ -300,6 +300,21 @@ judge_calibration:
 # questions are removed only when their grounded target, evidence, sources, and
 # coverage contract are identical. A broader cosine-threshold mode still
 # requires reviewed development and holdout calibration.
+#
+# `verified_equivalence`'s answer-text-exact-match requirement means it will
+# almost never catch two independently-generated paraphrases of the same
+# fact (audit T10 / Finding S1). `hybrid_equivalence` (implemented, not yet
+# the default here) closes that gap: it drops the literal-answer-text
+# requirement from the structural signature and instead requires a cosine
+# floor (`similarity_threshold`) on top of the same strict structural match
+# before deleting anything. That floor is still an uncalibrated, defensible
+# default rather than a measured operating point — no human-labeled
+# duplicate/related/distinct calibration set exists yet for this deployment
+# (see the still-open "hand-label a calibration set" item in TASKS.md).
+# Switch `selection_mode` to `hybrid_equivalence` (with an explicit
+# `similarity_threshold` floor) once that calibration work lands, or after
+# deliberately reviewing a real batch of `semantic_calibration.jsonl`
+# nearest-neighbor pairs and choosing a floor with evidence behind it.
 embeddings:
   enabled: true
   api_key_env: EMBEDDING_API_KEY
