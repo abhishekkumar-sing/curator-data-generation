@@ -241,6 +241,7 @@ def test_singular_judge_wrong_id_reuses_fail_closed_quarantine() -> None:
                 unsupported_without_source_ids=["source_a", "source_b"],
                 connected_reasoning=True,
                 relationship_correct=True,
+                relationship_basis_correct=True,
             ),
         }
     )
@@ -268,6 +269,7 @@ def test_cross_judge_quarantines_entire_batch_when_model_duplicates_an_id() -> N
                         unsupported_without_source_ids=["source_a", "source_b"],
                         connected_reasoning=True,
                         relationship_correct=True,
+                        relationship_basis_correct=True,
                     ),
                 },
                 {
@@ -277,6 +279,7 @@ def test_cross_judge_quarantines_entire_batch_when_model_duplicates_an_id() -> N
                         unsupported_without_source_ids=["source_a", "source_b"],
                         connected_reasoning=True,
                         relationship_correct=True,
+                        relationship_basis_correct=True,
                     ),
                 },
             ]
@@ -2902,6 +2905,56 @@ def test_change_claiming_relationship_rejects_editorial_only_difference() -> Non
     ]
 
 
+def test_generator_rejects_candidate_missing_relationship_basis() -> None:
+    passage_a = "The 2022 goods manual requires a bank guarantee for performance security."
+    passage_b = "The NRL goods manual requires an insurance bond for performance security."
+    cross_row = {
+        "source_bundle_id": "bundle",
+        "pair_id": "pair",
+        "relationship_type": "organization_deviation",
+        "source_documents": [
+            {"source_id": "source_a", **_cross_row("goods_2022", "a-1", passage_a)},
+            {"source_id": "source_b", **_cross_row("nrl_goods_rev1", "b-1", passage_b)},
+        ],
+        "planned_request_id": "cross-request",
+        "planned_task_type": "cross_document_qa",
+        "planned_answerable": True,
+    }
+    cross_response = CrossCandidateBatch.model_validate(
+        {
+            "examples": [
+                {
+                    "task_type": "cross_document_qa",
+                    "task": "security_and_guarantees",
+                    "persona": "procurement_officer",
+                    "question_type": "comparison",
+                    "question": "How does NRL's performance security instrument differ from the government manual?",
+                    "answer": "The government manual accepts a bank guarantee, while NRL requires an insurance bond.",
+                    "answerable": True,
+                    "claims": [
+                        {
+                            "statement": "Government guidance accepts a bank guarantee for performance security.",
+                            "evidence": [{"source_id": "source_a", "quote": passage_a}],
+                        },
+                        {
+                            "statement": "NRL requires an insurance bond for performance security.",
+                            "evidence": [{"source_id": "source_b", "quote": passage_b}],
+                        },
+                    ],
+                    "reasoning_steps": [],
+                }
+            ]
+        }
+    )
+    cross = CrossDocumentGenerator.parse(
+        SimpleNamespace(model_name="generator"),
+        cross_row,
+        cross_response,
+    )
+    assert cross[0]["deterministic_checks"]["passed"] is False
+    assert "missing_relationship_basis" in cross[0]["deterministic_checks"]["issues"]
+
+
 def test_validate_pairs_rejects_supersedes_without_differing_revision_date() -> None:
     quote = "The bidder shall submit bid security with every tender."
     rows = [
@@ -3015,6 +3068,7 @@ def test_deterministic_rejections_are_materialized_for_audit() -> None:
                     "question": "How do the two manuals state the retention rule?",
                     "answer": "Both require retention for 5 years.",
                     "answerable": True,
+                    "relationship_basis": "Both manuals independently state the same 5-year retention rule.",
                     "claims": [
                         {
                             "statement": "Both require retention.",

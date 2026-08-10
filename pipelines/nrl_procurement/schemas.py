@@ -571,6 +571,9 @@ class CrossCandidate(AuditedListModel):
     question: str = Field(min_length=12)
     answer: str = Field(min_length=1)
     answerable: bool = True
+    # Left permissive (not min_length-enforced) so a missing/thin value fails
+    # closed as a named deterministic issue instead of losing the whole request.
+    relationship_basis: str = ""
     claims: list[CrossClaimDraft] = Field(min_length=1)
     reasoning_steps: list[CrossReasoningStepDraft] = Field(default_factory=list)
     json_list_fields = ("claims", "reasoning_steps")
@@ -596,6 +599,7 @@ class CrossJudgeDecision(JudgeDecision):
     unsupported_without_source_ids: list[str]
     connected_reasoning: bool
     relationship_correct: bool
+    relationship_basis_correct: bool
     json_list_fields = ("answer_quotes", "issues", "unsupported_without_source_ids")
 
 
