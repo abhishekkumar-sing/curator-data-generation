@@ -2859,6 +2859,101 @@ def test_cross_document_bundle_and_source_attribution() -> None:
     assert "misattributed_or_non_verbatim_evidence" in validate_cross_record(record, bundle["source_documents"])
 
 
+def test_change_claiming_relationship_rejects_editorial_only_difference() -> None:
+    quote_a = "The bidder shall follow the suo motto revision process."
+    quote_b = "The bidder shall follow the suo moto revision process."
+    rows = [
+        _cross_row("left_manual", "left-1", quote_a),
+        _cross_row("right_manual", "right-1", quote_b),
+    ]
+    config = {
+        "minimum_similarity": 1,
+        "minimum_shared_terms": 2,
+        "max_bundles_per_pair": 2,
+        "pairs": [
+            {
+                "pair_id": "pair",
+                "left_manual": "left_manual",
+                "right_manual": "right_manual",
+                "relationship_type": "complementary_procedure",
+            }
+        ],
+    }
+    bundle = build_bundles(rows, config)[0]
+    record = {
+        "task_type": "cross_document_qa",
+        "claims": [
+            {
+                "statement": "The two manuals phrase the revision process differently.",
+                "evidence": [
+                    {"source_id": "source_a", "quote": quote_a},
+                    {"source_id": "source_b", "quote": quote_b},
+                ],
+            }
+        ],
+        "answer": "Both manuals require a suo motu revision process.",
+        "answerable": True,
+        "reasoning_steps": [],
+    }
+    issues = validate_cross_record(record, bundle["source_documents"], "organization_deviation")
+    assert "claim_editorial_only_difference" in issues
+    assert validate_cross_record(record, bundle["source_documents"], "complementary_procedure") == [
+        issue for issue in issues if issue != "claim_editorial_only_difference"
+    ]
+
+
+def test_validate_pairs_rejects_supersedes_without_differing_revision_date() -> None:
+    quote = "The bidder shall submit bid security with every tender."
+    rows = [
+        _cross_row("left_manual", "left-1", quote),
+        _cross_row("right_manual", "right-1", quote),
+    ]
+    config = {
+        "minimum_similarity": 1,
+        "minimum_shared_terms": 2,
+        "pairs": [
+            {
+                "pair_id": "pair",
+                "left_manual": "left_manual",
+                "right_manual": "right_manual",
+                "relationship_type": "supersedes",
+            }
+        ],
+    }
+    try:
+        build_bundles(rows, config)
+    except ValueError as exc:
+        assert "differing revision dates" in str(exc)
+    else:
+        raise AssertionError("supersedes must require differing revision dates")
+
+
+def test_validate_pairs_rejects_organization_deviation_with_same_issuer() -> None:
+    quote = "The bidder shall submit bid security with every tender."
+    rows = [
+        _cross_row("left_manual", "left-1", quote),
+        _cross_row("right_manual", "right-1", quote),
+    ]
+    config = {
+        "minimum_similarity": 1,
+        "minimum_shared_terms": 2,
+        "pairs": [
+            {
+                "pair_id": "pair",
+                "left_manual": "left_manual",
+                "right_manual": "right_manual",
+                "relationship_type": "organization_deviation",
+            }
+        ],
+    }
+    try:
+        build_bundles(rows, config)
+    except ValueError as exc:
+        assert "differing issuing organizations" in str(exc)
+    else:
+        raise AssertionError("organization_deviation must require differing issuers")
+
+
 def test_deterministic_rejections_are_materialized_for_audit() -> None:
     passage = "The buyer shall retain the record for 5 years."
     single_row = {
@@ -2900,7 +2995,7 @@ def test_deterministic_rejections_are_materialized_for_audit() -> None:
     cross_row = {
         "source_bundle_id": "bundle",
         "pair_id": "pair",
-        "relationship_type": "organization_deviation",
+        "relationship_type": "complementary_procedure",
         "source_documents": [
             {"source_id": "source_a", **_cross_row("a", "a-1", passage)},
             {"source_id": "source_b", **_cross_row("b", "b-1", passage)},
