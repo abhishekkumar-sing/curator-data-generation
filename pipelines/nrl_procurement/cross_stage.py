@@ -122,9 +122,14 @@ OUTPUT CONTRACT
 Return up to {int(CONFIG.get("cross_document", {}).get("best_of_n", 1))} distinct
 CrossCandidateBatch.examples under the enforced response schema. Every example
 contains task_type, task, persona, question_type, question, answer, answerable,
-claims, and reasoning_steps. Each claim contains one material statement and one or more evidence
-items with source_id and a verbatim quote. Each rationale step contains an allowed
-operation, a concise statement, and its exact source-specific evidence.
+relationship_basis, claims, and reasoning_steps. Each claim contains one material
+statement and one or more evidence items with source_id and a verbatim quote. Each
+rationale step contains an allowed operation, a concise statement, and its exact
+source-specific evidence.
+- relationship_basis is one to two sentences, grounded in the same quoted evidence as
+  the claims, stating concretely what the earlier/government source requires, what the
+  later/NRL source requires, and how that difference (or continuity) matches
+  relationship_type -- not a restatement of the label itself.
 
 RELATIONSHIP METADATA
 relationship_type: {row["relationship_type"]}
@@ -143,7 +148,8 @@ question; return zero examples when no such question remains.
 FINAL CHECK
 For every answerable record, verify exact quote attribution, support for every claim,
 use of both sources, failure of the complete answer under either-source ablation,
-preserved authority and qualifications, and task_type-consistent rationale structure.
+preserved authority and qualifications, task_type-consistent rationale structure, and
+a grounded, non-generic relationship_basis.
 """
 
     def parse(self, row: dict, response: CrossCandidateBatch) -> list[dict]:
@@ -798,6 +804,10 @@ EVALUATION CONTRACT
   status, and, for supersedes/amends/changes_threshold/changes_scope/adds_requirement/
   removes_requirement/organization_deviation, the two sources differ in substance
   rather than only in spelling, spacing, or punctuation of the same rule.
+- relationship_basis_correct=true only when relationship_basis states, and the two
+  sources actually support, what the earlier/government source requires and what the
+  later/NRL source requires -- not a generic restatement of relationship_type, and not
+  a claim of equivalence/adoption/supersession the sources do not establish.
 - Independently select recommended_task from
   {json.dumps(TAXONOMY.get("tasks", []))}; it must name the underlying procurement
   work rather than the proposed label or QA/CoT format.
@@ -880,6 +890,7 @@ and consistency among booleans, ablation list, score, and issues.
                 "full_context_supported",
                 "connected_reasoning",
                 "relationship_correct",
+                "relationship_basis_correct",
                 "question_natural",
                 "persona_relevant",
             )
@@ -932,6 +943,7 @@ def cross_judge_rows(records: list[dict[str, Any]], batch_size: int) -> list[dic
                     "task",
                     "persona",
                     "relationship_type",
+                    "relationship_basis",
                     "question",
                     "answer",
                     "answerable",

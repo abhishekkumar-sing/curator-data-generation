@@ -938,6 +938,14 @@ def validate_cross_record(
                 reasons.append("claim_editorial_only_difference")
     claim_support = " ".join(evidence["quote"] for claim in record.get("claims", []) for evidence in claim.get("evidence", []))
     reasons.extend(semantic_support_issues(record["answer"], claim_support))
+    # A declared relationship_type needs its own stated basis -- what the sources
+    # actually show, not an inherited pair label -- and that basis must be grounded.
+    if relationship_type:
+        basis = str(record.get("relationship_basis", "")).strip()
+        if len(basis) < 20:
+            reasons.append("missing_relationship_basis")
+        else:
+            reasons.extend(f"relationship_basis_{issue}" for issue in semantic_support_issues(basis, claim_support))
     # Manual identity and version dates are valid support for attribution in the
     # answer even when they are not repeated inside the quoted policy sentence.
     for number in _unsupported_answer_quantities(
