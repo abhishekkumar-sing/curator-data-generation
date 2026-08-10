@@ -54,9 +54,21 @@ def _similarity(
     return 100.0 * (0.65 * content_overlap + 0.35 * section_overlap), shared
 
 
-def validate_pairs(config: dict[str, Any], known_manuals: set[str]) -> list[dict[str, str]]:
+# These relationship types name their two manuals in one direction only
+# (an earlier state vs a later one, or a government vs an NRL policy) --
+# a pair-level metadata check is the cheapest way to catch a mislabeled
+# pair before it stamps a false relationship onto every one of its bundles.
+_DATED_CHANGE_RELATIONSHIPS = {"supersedes", "changes_threshold"}
+
+
+def validate_pairs(
+    config: dict[str, Any],
+    known_manuals: set[str],
+    manual_metadata: dict[str, dict[str, str]] | None = None,
+) -> list[dict[str, str]]:
     """Validate configured manual relationships before candidate construction."""
     pairs = config.get("pairs", [])
+    metadata = manual_metadata or {}
     seen: set[str] = set()
     normalized = []
     for raw in pairs:
@@ -70,6 +82,13 @@ def validate_pairs(config: dict[str, Any], known_manuals: set[str]) -> list[dict
             raise ValueError(f"Cross-document pair {pair['pair_id']} has unknown manuals: {sorted(missing)}")
         if pair["relationship_type"] not in RELATIONSHIPS:
             raise ValueError(f"Unsupported cross-document relationship: {pair['relationship_type']}")
+        left_meta, right_meta = metadata.get(pair["left_manual"]), metadata.get(pair["right_manual"])
+        if pair["relationship_type"] in _DATED_CHANGE_RELATIONSHIPS and left_meta and right_meta:
+            if left_meta["revision_date"] == right_meta["revision_date"]:
+                raise ValueError(f"Cross-document pair {pair['pair_id']} needs differing revision dates for {pair['relationship_type']}")
+        if pair["relationship_type"] == "organization_deviation" and left_meta and right_meta:
+            if left_meta["issuing_organization"] == right_meta["issuing_organization"]:
+                raise ValueError(f"Cross-document pair {pair['pair_id']} needs differing issuing organizations for organization_deviation")
         seen.add(pair["pair_id"])
         normalized.append(pair)
     return normalized
@@ -105,7 +124,14 @@ def build_bundles(rows: list[dict[str, Any]], config: dict[str, Any]) -> list[di
         )
         for row in rows
     }
-    pairs = validate_pairs(config, set(by_manual))
+    manual_metadata = {
+        manual_id: {
+            "revision_date": manual_rows[0]["revision_date"],
+            "issuing_organization": manual_rows[0]["issuing_organization"],
+        }
+        for manual_id, manual_rows in by_manual.items()
+    }
+    pairs = validate_pairs(config, set(by_manual), manual_metadata)
     minimum = float(config.get("minimum_similarity", 18))
     minimum_shared = int(config.get("minimum_shared_terms", 3))
     maximum = int(config.get("max_bundles_per_pair", 100))

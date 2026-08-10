@@ -84,6 +84,9 @@ SOURCE POLICY
 - For organization_deviation, only proceed if the sources establish NRL adopting,
   specializing, or authorizedly deviating from government guidance -- not mere topical
   overlap between an NRL and a government manual.
+- A claim needs two source-specific quotes that differ in substance, not just spelling,
+  spacing, or punctuation (e.g. "suo motto" vs "suo moto" is the same rule, not a change).
+  Return zero examples if the only difference you can find is cosmetic.
 
 CONSTRAINTS
 - Select task from {json.dumps(TAXONOMY.get("tasks", []))}. It describes the
@@ -189,7 +192,7 @@ preserved authority and qualifications, and task_type-consistent rationale struc
             reasons.extend(
                 question_style_issues(draft["question"], draft["persona"])
             )
-            reasons.extend(validate_cross_record(draft, row["source_documents"]))
+            reasons.extend(validate_cross_record(draft, row["source_documents"], row["relationship_type"]))
             reasons = sorted(set(reasons))
             claims, flat_evidence = [], {}
             for index, claim in enumerate(draft.pop("claims"), 1):
@@ -792,7 +795,9 @@ EVALUATION CONTRACT
   empty, but its claims must still form a connected two-source synthesis.
 - relationship_correct=true only when the question and answer respect the declared
   relationship_type without inventing equivalence, adoption, precedence, or temporal
-  status.
+  status, and, for supersedes/amends/changes_threshold/changes_scope/adds_requirement/
+  removes_requirement/organization_deviation, the two sources differ in substance
+  rather than only in spelling, spacing, or punctuation of the same rule.
 - Independently select recommended_task from
   {json.dumps(TAXONOMY.get("tasks", []))}; it must name the underlying procurement
   work rather than the proposed label or QA/CoT format.

@@ -8,7 +8,25 @@ from collections import Counter
 from collections.abc import Iterable
 from typing import Any
 
-from rapidfuzz.fuzz import token_set_ratio
+from rapidfuzz.fuzz import ratio, token_set_ratio
+
+# Relationship types that claim a genuine content change, not just a topical
+# overlap; a claim citing near-identical text from both sources under one of
+# these is a spelling/formatting variant, not the change it claims to be.
+_CHANGE_CLAIMING_RELATIONSHIPS = {
+    "supersedes", "amends", "changes_threshold", "changes_scope",
+    "adds_requirement", "removes_requirement", "organization_deviation",
+}
+_EDITORIAL_SIMILARITY_FLOOR = 92.0
+
+
+def _is_editorial_only_difference(quote_a: str, quote_b: str) -> bool:
+    """Flag two cross-source quotes whose only difference is spelling or spacing."""
+    normalized_a = " ".join(quote_a.casefold().split())
+    normalized_b = " ".join(quote_b.casefold().split())
+    if not normalized_a or not normalized_b:
+        return False
+    return ratio(normalized_a, normalized_b) >= _EDITORIAL_SIMILARITY_FLOOR
 
 
 def judge_batch_identity_issues(
@@ -860,7 +878,11 @@ def enforce_category_diversity(
     return kept, len(records) - len(kept)
 
 
-def validate_cross_record(record: dict[str, Any], documents: list[dict[str, Any]]) -> list[str]:
+def validate_cross_record(
+    record: dict[str, Any],
+    documents: list[dict[str, Any]],
+    relationship_type: str = "",
+) -> list[str]:
     """Check source-specific evidence and connected two-document structure."""
     reasons: list[str] = []
     known = {document["source_id"]: document["passage"] for document in documents}
@@ -904,6 +926,16 @@ def validate_cross_record(record: dict[str, Any], documents: list[dict[str, Any]
             f"{claim_support}\n{metadata_support}",
         ):
             reasons.append(f"claim_unsupported_number:{number}")
+        if relationship_type in _CHANGE_CLAIMING_RELATIONSHIPS:
+            quotes_by_source: dict[str, list[str]] = {}
+            for evidence in claim.get("evidence", []):
+                quotes_by_source.setdefault(evidence.get("source_id", ""), []).append(evidence.get("quote", ""))
+            if any(
+                _is_editorial_only_difference(quote_a, quote_b)
+                for quote_a in quotes_by_source.get("source_a", [])
+                for quote_b in quotes_by_source.get("source_b", [])
+            ):
+                reasons.append("claim_editorial_only_difference")
     claim_support = " ".join(evidence["quote"] for claim in record.get("claims", []) for evidence in claim.get("evidence", []))
     reasons.extend(semantic_support_issues(record["answer"], claim_support))
     # Manual identity and version dates are valid support for attribution in the
